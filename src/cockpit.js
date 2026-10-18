@@ -1,3 +1,4 @@
+import { sharingPresentation } from './view/sharing-invitation.js';
 import {
   hostedReleaseDistance,
   hostedReleaseInfo,
@@ -21,6 +22,7 @@ import {
   hostedState,
 } from './view/hosted.js';
 import { staleChip } from './view/stale.js';
+import { roadmapBlock } from './view/roadmap-block.js';
 import { applyStateDelta } from './api-http.js';
 
 /** The CLI's default phrases, ordered by depth for the existing prose inventory guard. */
@@ -101,6 +103,7 @@ export function cockpitPage(key = '', { snapshot = false, readOnly = false, requ
   <div class="side-body" id="side-body">
     <div class="label">Projects</div>
     <nav id="proj-list" aria-label="Projects on this machine"></nav>
+    <button class="share-again" id="share-again" type="button" hidden>Link boards to pullboard.dev&hellip;</button>
     <section class="products" id="products" aria-label="Products" hidden><div class="label">Products</div><div id="prod-list"></div></section>
   </div>
 </aside>
@@ -123,7 +126,7 @@ export function cockpitPage(key = '', { snapshot = false, readOnly = false, requ
   </section>
   <p class="empty" id="project-loading" role="status" hidden>Loading project…</p>
   ${hostedMarkup('http://127.0.0.1:4890', { looking: Boolean(hostedLocal) && !snapshot, signIn })}
-  <p class="side-hint" id="share-note" hidden>See these boards from any device: link them to pullboard.dev <button class="ghost" id="share-start" type="button">Sign in with GitHub</button></p>
+  <div class="share-card" id="share-note" hidden><span class="share-ic" aria-hidden="true"><svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="13" height="10" rx="1.5"/><path d="M7 18h5M9.5 14v4"/><rect x="17" y="9" width="5" height="10" rx="1"/></svg></span><span class="share-txt"><b>Open your boards on any device</b><span>Sign in to use pullboard.dev while on the go.</span> <a href="https://pullboard.dev/relay/" target="_blank" rel="noopener">How the relay works</a></span><button class="ob-gh share-gh" id="share-start" type="button"><svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>Sign in with GitHub</button><button class="share-x" id="share-hide" type="button" aria-label="Hide this; bring it back from the projects list" title="Hide this; bring it back from the projects list">&times;</button></div>
   <section class="card-panel" id="share-panel" aria-label="Link these boards" hidden>
     <p id="share-status" role="status" aria-live="polite"></p>
     <button class="ghost" id="share-pair" type="button" hidden>Pair a device</button>
@@ -604,6 +607,8 @@ const STATES = { building: ['building', 'busy'], verify: ['to verify', 'warn'], 
 const chip = (s) => '<span class="chip ' + STATES[s][1] + '">' + STATES[s][0] + '</span>';
 // A verified item's stale mark from src/view/stale.js (#726): Core publishes verdictState and the page only draws it.
 const staleChip = (${staleChip.toString()});
+// A roadmap item's blocker dot and unfolded reason from src/view/roadmap-block.js (#605), read from the summaries held.
+const roadmapBlock = (${roadmapBlock.toString()});
 /** Parse the bounded reference syntax before requesting additional committed line windows. */
 function codeReferenceParts(ref) {
   const match = /^(.+):(\\d+)(?:-(\\d+))?@([0-9a-f]{7,40})$/.exec(String(ref));
@@ -1105,34 +1110,7 @@ let sharingReady = null;
 let sharingTask = Promise.resolve();
 let sharing = { state: 'idle', intentId: null, popup: null, timer: null, closing: false, boards: [] };
 
-/** Show the opt-in once after a real local read; quiet boards do not acquire another polling loop. */
-async function sharingInvitation() {
-  if (!$('share-note') || snapshot || (hosted.local ? !localSession : pageReadOnly || configuredTransportModule)) return;
-  try { $('share-note').hidden = !(await sharingApi()).available; }
-  catch { $('share-note').hidden = true; }
-}
-
-/** Render names and reasons as text, without exposing machine paths or private sign-in material. */
-function sharingProgress(status) {
-  sharing.state = status.state;
-  sharing.boards = status.boards || [];
-  const linked = sharing.boards.filter(board => board.outcome === 'linked');
-  if (linked.length) $('share-note').hidden = true;
-  const lines = sharing.boards.map(board => board.outcome === 'linked' ? 'Linked ' + board.name + '.'
-    : 'Did not link ' + board.name + ': ' + board.reason);
-  if (status.error) lines.push(status.error.message);
-  else if (['cancelled', 'declined', 'expired'].includes(status.state)) lines.push('No boards were linked. You can sign in again whenever you want.');
-  else if (status.state === 'pairing') lines.push('Your boards are linked. Pair a device to open them there, or close this step; the links stay in place.');
-  else if (status.state === 'pairing-stopped') lines.push('Phone pairing stopped. Your boards remain linked.');
-  else if (status.state === 'linking') lines.push('Linking every registered board…');
-  else if (status.state === 'done' && !linked.length && !lines.length) lines.push('No boards were linked.');
-  if (lines.length) $('share-status').textContent = lines.join('\\n');
-  $('share-pair').hidden = status.state !== 'pairing';
-  $('share-close').textContent = linked.length ? 'Close' : 'Cancel sign-in';
-  if (status.state !== 'waiting') { sharing.popup?.close(); sharing.popup = null; }
-}
-
-/** Stop the one operation and await core cleanup; a linking batch is never described as rolled back. */
+${sharingPresentation()}/** Stop the one operation and await core cleanup; a linking batch is never described as rolled back. */
 async function closeSharing() {
   clearTimeout(sharing.timer);
   sharing.closing = true;
@@ -1401,10 +1379,12 @@ function boardSummary(board, state) {
     pending: calls('pending'),
     drafts: calls('draft') + calls('rigor-draft'),
     holds: calls('hold'),
+    laneHolds: state.holds,
     decisions: calls('decision'),
     // What each item's state reads from, so another repo's roadmap can show it as this board's
     // Items tab does, sent back included, and open it here.
-    items: state.items.map((item) => ({ id: item.id, title: item.title, status: item.status, stage: item.stage ?? pipelineStage(item), verdict: item.verdict && { decision: item.verdict.decision } })),
+    items: state.items.map((item) => listFields(item)),
+    agents: state.agents, events: state.events, milestones: state.milestones,
   };
 }
 
@@ -1585,9 +1565,9 @@ function movedSince(project, id, cursor) {
 }
 
 /** Load one opened item's omitted fields, retaining them only while its summary and event cursor stay current. */
-function detailOf(project, item, ask) {
+function detailOf(project, item, ask, root = view.root) {
   if (Array.isArray(item.history)) return { item };
-  const root = view.root, key = root + '\\n' + item.id, summary = JSON.stringify(item);
+  const drawnRoot = view.root, key = root + '\\n' + item.id, summary = JSON.stringify(item);
   const kept = itemDetails.get(key);
   /** Keep the prior detail visible during a refresh, or return the short initial loading state. */
   const waiting = (entry) => (entry?.shown ? { item: { ...item, ...entry.shown } } : { loading: true });
@@ -1601,7 +1581,7 @@ function detailOf(project, item, ask) {
   detailRead = api(boardPath(root) + '/items/' + encodeURIComponent(String(item.id))).then((reply) => { entry.detail = reply.item; },
     (error) => { entry.error = String(error.message || error); }).finally(() => {
     entry.loading = false;
-    if (view.root === root && view.item === item.id) render();
+    if (view.root === drawnRoot && ((root === view.root && view.item === item.id) || view.tab === 'roadmap')) render();
   });
   return waiting(entry);
 }
@@ -2108,18 +2088,19 @@ function renderSide() {
   /** Escape plain text while preserving safe item and code-preview links.
    * @param {string} text
    * @param {Map<string, string>} titles
-   * @param {boolean} allowLinks
+   * @param {boolean|'in-place'} allowLinks
    * @returns {string}
    */
   function linked(text, titles, allowLinks = true, root = view.root) { return String(text ?? '').split(/(#\\d+|(?<![^\\s([{"'\`])[^\\s:@()[\\]{}"'\`]+:\\d+(?:-\\d+)?@[0-9a-f]{7,40}(?![^\\s)\\]}"'\`.,;:!?]))/).map((part, n, parts) => {
-    if (n % 2 && part[0] !== '#') return allowLinks ? codeRef(part, parts.slice(0, n).join('').split('\\n').pop().slice(-2000)) : codeChip(part);
+    if (n % 2 && part[0] !== '#') return allowLinks === true ? codeRef(part, parts.slice(0, n).join('').split('\\n').pop().slice(-2000)) : codeChip(part);
     const id = /^#\\d+$/.test(part) ? String(Number(part.slice(1))) : '';
+    if (id && allowLinks === 'in-place') return '<span class="ref"' + (titles.has(id) ? ' title="' + esc(titles.get(id)) + '"' : '') + '>' + esc(part) + '</span>';
     return id && allowLinks ? '<a class="ref" href="' + esc(itemAddress(id, root)) + '" data-go="item:' + id + '"' + (root === view.root ? '' : ' data-board="' + esc(root) + '"') + (titles.has(id) ? ' title="' + esc(titles.get(id)) + '"' : '') + '>' + esc(part) + '</a>' : esc(part);
   }).join(''); }
   /** Format inline code and recognized command tokens without interpreting markup.
    * @param {string} text
    * @param {Map<string, string>} titles
-   * @param {boolean} allowLinks
+   * @param {boolean|'in-place'} allowLinks
    * @returns {string}
    */
   function inline(text, titles, allowLinks = true, root = view.root) { return String(text ?? '').split(/(\`[^\`]*\`|(?:[^\\s:@()[\\]{}"'\`]+)?:\\d+(?:-\\d+)?@[0-9a-f]{0,40}|${COMMAND_SOURCE}|--[\\w-]+|(?:\\/|\\.\\.?\\/|[\\w.-]+\\/)\\w[\\w./-]*\\.[A-Za-z0-9]+|\\b[0-9a-fA-F]{7,40}\\b|#\\d+)/g).map((part, n, parts) => {
@@ -2136,7 +2117,7 @@ function renderSide() {
         const reason = !partial[1] ? 'missing the repository path' : 'missing a usable commit SHA';
         return '<span class="code no ref-missing" role="status">Code reference unavailable: ' + reason + '.</span>';
       }
-      if (allowLinks && validRef) return codeRef(part, textBefore.slice(-2000));
+      if (allowLinks === true && validRef) return codeRef(part, textBefore.slice(-2000));
       return codeChip(part);
     }
     if (/^(?:${COMMAND_SOURCE}|--[\\w-]+)$/.test(part)) return codeChip(part, 'cmd');
@@ -2240,6 +2221,10 @@ function milestoneItem(entry, p) {
   const root = local ? view.root : named.length === 1 && named[0].ok ? named[0].root : null;
   const id = local ? entry.id : ref ? Number(ref[2]) : null;
   const item = (root === view.root ? p.items : root ? named[0].items : []).find((i) => i.id === id) || null;
+  const source = root === view.root ? p : root ? named[0] : null;
+  const label = local ? '#' + entry.id : String(entry.id);
+  const expanded = view.tab === 'roadmap' && view.roadmapOpen.get(JSON.stringify([view.root, 'i:' + label])) === true;
+  const detail = item && expanded ? detailOf(source, item, true, root) : null;
   // A status the lifecycle declares; the roadmap says unavailable or missing for an item it could not read.
   const read = item || (FLOW.states.some((state) => state.id === entry.status) ? { status: entry.status, verdict: null } : null);
   return {
@@ -2249,6 +2234,12 @@ function milestoneItem(entry, p) {
     titles: new Map((root === view.root ? p.items : root ? named[0].items : []).map((i) => [String(i.id), i.title])),
     state: read ? stateOf(read) : null,
     stale: item ? staleChip(item) : '',
+    block: item ? roadmapBlock(detail?.item || item, {
+      holds: root === view.root ? source.holds : source.laneHolds, items: source.items, name: (id) => agentName(id, source), time: when, state: stateOf,
+      address: (id) => itemAddress(id, root), board: root === view.root ? null : root,
+      releases: (p.milestones || []).filter((milestone) => milestone.items.some((ref) => ref.id === entry.id)).map((milestone) => milestone.name),
+      loading: detail?.loading, error: detail?.error,
+    }) : null,
     stage: item ? pipelineStage(item) : entry.status,
     word: entry.status,
     open: item ? { root, id } : null,
@@ -2286,6 +2277,11 @@ function jumpToRoadmap(key) {
   }
   const target = $('roadmap-list')?.querySelector('[data-key="' + CSS.escape(key) + '"]');
   if (!target) return;
+  const topbar = document.querySelector('.top');
+  if (matchMedia('(max-width: 900px)').matches && topbar) {
+    // The Roadmap scrolls in the document viewport; use the wrapped sticky bar's actual lower edge, not its minimum height.
+    target.style.scrollMarginTop = Math.ceil(topbar.getBoundingClientRect().bottom + 16) + 'px';
+  } else target.style.removeProperty('scroll-margin-top');
   target.scrollIntoView({ block: 'start', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' });
   target.classList.remove('roadmap-arrival');
   void target.offsetWidth;
@@ -2297,17 +2293,21 @@ function jumpToRoadmap(key) {
 /**
  * One item's row on the Roadmap, laid out as the Items list lays one out: the dot of its state, its
  * id and title on one line that ends in an ellipsis when cut, and the Items tab's chip. The whole
- * title is the row's tooltip. An item that opens is a button; one that cannot says why instead.
+ * title is the row's tooltip. Every row expands in place; its compact detail alone links over to Items.
  */
 function milestoneRow(row, titles) {
-  const title = row.title ? inline(String(row.title).replace(/\\s+/g, ' '), row.titles || titles, true, row.root) : '<span class="muted">' + esc(row.why) + '</span>';
-  const inner = '<span class="dot' + (row.state ? ' ' + row.state : '') + '"></span><span class="t"><span class="id">' + esc(row.label) + '</span>' + title + '</span>' + (row.stale || '') + (row.state ? chip(row.state) : '<span class="chip">' + esc(row.word) + '</span>');
-  if (!row.open) return '<li><div class="milestone-item" title="' + esc(row.title ? row.title + ' (' + row.why + ')' : row.why) + '">' + inner + '</div></li>';
-  const attributes = 'class="milestone-item" data-go="item:' + row.open.id + '"' + (row.open.root === view.root ? '' : ' data-board="' + esc(row.open.root) + '"') + ' title="' + esc(row.title) + '"';
-  // A title with its own links needs a separate containing control, never a nested button.
-  return title.includes('class="ref"')
-    ? '<li><div ' + attributes + ' role="button" tabindex="0">' + inner + '</div></li>'
-    : '<li><button ' + attributes + ' type="button">' + inner + '</button></li>';
+  const title = row.title ? inline(String(row.title).replace(/\\s+/g, ' '), row.titles || titles, 'in-place', row.root) : '<span class="muted">' + esc(row.why) + '</span>';
+  const label = '<span class="id">' + esc(row.label) + '</span>' + title;
+  const text = row.block?.dot ? '<span class="milestone-title">' + label + '</span>' + row.block.dot : label;
+  const key = 'i:' + row.label, open = view.roadmapOpen.get(JSON.stringify([view.root, key])) === true;
+  const status = (open && row.block?.dot ? '<span class="chip warn roadmap-blocked"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>blocked</span>' : '') + (open && row.stage === 'merged' ? '<span class="chip ok roadmap-landed"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="m5 12 4 4L19 6"/></svg>landed</span>' : row.state ? chip(row.state) : '<span class="chip">' + esc(row.word) + '</span>');
+  const inner = '<span class="dot' + (row.state ? ' ' + row.state : '') + '"></span><span class="t">' + text + '</span>' + (row.stale || '') + '<span class="roadmap-status">' + status + '</span>';
+  const board = row.open && row.open.root !== view.root ? ' data-board="' + esc(row.open.root) + '"' : '';
+  const toggle = 'class="milestone-item' + (row.block?.dot ? ' blocked' : '') + '" data-roadmap-key="' + esc(key) + '" aria-expanded="' + open + '"' + board + ' title="' + esc(row.title ? row.title + (!row.open && row.why ? ' (' + row.why + ')' : '') : row.why) + '"';
+  const detail = row.block ? row.block.detail : '<p>' + esc(row.why || row.word) + '</p>';
+  // Every row stays on the Roadmap; only its explicit Open in Items link navigates (#605).
+  return '<li><div ' + toggle + ' role="button" tabindex="0">' + inner + '</div>'
+    + '<div class="milestone-why"' + (open ? '' : ' hidden') + '>' + detail + '</div></li>';
 }
 
 /** Read the work still to ship before verified items, excluding withdrawn work from every count. */
@@ -3700,6 +3700,7 @@ document.addEventListener('keydown', (event) => {
   const row = event.target.closest('.milestone-item[role="button"]');
   if (event.target !== row) return;
   event.preventDefault();
+  if (row.dataset.roadmapKey !== undefined) { row.click(); return; }
   go(row.dataset.go, row.dataset.board || view.root);
 });
 // In a focused Spec or Doctrine list the arrow keys move the pick, and A approves the picked row and D asks why it is

@@ -38,10 +38,27 @@ import {
   MOVES,
   STATES,
   UNKNOWN_MOVE,
+  VERIFIER_STANDING_ENGINE,
   effectiveGuards,
   storeTriggers,
 } from './machine.js';
 import { Refused } from './refused.js';
+import {
+  ROUTES,
+  canTake,
+  rejectedItemEscalation,
+} from './route-escalation.js';
+export { ROUTES, canTake };
+import {
+  agentAt,
+  agentModel,
+  listAgents,
+  newSeatId,
+  routeOf,
+  saveAgentModel,
+  seatLineage,
+  standingProblem,
+} from './seats.js';
 import {
   newRigorNotices,
   rigorNoticeText,
@@ -86,6 +103,9 @@ import { SUBMISSION_PROOF_ENGINE } from './submit-invariants.js';
 export { landingFlakes, landingWaiverCovers, landingWaiverKind };
 export { acceptCheck } from './check-accept.js';
 
+/** The seat readers live in seats.js; the board re-exports them so `store.*` callers keep one import. */
+export { agentAt, agentCreator, listAgents, nextSeatId, seatEnrolled, seatLineage, withVerifierStanding } from './seats.js';
+
 export const ACCEPT_REASON = 'CRITERION_MET';
 export const PERSON = 'person';
 
@@ -109,24 +129,9 @@ export function boardBusyError(file, startedAt, error) {
   return new Refused('BOARD_BUSY', `board file ${file} remained held by another process after ${Date.now() - startedAt}ms; wait for it to finish and retry`);
 }
 
-/**
- * Who can take an item (B13), as tiers in order of the model an item needs: `light` is work a small
- * or local model can build from its brief, `mid` needs a capable general model, and
- * `strong` needs a frontier model's judgment. An agent's route is set when it joins; it takes items
- * at its tier and below.
- */
-export const ROUTES = ['light', 'mid', 'strong'];
 const BRIEF_LIMIT = 8000;
 const REVIEW_RELEASE_COOLDOWN_MS = 60 * 60 * 1000;
 
-/**
- * True when an agent on `agentRoute` may build or verify an item routed `itemRoute`.
- *
- * @param {string} agentRoute
- * @param {string} itemRoute
- * @returns {boolean}
- */
-export const canTake = (agentRoute, itemRoute) => ROUTES.indexOf(itemRoute) <= ROUTES.indexOf(agentRoute);
 export const REJECT_REASONS = [
   'TEST_FAILURE',
   'BEHAVIOR_MISMATCH',
@@ -564,50 +569,25 @@ function current(board, item) {
 }
 
 /**
- * The agent registered for a worktree path, if any.
- *
- * @param {any} board
- * @param {string} path
- * @returns {any}
- */
-export function agentAt(board, path) {
-  const agent = board.db.prepare('SELECT * FROM agent WHERE agent_path = ?').get(path);
-  return withModel(board, agent);
-}
-
-/** Read the model label kept beside other board metadata, avoiding any board-schema migration. */
-function agentModel(board, id) {
-  return board.db.prepare('SELECT meta_value FROM board_meta WHERE meta_key = ?').get(`agent_model:${id}`)?.meta_value ?? null;
-}
-
-/** Attach an agent's model to a row from the legacy stable agent table. */
-function withModel(board, agent) {
-  return agent ? { ...agent, agent_model: agentModel(board, agent.agent_id) } : agent;
-}
-
-/** Save or clear a model label without changing the shared SQLite schema. */
-function saveAgentModel(board, id, model) {
-  if (model === null || model === undefined) {
-    board.db.prepare('DELETE FROM board_meta WHERE meta_key = ?').run(`agent_model:${id}`);
-    return;
-  }
-  board.db.prepare('INSERT INTO board_meta (meta_key, meta_value) VALUES (?, ?) ON CONFLICT(meta_key) DO UPDATE SET meta_value = excluded.meta_value')
-    .run(`agent_model:${id}`, model);
-}
-
-/**
  * Register a worktree as an agent (B3): the main checkout as the one coordinator, any other
  * worktree as the next agent in its lane (`web-1`, `web-2`, ...), on a route: the tier of model
  * behind it, which decides the items it may take (B13). The optional family is free text supplied
  * by the agent; the board neither names nor infers it. Registering again preserves the agent id;
  * explicitly supplied family and model values update their declarations, while omission preserves them.
  *
+ * From engine 35 a new seat records the seat that created it (`createdBy`: an agent id, or
+ * `machine` for a join no seat made), so a linked board can tell a builder's own seats from
+ * independent verifiers (#579). A creator may name the new seat (`id`, the lane's next form) when
+ * the relay already issued a token for the next name; ids then skip taken names.
+ *
  * @param {any} board
- * @param {{ lane: string, path: string, route?: string, family?: string | null, model?: string | null }} who
+ * @param {{ lane: string, path: string, route?: string, family?: string | null, model?: string | null, createdBy?: string, id?: string }} who
  * @returns {string} The agent's id.
  */
-export function register(board, { lane, path, route = 'strong', family, model }) {
-  if ((board.executionEngineVersion ?? ENGINE_VERSION) < 8) model = undefined;
+export function register(board, { lane, path, route = 'strong', family, model, createdBy, id: named }) {
+  const engine = board.executionEngineVersion ?? ENGINE_VERSION;
+  if (engine < 8) model = undefined;
+  if (engine < VERIFIER_STANDING_ENGINE) { createdBy = undefined; named = undefined; }
   checkRoute(route);
   if (lane === COORDINATOR && route !== 'strong') {
     throw new Refused('BAD_ROUTE', 'the coordinator plans, merges and verifies; it is always strong');
@@ -637,13 +617,25 @@ export function register(board, { lane, path, route = 'strong', family, model })
     if (lane === COORDINATOR && total > 0) {
       throw new Refused('ONE_COORDINATOR', 'the coordinator is the main checkout; it already has one');
     }
-    const id = lane === COORDINATOR ? COORDINATOR : `${lane}-${total + 1}`;
+    if (createdBy !== undefined && createdBy !== 'machine' && createdBy !== COORDINATOR && !board.db.prepare('SELECT 1 FROM agent WHERE agent_id = ?').get(createdBy)) {
+      throw new Refused('NO_AGENT', `the creating seat ${createdBy} is not registered; create new seats from a joined worktree or the main checkout`);
+    }
+    const id = lane === COORDINATOR ? COORDINATOR
+      : engine < VERIFIER_STANDING_ENGINE ? `${lane}-${total + 1}` : newSeatId(board, lane, total, named);
     board.db
       .prepare(
         'INSERT INTO agent (agent_id, agent_lane, agent_path, agent_route, agent_family, agent_created_at) VALUES (?, ?, ?, ?, ?, ?)',
       )
       .run(id, lane, path, route, family ?? null, now(board));
     if ((board.executionEngineVersion ?? ENGINE_VERSION) >= 8) saveAgentModel(board, id, model);
+    if (createdBy !== undefined) board.db.prepare('INSERT INTO board_meta (meta_key, meta_value) VALUES (?, ?)').run(`agent_creator:${id}`, createdBy);
+    // Only a relay replica replaying a receipt-bound registration marks the seat enrolled.
+    if (board.relayEnrollment === id && createdBy !== undefined && createdBy !== 'machine') {
+      board.db.prepare('INSERT INTO board_meta (meta_key, meta_value) VALUES (?, ?)').run(`agent_enrolled:${id}`, createdBy);
+      // The seat's machine lineage: the creating coordinator token's, or its creator seat's.
+      const lineage = createdBy === COORDINATOR ? board.verifierStanding?.lineage ?? null : seatLineage(board, createdBy);
+      if (lineage) board.db.prepare('INSERT INTO board_meta (meta_key, meta_value) VALUES (?, ?)').run(`agent_lineage:${id}`, lineage);
+    }
     logEvent(board, id, 'join', null, route === 'strong' ? { lane } : { lane, route });
     return id;
   });
@@ -667,16 +659,6 @@ export function ensureCoordinator(board, path) {
     });
   }
   return COORDINATOR;
-}
-
-/**
- * Every registered agent, oldest first.
- *
- * @param {any} board
- * @returns {any[]}
- */
-export function listAgents(board) {
-  return board.db.prepare('SELECT * FROM agent ORDER BY rowid').all().map((agent) => withModel(board, agent));
 }
 
 /**
@@ -712,17 +694,6 @@ function checkRouted({ brief, route, criterion, check }) {
   if (missing.length) {
     throw new Refused('NO_BRIEF', `an item routed ${route} must be buildable cold; it needs ${missing.join(', ')}`);
   }
-}
-
-/**
- * The route an agent joined on; strong for the coordinator and for ids the board does not know.
- *
- * @param {any} board
- * @param {string} agentId
- * @returns {string}
- */
-function routeOf(board, agentId) {
-  return board.db.prepare('SELECT agent_route FROM agent WHERE agent_id = ?').get(agentId)?.agent_route ?? 'strong';
 }
 
 /**
@@ -1059,10 +1030,10 @@ const onlyCoordinator = (agentId, what) => (agentId === COORDINATOR ? null : new
  *
  * @param {any} board
  * @param {number} id
- * @param {{ agentId: string, note: string, attempt?: string }} why
+ * @param {{ agentId: string, note: string, attempt?: string, rejections?: object[] }} why
  * @returns {{ from: string, to: string }}
  */
-export function escalate(board, id, { agentId, note, attempt = '' }) {
+export function escalate(board, id, { agentId, note, attempt = '', rejections }) {
   return atomic(board, () => {
     const nextRoute = (route) => ROUTES[Math.min(ROUTES.indexOf(route) + 1, ROUTES.length - 1)];
     const item = moveItem(board, id, 'escalate', {
@@ -1080,7 +1051,9 @@ export function escalate(board, id, { agentId, note, attempt = '' }) {
     });
     const from = item.item_route;
     const to = nextRoute(from);
-    logEvent(board, agentId, 'escalate', id, { from, to, note: note.trim(), ...(attempt ? { attempt } : {}) });
+    logEvent(board, agentId, 'escalate', id, {
+      from, to, note: note.trim(), ...(attempt ? { attempt } : {}), ...(rejections ? { rejections } : {}),
+    });
     return { from, to };
   });
 }
@@ -1196,6 +1169,11 @@ export function claim(board, id, { agentId, lane, leaseMs, freeze, head = null, 
     });
     const renewed = isRenewal(item);
     const digest = frozen ? frozen.digest : item.item_frozen_digest;
+    // A linked coordinator claim records which machine's coordinator lineage builds it (#579).
+    if (board.verifierStanding && agentId === COORDINATOR && (board.executionEngineVersion ?? ENGINE_VERSION) >= VERIFIER_STANDING_ENGINE) {
+      board.db.prepare('DELETE FROM board_meta WHERE meta_key = ?').run(`item_lineage:${id}`);
+      if (board.verifierStanding.lineage) board.db.prepare('INSERT INTO board_meta (meta_key, meta_value) VALUES (?, ?)').run(`item_lineage:${id}`, board.verifierStanding.lineage);
+    }
     logEvent(board, agentId, renewed ? 'renew' : 'claim', id, { leaseUntil, digest, ...(!renewed && reviewSkipped ? { reviewSkipped } : {}) });
     return { leaseUntil, digest, renewed };
   });
@@ -1466,7 +1444,8 @@ export function reviewOffer(board, { agentId, lane, policy = 'any', familyPolicy
 function reviewerChecks(board, { agentId, policy, familyPolicy = 'off' }) {
   const family = board.db.prepare('SELECT agent_family FROM agent WHERE agent_id = ?').get(agentId)?.agent_family ?? null;
   return {
-    notBuilder: (found) => (found.item_built_by === agentId ? new Refused('SELF_VERIFY', 'the builder never verifies its own work; another agent must') : null),
+    notBuilder: (found) => (found.item_built_by === agentId ? new Refused('SELF_VERIFY', 'the builder never verifies its own work; another agent must')
+      : standingProblem(board, agentId, found.item_built_by, found.item_id)),
     routeAllows: (found) => {
       const route = routeOf(board, agentId);
       return canTake(route, found.item_route) ? null : new Refused('ROUTE', `item #${found.item_id} needs a ${found.item_route} verifier; you joined on the ${route} route`);
@@ -1616,6 +1595,8 @@ export function verify(board, id, { agentId, decision, reason, note = '', cause,
     if (newReview) detail.review = { commit: review.commit, ...(Object.hasOwn(review, 'head') ? { head: review.head } : {}), trunk: review.trunk, paths: [...review.paths] };
     logEvent(board, agentId, verb, id, implies?.length ? { ...detail, implies } : detail);
     const trigger = board.lastEvent;
+    const escalation = !isAccept && rejectedItemEscalation(board, id, engine, item.item_route);
+    if (escalation) escalate(board, id, escalation);
     tellVerdictImplications(board, (by, itemId, fact) => logEvent(board, by, 'fact', itemId, fact), id, { seed: impliesId, implies });
     if (!isAccept) postRigorNotices(board, trigger);
     return { decision, reason: code, ...(isAccept && check !== undefined ? { check } : {}) };
@@ -2316,7 +2297,9 @@ export function nextFor(board, { agentId, lane, verify = false, policy = 'any', 
   if (verify) {
     const family = board.db.prepare('SELECT agent_family FROM agent WHERE agent_id = ?').get(agentId)?.agent_family ?? null;
     const hasDifferentFamily = (entry) => Boolean(family && entry.item_builder_family && family !== entry.item_builder_family);
-    let reviewable = items.filter((entry) => entry.item_status === 'submitted' && entry.item_built_by !== agentId);
+    const unrelated = items.filter((entry) => entry.item_status === 'submitted' && entry.item_built_by !== agentId);
+    const standingRefusal = unrelated.map((entry) => standingProblem(board, agentId, entry.item_built_by, entry.item_id)).find(Boolean);
+    let reviewable = unrelated.filter((entry) => !standingProblem(board, agentId, entry.item_built_by, entry.item_id));
     if (policy === COORDINATOR && agentId !== COORDINATOR) reviewable = reviewable.filter((entry) => entry.item_lane === COORDINATOR);
     if (familyPolicy === 'require') reviewable = reviewable.filter(hasDifferentFamily);
     if (familyPolicy === 'prefer') reviewable.sort((first, second) => Number(hasDifferentFamily(second)) - Number(hasDifferentFamily(first)));
@@ -2337,7 +2320,8 @@ export function nextFor(board, { agentId, lane, verify = false, policy = 'any', 
       .map(({ entry, holder: reviewer }) => `${reviewer} holds the review of #${entry.item_id} until ${entry.item_review_until}`);
     const cooling = candidates.filter((candidate) => candidate.cooldown)
       .map(({ entry, cooldown }) => `you released the review of #${entry.item_id}; try again after ${cooldown}, or let another reviewer take it`);
-    return { item: null, reasons: [`nothing ${routed}submitted that you did not build${held.length ? ' and no other agent is reviewing' : ''}`, ...held, ...cooling] };
+    return { item: null, reasons: [`nothing ${routed}submitted that you did not build${held.length ? ' and no other agent is reviewing' : ''}`,
+      ...(standingRefusal ? [standingRefusal.message] : []), ...held, ...cooling] };
   }
   const held = items.find((entry) => entry.item_status === 'claimed' && entry.item_owner === agentId && entry.item_parent_id === null);
   if (held) return { item: held, reasons: [] };

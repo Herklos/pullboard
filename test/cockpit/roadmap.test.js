@@ -7,7 +7,15 @@ import { test } from 'node:test';
 import { tapTarget, SPEC, machine, project, build, sendBack, fetchLive, startView, target, accept, chromeExecutable, openSnapshotChrome, closeSnapshotChrome, press, travel, pressedInto, settled, roadmapRow, showing, readRoadmap, openRoadmapParts, tabBar, proofShot, pickProject, chooseFilter } from './fixture.js';
 
 
-test('Roadmap and rule prose references stay inline and open the item on their own board [N26,N38]', { timeout: 90_000 }, async (t) => {
+/** Expand a real roadmap row, then use its explicit link to leave for Items. */
+async function openRoadmapItem(chrome, id) {
+  const row = roadmapRow(id);
+  if (await chrome.stable(row + ".getAttribute('aria-expanded')") !== 'true') await press(chrome, row);
+  await chrome.waitFor(row + ".getAttribute('aria-expanded') === 'true'");
+  await press(chrome, row + ".parentElement.querySelector('.milestone-why a[data-go]')");
+}
+
+test('Roadmap references stay inline and rows expand before opening Items [N26,N38]', { timeout: 90_000 }, async (t) => {
   const executable = chromeExecutable();
   if (!executable) return t.skip('Install Chrome or set PULLBOARD_CHROME for prose-reference checks.');
   const box = machine();
@@ -33,12 +41,12 @@ test('Roadmap and rule prose references stay inline and open the item on their o
       const contexts = [
         ['roadmap', '#roadmap .milestone h2 .ref', 'Local target'],
         ['roadmap', '#roadmap .milestone-note .ref', 'Local target'],
-        ['roadmap', '#roadmap .milestone-item[data-go="item:2"]:not([data-board]) .t .ref', 'Local target'],
-        ['roadmap', '#roadmap .milestone-item[data-board] .t .ref', 'Remote target'],
+        ['roadmap', '#roadmap .milestone-item[data-roadmap-key="i:#2"]:not([data-board]) .t .ref', 'Local target', true],
+        ['roadmap', '#roadmap .milestone-item[data-board] .t .ref', 'Remote target', true],
         ['spec', '#spec-list [data-row="spec:G3"] .ref', 'Local target'],
         ['doctrine', '#doctrine-list [data-row="doctrine:R1"] .ref', 'Local target'],
       ];
-      for (const [tab, selector, target] of contexts) {
+      for (const [tab, selector, target, expands] of contexts) {
         await pickProject(chrome, `document.querySelector('[data-root=${JSON.stringify(demo.repo)}]')`);
         await chrome.waitFor("data?.project?.root === view.root && !document.body.classList.contains('switching') && document.querySelector('#proj-name').textContent === 'a-inline-prose'");
         await chrome.click(`document.querySelector('[data-tab="${tab}"]')`);
@@ -57,6 +65,20 @@ test('Roadmap and rule prose references stay inline and open the item on their o
         assert.ok(Math.abs(metrics.height - metrics.line) < 1, `${width}: ${selector} keeps the text line height`);
         assert.equal(metrics.nested, false, `${width}: ${selector} never nests buttons`);
         if (metrics.rowHeight !== undefined) assert.ok(metrics.rowHeight >= tapTarget(width), `${width}: the containing Roadmap control keeps its target`);
+        if (expands) {
+          const ref = `document.querySelector(${JSON.stringify(selector)})`;
+          const row = ref + ".closest('.milestone-item')";
+          if (await chrome.stable(row + ".getAttribute('aria-expanded')") === 'true') await chrome.click(ref);
+          const address = await chrome.stable('location.href');
+          await chrome.click(ref);
+          await chrome.waitFor(row + ".getAttribute('aria-expanded') === 'true'");
+          assert.equal(await chrome.stable('location.href'), address, 'inline title text expands without leaving Roadmap');
+          assert.equal(await chrome.stable('view.tab'), 'roadmap');
+          await chrome.click(row + ".parentElement.querySelector('.milestone-why a[data-go]')");
+          await chrome.waitFor("document.querySelector('[data-tab=items].on') && document.querySelector('#detail h2 > span')?.textContent === '#2'");
+          assert.equal(await chrome.stable('view.root'), target === 'Remote target' ? other.repo : demo.repo);
+          continue;
+        }
         await chrome.click(`document.querySelector(${JSON.stringify(selector)})`);
         await chrome.waitFor("!document.body.classList.contains('switching') && document.querySelector('[data-tab=items].on') && document.querySelector('#detail h2 > span')?.textContent === '#1'");
         assert.ok((await chrome.stable("document.querySelector('#detail h2').textContent")).includes(target), 'the reference opens its target title');
@@ -72,7 +94,12 @@ test('Roadmap and rule prose references stay inline and open the item on their o
       assert.equal(await chrome.stable("document.querySelectorAll('#answering-q .ref').length"), 1, 'the answering question keeps its inline item reference');
       await chrome.click("document.querySelector('#answering-q .ref')");
       await chrome.waitFor("document.querySelector('#detail h2')?.textContent.includes('Local target') && document.querySelector('[data-tab=items].on')");
-      await chrome.click("document.querySelector('[data-tab=roadmap]')"); await chrome.stable("document.querySelector('#roadmap .milestone-item[role=button]:not([data-board])').dispatchEvent(new KeyboardEvent('keydown', {key:'Enter',bubbles:true}))");
+      await chrome.click("document.querySelector('[data-tab=roadmap]')");
+      const keyboardRow = "document.querySelector('#roadmap .milestone-item[role=button]:not([data-board])')";
+      if (await chrome.stable(keyboardRow + ".getAttribute('aria-expanded')") === 'true') await chrome.click(keyboardRow);
+      await chrome.stable(keyboardRow + ".dispatchEvent(new KeyboardEvent('keydown', {key:'Enter',bubbles:true}))");
+      await chrome.waitFor(keyboardRow + ".getAttribute('aria-expanded') === 'true' && view.tab === 'roadmap'");
+      await openRoadmapItem(chrome, '#2');
       await chrome.waitFor("document.querySelector('#detail h2')?.textContent.includes('Local title links to #1') && document.querySelector('[data-tab=items].on')");
     }
   } finally {
@@ -175,7 +202,7 @@ test('the roadmap reads every item as the Items tab does, opens each one, anothe
       await proofShot(chrome, 'roadmap', width);
 
       // An item opens on the Items tab; Back shows the Roadmap at its address again, Forward the item.
-      await press(chrome, roadmapRow('#3'));
+      await openRoadmapItem(chrome, '#3');
       await pressedInto(chrome, `${showing('items', '/roadmap-demo/items/3')} && document.querySelector('#detail h2')?.innerText.includes('Session timeout banner')`);
       assert.equal(await chrome.stable('location.search'), view.link.search, `${width}: the address keeps the rest of itself`);
       await travel(chrome, -1);
@@ -187,7 +214,7 @@ test('the roadmap reads every item as the Items tab does, opens each one, anothe
     }
 
     // Another repo's item opens on its own board, and Back and Forward move between the two boards.
-    await press(chrome, roadmapRow('beacon#1'));
+    await openRoadmapItem(chrome, 'beacon#1');
     await chrome.waitFor(`document.querySelector('#proj-name').textContent === 'beacon' && ${showing('items', '/beacon/items/1')} && document.querySelector('#detail h2')?.innerText.includes('Billing webhook retries')`);
     const there = JSON.parse(await chrome.stable(`JSON.stringify((() => { const chip = document.querySelector('#detail .meta .chip'); return {
       id: document.querySelector('#detail h2 span').innerText, label: chip.innerText, chip: getComputedStyle(chip).color + ' on ' + getComputedStyle(chip).backgroundColor,
@@ -204,7 +231,7 @@ test('the roadmap reads every item as the Items tab does, opens each one, anothe
     // Each of this board's rows opens its item on the Items tab, which gives it the same word and
     // colours, its list dot included; a withdrawn item is left out of the list while browsing.
     for (const row of seen.cards.flatMap((card) => card.rows).filter((each) => each.id.startsWith('#'))) {
-      await press(chrome, roadmapRow(row.id));
+      await openRoadmapItem(chrome, row.id);
       await chrome.waitFor(`${showing('items', '/roadmap-demo/items/' + row.id.slice(1))} && document.querySelector('#detail h2 span')?.innerText === ${JSON.stringify(row.id)}`);
       const here = JSON.parse(await chrome.stable(`JSON.stringify((() => {
         const chip = document.querySelector('#detail .meta .chip'), dot = document.querySelector('#chain [data-item="${row.id.slice(1)}"] .dot');
@@ -418,7 +445,8 @@ test('the roadmap leads with the next release and folds shipped ones [N26]', { t
     await click('#roadmap .shipped-one[data-key="m:0.2"] > .milestone-head');
     r = await read();
     assert.deepEqual(r.parts.find((part) => part.key === 'shipped').shipped.find((one) => one.key === 'm:0.2').rows, ['#2'], 'a shipped release opens to its verified items');
-    await click('#roadmap .shipped-one[data-key="m:0.2"] .milestone-item[data-go="item:2"]');
+    await click('#roadmap .shipped-one[data-key="m:0.2"] .milestone-item');
+    await click('#roadmap .shipped-one[data-key="m:0.2"] .milestone-why a[data-go="item:2"]');
     await chrome.waitFor("view.tab === 'items' && document.querySelector('#detail h2')?.textContent.includes('Second page')");
 
     // The parts stay as the person left them when the board redraws: close the next release, then change the board.
@@ -834,6 +862,183 @@ test('the roadmap panel counts the next release by stage [N26]', {
       }
       await proofShot(chrome, 'roadmap-panel-counts', width);
     }
+  } finally {
+    if (chrome) await closeSnapshotChrome(chrome);
+    rmSync(profile, { recursive: true, force: true });
+    await view.stop();
+  }
+});
+
+test('a blocked roadmap item shows its dot and expands to say why [N26]', { timeout: 90_000 }, async () => {
+  const executable = chromeExecutable();
+  assert.ok(executable, 'Chrome is required for the roadmap blocker check.');
+  const box = machine(), alpha = project(box, 'blocked-roadmap');
+  box.run(alpha.repo, 'add', 'web', 'Base work', '--specs', 'G1', '--criterion', 'Base is ready.');
+  box.run(alpha.repo, 'add', 'web', 'Waits on base', '--specs', 'G1', '--criterion', 'Use #1 and #3 <em>literally</em>. More detail stays in Items.', '--after', '1');
+  box.run(alpha.repo, 'add', 'web', 'Free work', '--specs', 'G1', '--criterion', 'Ready.');
+  box.run(alpha.repo, 'add', 'web', 'Sent back once', '--specs', 'G1', '--criterion', 'Ready.');
+  build(box, alpha, 4, 'sent-back.html'); sendBack(box, alpha, 4, 'The heading is missing.');
+  box.run(alpha.repo, 'edit', '4', '--after', '1', '--reason', 'Waits on the base.');
+  box.run(alpha.repo, 'add', 'web', 'Landed work', '--specs', 'G1', '--criterion', 'The page renders.');
+  build(box, alpha, 5, 'landed.html'); accept(box, alpha, 5);
+  box.git(alpha.repo, 'merge', '--no-ff', '--no-edit', alpha.itemBranches.get(`${alpha.baseBranch}:5`));
+  box.run(alpha.repo, 'merged', '5', box.git(alpha.repo, 'rev-parse', 'HEAD'));
+  box.run(alpha.repo, 'add', 'web', 'Building work', '--specs', 'G1', '--criterion', 'The corrected page renders.');
+  build(box, alpha, 6, 'building.html'); sendBack(box, alpha, 6, 'See #1 and #3 before accepting.\nMore detail stays in Items.');
+  box.run(alpha.web, 'claim', '6');
+  const second = join(box.dir, 'second-builder');
+  box.git(alpha.repo, 'worktree', 'add', '-q', second, '-b', 'web/second');
+  box.run(second, 'join', 'web'); box.run(second, 'claim', '1');
+  const other = project(box, 'blocked-roadmap-other');
+  box.run(other.repo, 'add', 'web', 'Remote base', '--specs', 'G1', '--criterion', 'Ready.');
+  box.run(other.repo, 'add', 'web', 'Remote sent-back work', '--specs', 'G1', '--criterion', 'Remote renders.');
+  build(box, other, 2, 'remote.html'); sendBack(box, other, 2, 'Remote latest finding\nMore detail stays in Items');
+  box.run(other.repo, 'edit', '2', '--after', '1', '--reason', 'Waits on remote base.');
+  box.run(other.repo, 'hold', 'web', '--reason', 'Review the remote dependency');
+  box.run(alpha.repo, 'milestone', 'add', 'Next', '--items', '1,2,3,4,5,6,blocked-roadmap-other#2');
+  const view = await startView(box), profile = mkdtempSync(join(tmpdir(), 'pullboard-blocked-roadmap-chrome-'));
+  let chrome;
+  const row = id => `[...document.querySelectorAll('#roadmap .milestone-item')].find(x=>x.querySelector('.id')?.textContent===${JSON.stringify(id)})`;
+  /** Read the visible detail only, after its optional first detail request settles. */
+  async function opened(id) {
+    await press(chrome, row(id));
+    await chrome.waitFor(`${row(id)}?.getAttribute('aria-expanded')==='true' && !${row(id)}.parentElement.querySelector('.roadmap-loading')`);
+    return await chrome.stable(`${row(id)}.parentElement.querySelector('.milestone-why').textContent`);
+  }
+  /** Count item reads, excluding ordinary board polling. */
+  async function reads() { return JSON.parse(await chrome.stable('JSON.stringify(window.__requests)')).filter(url => /\/items\/\d/.test(url)); }
+  try {
+    chrome = await openSnapshotChrome(executable, view.link.href, profile);
+    await chrome.waitFor('data?.project?.milestones?.length===1');
+    await press(chrome, "document.querySelector('[data-tab=roadmap]')");
+    await chrome.waitFor(`${row('#2')}?.querySelector('.block-dot')`);
+    assert.match(await chrome.stable(`${row('#2')}.querySelector('.block-dot').getAttribute('aria-label')`), /#1 \(claimed\)/u);
+    assert.equal(await chrome.stable(`Boolean(${row('#3')}.querySelector('.block-dot'))`), false);
+    await chrome.stable("window.__requests=[];window.__fetch=window.fetch;window.fetch=(url,options)=>{window.__requests.push(String(url));return window.__fetch(url,options);};true");
+    const address = await chrome.stable('location.href');
+    const blocked = await opened('#2');
+    assert.match(blocked, /CriterionUse #1 and #3 <em>literally<\/em>\./u, 'the approved dense detail leads with the criterion');
+    assert.doesNotMatch(blocked, /More detail stays in Items/u, 'only the first criterion sentence is shown');
+    assert.deepEqual(JSON.parse(await chrome.stable(`JSON.stringify([...${row('#2')}.parentElement.querySelectorAll('.roadmap-criterion .roadmap-ref')].map(chip=>chip.textContent))`)), [], 'references inside Criterion stay plain text');
+    assert.equal(await chrome.stable(`${row('#2')}.parentElement.querySelectorAll('.roadmap-criterion em').length`),0,'criterion markup stays escaped');
+    assert.match(blocked, /Waits on#1 building.*web-2.*since/u, 'dependency includes state, holder and local time');
+    assert.match(blocked, /History.*added/u); assert.match(blocked, /Release.*Next.*G1/u);
+    assert.equal((await reads()).length, 1, 'the first opened summary reads its detail once');
+    for (const id of ['#2', '#6', '#5']) {
+      if (id !== '#2') await opened(id);
+      const text = await chrome.stable(`${row(id)}.parentElement.querySelector('.milestone-why').textContent`);
+      if (id === '#6') {
+        assert.match(text, /Agents.*web-1.*building/u); assert.match(text, /Sent back.*coordinator.*See #1 and #3 before accepting/u);
+        assert.match(text, /History.*claimed.*submitted.*sent back.*claimed again/u);
+      }
+      if (id === '#5') { assert.match(text, /Agents.*web-1.*built.*coordinator.*verified/u); assert.match(text, /History.*accepted.*landed/u); }
+      const before = await reads();
+      await press(chrome, row(id));
+      await chrome.stable(`${row(id)}.focus();true`);
+      await chrome.send('Input.dispatchKeyEvent', { type:'keyDown', key:'Enter', code:'Enter', windowsVirtualKeyCode:13 });
+      await chrome.send('Input.dispatchKeyEvent', { type:'keyUp', key:'Enter', code:'Enter', windowsVirtualKeyCode:13 });
+      await chrome.waitFor(`${row(id)}.getAttribute('aria-expanded')==='true'`);
+      assert.deepEqual(await reads(), before, 'reopening keeps the shared item-detail cache');
+      assert.equal(await chrome.stable('location.href'), address); assert.equal(await chrome.stable('view.tab'), 'roadmap');
+      await press(chrome, row(id));
+    }
+    const base = await opened('#1');
+    assert.match(base, /Blocks.*#2 unclaimed/u, 'the dense row names its open dependants');
+    assert.match(base, /Blocks.*#4 sent back/u, 'a sent-back dependant keeps its status');
+    assert.equal(await chrome.stable(`${row('#1')}.parentElement.querySelectorAll('.milestone-why a').length`), 1, 'references are chips; only the explicit Items link navigates');
+    await press(chrome, row('#1'));
+    for (const scheme of ['light', 'dark']) {
+      await chrome.send('Emulation.setEmulatedMedia', { features:[{name:'prefers-color-scheme',value:scheme}] });
+      await opened('#6');
+      const style = JSON.parse(await chrome.stable(`JSON.stringify((()=>{const panel=${row('#6')}.parentElement.querySelector('.milestone-why');const label=panel.querySelector('dt'),value=label.nextElementSibling;return {icons:panel.querySelectorAll('dt svg').length, labels:panel.querySelectorAll('dt').length,top:getComputedStyle(label).alignSelf,chip:getComputedStyle(panel.querySelector('.roadmap-step.no')).backgroundColor,danger:getComputedStyle(panel.querySelector('.roadmap-return')).backgroundColor,labelTop:label.getBoundingClientRect().top,valueTop:value.getBoundingClientRect().top};})())`));
+      assert.equal(style.icons, style.labels, `${scheme}: every label has an inline icon`);
+      assert.equal(style.top, 'start', `${scheme}: labels stay at the first value line`);
+      assert.ok(Math.abs(style.labelTop-style.valueTop)<2, `${scheme}: wrapped values keep their top-aligned label`);
+      assert.notEqual(style.danger, 'rgba(0, 0, 0, 0)', `${scheme}: send-back reason is tinted`);
+      const colors = JSON.parse(await chrome.stable(`JSON.stringify((()=>{const panel=${row('#6')}.parentElement.querySelector('.milestone-why');const probe=document.createElement('span');panel.append(probe);probe.style.color='var(--reject)';const danger=getComputedStyle(probe).color;probe.style.color='var(--accent)';const success=getComputedStyle(probe).color;probe.remove();return {danger,success,reject:getComputedStyle(panel.querySelector('.roadmap-step.no')).backgroundColor,reason:getComputedStyle(panel.querySelector('.roadmap-return')).color};})())`));
+      assert.equal(colors.reject, colors.danger, `${scheme}: send-back history uses the danger token`);
+      assert.equal(colors.reason, colors.danger, `${scheme}: the callout uses the danger token`);
+      await press(chrome, row('#6'));
+      await opened('#5');
+      const landed = JSON.parse(await chrome.stable(`JSON.stringify((()=>{const r=${row('#5')},panel=r.parentElement.querySelector('.milestone-why');return {color:getComputedStyle(panel.querySelector('.roadmap-event:last-child .roadmap-step')).backgroundColor,chip:r.querySelector('.roadmap-landed')?.textContent,icon:!!r.querySelector('.roadmap-landed svg')};})())`));
+      assert.equal(landed.color, colors.success, `${scheme}: landing history uses the success token`);
+      assert.equal(landed.chip, 'landed'); assert.equal(landed.icon, true);
+      await press(chrome, row('#5'));
+    }
+    for (const width of [375,1280]) for (const scheme of ['light','dark']) {
+      await chrome.send('Emulation.setDeviceMetricsOverride',{width,height:900,deviceScaleFactor:1,mobile:false});
+      await chrome.send('Emulation.setEmulatedMedia',{features:[{name:'prefers-color-scheme',value:scheme}]});
+      for (const [id,field] of [['#2','.roadmap-criterion'],['#6','.roadmap-return']]) {
+        await opened(id);
+        const prose=JSON.parse(await chrome.stable(`JSON.stringify((()=>{const panel=${row(id)}.parentElement.querySelector('.milestone-why'),value=panel.querySelector(${JSON.stringify(field)});return {text:value.textContent,chips:value.querySelectorAll('.roadmap-ref').length,links:panel.querySelectorAll('a').length};})())`));
+        assert.match(prose.text,/#1 and #3/u,`${width}/${scheme}: ${field} keeps its literal references`);
+        assert.equal(prose.chips,0,'the clarified bar keeps prose references plain');assert.equal(prose.links,1,'only Open in Items is a link');
+        assert.equal(await chrome.stable('location.href'),address);assert.equal(await chrome.stable('view.tab'),'roadmap');
+        await press(chrome,row(id));
+      }
+    }
+    await chrome.send('Emulation.setDeviceMetricsOverride', {width:375,height:900,deviceScaleFactor:1,mobile:false});
+    const remote = await opened('blocked-roadmap-other#2');
+    assert.match(remote, /Waits on#1 unclaimed/u); assert.match(remote, /Review the remote dependency/u);
+    assert.match(remote, /Sent back.*Remote latest finding/u); assert.doesNotMatch(remote, /More detail stays in Items/u);
+    const metrics = JSON.parse(await chrome.stable(`JSON.stringify((()=>{const r=${row('blocked-roadmap-other#2')},d=r.querySelector('.block-dot').getBoundingClientRect(),t=r.querySelector('.t').getBoundingClientRect();return {visible:d.width>0&&d.left>=t.left&&d.right<=t.right,width:document.documentElement.scrollWidth,viewport:innerWidth};})())`));
+    assert.ok(metrics.visible, 'the remote blocker mark stays visible on a phone'); assert.ok(metrics.width<=metrics.viewport);
+    await press(chrome, `${row('blocked-roadmap-other#2')}.parentElement.querySelector('.milestone-why a[data-go]')`);
+    await chrome.waitFor("view.tab==='items' && document.querySelector('#detail h2')?.textContent.includes('Remote sent-back work')");
+    assert.equal(await chrome.stable("document.querySelector('#proj-name').textContent"), 'blocked-roadmap-other');
+    assert.deepEqual(chrome.exceptions, []);
+  } finally { if(chrome) await closeSnapshotChrome(chrome); rmSync(profile,{recursive:true,force:true}); await view.stop(); }
+});
+
+test('a release jump on a phone leaves its heading below the top bar [N26]', { timeout: 90_000 }, async (t) => {
+  const executable = chromeExecutable();
+  assert.ok(executable, 'Chrome is required for phone release-jump checks.');
+  const box = machine();
+  const alpha = project(box, 'roadmap-phone-release-jump');
+  for (const title of ['First release item', 'Second release item']) box.run(alpha.repo, 'add', 'web', title, '--specs', 'G1', '--criterion', 'renders');
+  box.run(alpha.repo, 'milestone', 'add', '0.9.0', '--items', '1');
+  box.run(alpha.repo, 'milestone', 'add', '0.9.1', '--items', '2');
+  for (const name of ['0.9.2', '0.9.3', '0.9.4', '0.9.5', '0.9.6', '0.9.7', '0.9.8', '0.9.9', '0.9.10', '0.9.11']) {
+    box.run(alpha.repo, 'milestone', 'add', name, '--note', 'Later release.');
+  }
+  const view = await startView(box);
+  const profile = mkdtempSync(join(tmpdir(), 'pullboard-roadmap-phone-jump-'));
+  let chrome;
+  try {
+    chrome = await openSnapshotChrome(executable, view.link.href, profile);
+    await chrome.waitFor('data?.project?.milestones?.length === 12');
+    await chrome.send('Emulation.setDeviceMetricsOverride', { width: 375, height: 812, deviceScaleFactor: 1, mobile: false });
+    await chrome.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
+    await press(chrome, "document.querySelector('[data-tab=roadmap]')");
+    await press(chrome, `document.querySelector('#roadmap-panel [data-roadmap-jump="m:0.9.1"]')`);
+    await chrome.waitFor(`document.querySelector('#roadmap-list [data-key="m:0.9.1"]')?.classList.contains('roadmap-arrival')`);
+    const position = JSON.parse(await chrome.stable(`JSON.stringify((() => {
+      const bar = document.querySelector('.top').getBoundingClientRect();
+      const target = document.querySelector('#roadmap-list [data-key="m:0.9.1"]').getBoundingClientRect();
+      const heading = document.querySelector('#roadmap-list [data-key="m:0.9.1"] .milestone-head h2').getBoundingClientRect();
+      const documentHeight = Math.max(document.documentElement.scrollHeight, document.body.scrollHeight);
+      const maxScroll = documentHeight - window.innerHeight;
+      return { barTop:bar.top, barBottom:bar.bottom, barHeight:bar.height, targetTop:target.top, headingTop:heading.top,
+        documentHeight, viewportHeight:window.innerHeight, scrollY:window.scrollY, maxScroll, remainingScroll:maxScroll-window.scrollY };
+    })())`));
+    console.log('phone release jump geometry', JSON.stringify(position));
+    assert.ok(position.barHeight > 56, `the phone header must wrap beyond its desktop height: ${JSON.stringify(position)}`);
+    assert.ok(position.remainingScroll > 300, `the jump is not clamped near the document bottom: ${JSON.stringify(position)}`);
+    assert.ok(position.headingTop >= position.barBottom, `the entire release heading sits below the wrapped header: ${JSON.stringify(position)}`);
+    assert.ok(position.scrollY > 0, `the release jump scrolls the page: ${JSON.stringify(position)}`);
+    await chrome.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 812, deviceScaleFactor: 1, mobile: false });
+    await chrome.waitFor('innerWidth === 1280');
+    await press(chrome, `document.querySelector('#roadmap-panel [data-roadmap-jump="m:0.9.1"]')`);
+    const desktop = JSON.parse(await chrome.stable(`JSON.stringify((() => {
+      const bar = document.querySelector('.top').getBoundingClientRect();
+      const target = document.querySelector('#roadmap-list [data-key="m:0.9.1"]');
+      const heading = target.querySelector('.milestone-head h2').getBoundingClientRect();
+      return { margin:getComputedStyle(target).scrollMarginTop, barBottom:bar.bottom, headingTop:heading.top };
+    })())`));
+    console.log('desktop release jump geometry', JSON.stringify(desktop));
+    assert.equal(desktop.margin, '72px', `desktop keeps today's scroll offset: ${JSON.stringify(desktop)}`);
+    assert.ok(desktop.headingTop >= desktop.barBottom, `desktop heading stays below the top bar: ${JSON.stringify(desktop)}`);
+    assert.deepEqual(chrome.exceptions, []);
   } finally {
     if (chrome) await closeSnapshotChrome(chrome);
     rmSync(profile, { recursive: true, force: true });

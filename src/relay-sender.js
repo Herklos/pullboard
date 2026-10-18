@@ -1,10 +1,12 @@
 /** Compare sealed actors with the relay's independently authenticated sender [H2,H16,B26]. */
+import { VERIFIER_STANDING_ENGINE } from './machine.js';
 import { Refused } from './refused.js';
 
 /** Read only the actor field used by each public engine operation; unknown operations fail closed. */
 export function relayMoveActor(move) {
   const args = move?.args;
   if (!Array.isArray(args)) return null;
+  if (move.operation === 'register' && move.engine >= VERIFIER_STANDING_ENGINE) return args[0]?.createdBy === 'machine' ? null : args[0]?.createdBy ?? null;
   if (move.operation === 'addItem') return args[0]?.by ?? null;
   if (move.operation === 'shout') return args[0]?.from ?? null;
   if (move.operation === 'recordHealthFindings') return args[0]?.agentId ?? null;
@@ -20,7 +22,10 @@ export function relayMoveActor(move) {
 export function validRelaySender(sender) {
   return Boolean(sender && ['person', 'agent', 'machine'].includes(sender.kind) && typeof sender.userId === 'string' && sender.userId.length > 0 && sender.userId.length <= 256 &&
     (sender.kind !== 'agent' || (typeof sender.agent === 'string' && sender.agent.length > 0 && sender.agent.length <= 256)) &&
-    (sender.kind !== 'machine' || (typeof sender.machine === 'string' && sender.machine.length > 0 && sender.machine.length <= 256)));
+    (sender.kind !== 'machine' || (typeof sender.machine === 'string' && sender.machine.length > 0 && sender.machine.length <= 256)) &&
+    (sender.policy === undefined || Number.isSafeInteger(sender.policy) && sender.policy > 0) &&
+    (sender.root === undefined || sender.root === true) &&
+    (sender.lineage === undefined || typeof sender.lineage === 'string' && sender.lineage.length > 0 && sender.lineage.length <= 64));
 }
 
 /**
@@ -38,6 +43,10 @@ export function relaySenderProblem(move, sender, kind, { phoneReceipt = false } 
   if (!validRelaySender(sender)) {
     return new Refused('RELAY_SENDER', 'this relay record has no authenticated sender; restore attribution before replaying it');
   }
+  // The relay stamps its policy on every record it now stores; an older engine cannot skip it (#579).
+  if (sender.policy >= VERIFIER_STANDING_ENGINE && kind !== 'snapshot' && !(move?.engine >= VERIFIER_STANDING_ENGINE)) {
+    return new Refused('ENGINE_VERSION', `this relay stores engine-${VERIFIER_STANDING_ENGINE} records; upgrade pullboard before sending moves to it`);
+  }
   if (move?.operation === 'shout' && move.args?.[0]?.answers != null) {
     return new Refused('RELAY_ANSWER', 'a sealed shout cannot answer or pass a decision; use pullboard answer <id> "<answer>" or pullboard pass <id> --note "<reason>" so the decision rules are checked');
   }
@@ -48,7 +57,8 @@ export function relaySenderProblem(move, sender, kind, { phoneReceipt = false } 
   if (sender.kind === 'machine') {
     if (kind === 'snapshot') return null;
     if (kind === 'move' && move?.engine >= 6 && (phoneReceipt ||
-        move.operation === 'register' && typeof move.args?.[0]?.lane === 'string' && move.args[0].lane !== 'person' ||
+        move.operation === 'register' && typeof move.args?.[0]?.lane === 'string' && move.args[0].lane !== 'person' &&
+          (move.engine < VERIFIER_STANDING_ENGINE || move.args[0].createdBy === 'machine' && move.args[0].id === undefined) ||
         move.operation === 'ensureCoordinator' && typeof move.args?.[0] === 'string')) return null;
     return new Refused('RELAY_PERSON_ONLY', 'a machine cannot act as the person; approve this action on the paired phone');
   }

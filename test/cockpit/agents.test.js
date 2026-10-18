@@ -272,8 +272,33 @@ test('agent model display names follow the API on phone and desktop [O8,N26]', {
         const activity = await text('#activity');
         assert.ok(activity.includes(expected.builder) && activity.includes(expected.unknown) && activity.includes(expected.reviewer), `${at}: activity identities`);
         await tab('roadmap');
-        assert.doesNotMatch(await text('#roadmap'), /web-[12]|coordinator/, `${at}: roadmap rows name no agents`);
-        await press(chrome, 'document.querySelector("#roadmap [data-go=\\"item:1\\"]")');
+        // Disclosure choices survive tab visits: explicitly fold rows before testing the collapsed view.
+        const opened = JSON.parse(await chrome.stable("JSON.stringify([...document.querySelectorAll('#roadmap .milestone-item[aria-expanded=true]')].map(row => row.dataset.roadmapKey))"));
+        for (const key of opened) await press(chrome, `document.querySelector('#roadmap .milestone-item[data-roadmap-key="${key}"]')`);
+        const collapsed = JSON.parse(await chrome.stable(`JSON.stringify((() => {
+          const rows = [...document.querySelectorAll('#roadmap .milestone-item')];
+          return { visible: document.querySelector('#roadmap').innerText, rows: rows.map(row => {
+            const detail = row.parentElement.querySelector('.milestone-why');
+            return { text: row.textContent, expanded: row.getAttribute('aria-expanded'), hidden: detail.hidden, rendered: detail.getClientRects().length > 0 };
+          }) };
+        })())`));
+        assert.equal(collapsed.rows.length, 3, `${at}: all fixture rows are checked`);
+        assert.doesNotMatch(collapsed.visible, /web-[12]|coordinator/, `${at}: collapsed roadmap page text names no agents`);
+        for (const row of collapsed.rows) {
+          assert.doesNotMatch(row.text, /web-[12]|coordinator/, `${at}: collapsed row headers name no agents`);
+          assert.deepEqual([row.expanded, row.hidden, row.rendered], ['false', true, false], `${at}: collapsed details are hidden and unrendered`);
+        }
+        const roadmapRow = "document.querySelector('#roadmap .milestone-item[data-roadmap-key=\"i:#1\"]')";
+        await press(chrome, roadmapRow);
+        await chrome.waitFor(`${roadmapRow}.getAttribute('aria-expanded') === 'true' && [...${roadmapRow}.parentElement.querySelectorAll('.roadmap-detail dt')].some(field => field.textContent === 'Agents' && field.nextElementSibling.textContent.includes(${JSON.stringify(expected.builder)}))`);
+        const expanded = JSON.parse(await chrome.stable(`JSON.stringify((() => {
+          const detail = ${roadmapRow}.parentElement.querySelector('.milestone-why');
+          const agents = [...detail.querySelectorAll('.roadmap-detail dt')].find(field => field.textContent === 'Agents')?.nextElementSibling;
+          return { shown: !detail.hidden && detail.getClientRects().length > 0, agents: agents?.innerText || '' };
+        })())`));
+        assert.equal(expanded.shown, true, `${at}: the expanded row displays its detail`);
+        assert.ok(expanded.agents.includes(expected.builder), `${at}: the approved Agents field uses the API display name`);
+        await press(chrome, `${roadmapRow}.parentElement.querySelector('.milestone-why a[data-go="item:1"]')`);
         await settled(chrome, 'view.tab === "items" && view.item === 1 && !!document.querySelector("#detail h2")');
         assert.ok((await text('#detail')).includes(expected.builder), `${at}: roadmap item opens with the API identity`);
         assert.ok(await chrome.stable('document.documentElement.scrollWidth <= innerWidth'), `${at}: no sideways overflow`);

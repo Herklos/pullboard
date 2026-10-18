@@ -22,7 +22,7 @@ import { main } from '../src/cli.js';
 import { exportBoard, restoreRelaySnapshot, semanticBoardDigest } from '../src/exchange.js';
 import { appliedSequence, checkpointSequence, engineReceipt, prepareEngineMove, requireSupportedEngine } from '../src/engine.js';
 import { seal as sealMove, unseal as openSealed } from '../src/seal.js';
-import { ENGINE_VERSION } from '../src/machine.js';
+import { ENGINE_VERSION, VERIFIER_STANDING_ENGINE } from '../src/machine.js';
 import { relayRecover, syncRelay } from '../src/relay.js';
 
 after(cleanupFixtureChildren);
@@ -533,10 +533,12 @@ test('two real clients enforce the verify policy captured in the item freeze [H1
     assert.notEqual(refreshed.item_frozen_digest, legacyDigest, 'explicit refreeze establishes a new digest for the newly captured policy');
     submitFixture(afterRefreeze, 1, { agentId: builderId, commit, tree, files: [] });
     store.register(afterRefreeze, { lane: 'coordinator', path: box.root, family: 'Coordinator Family' });
-    store.register(afterRefreeze, { lane, path: join(box.directory, 'verifier-same'), family: 'Builder Family' });
+    store.register(afterRefreeze, { lane, path: join(box.directory, 'verifier-same'), family: 'Builder Family', createdBy: 'coordinator' });
     verifierSame = store.agentAt(afterRefreeze, join(box.directory, 'verifier-same')).agent_id;
-    store.register(afterRefreeze, { lane, path: join(box.directory, 'verifier-other'), family: 'Reviewer Family' });
+    store.register(afterRefreeze, { lane, path: join(box.directory, 'verifier-other'), family: 'Reviewer Family', createdBy: 'coordinator' });
     verifierOther = store.agentAt(afterRefreeze, join(box.directory, 'verifier-other')).agent_id;
+    // These seats stand in for verifiers the coordinator enrolled through the relay (#579 standing).
+    for (const seat of [verifierSame, verifierOther]) afterRefreeze.db.prepare('INSERT INTO board_meta (meta_key, meta_value) VALUES (?, ?)').run(`agent_enrolled:${seat}`, 'coordinator');
 
     /** Freeze test items with a specific historical policy document, keeping engine inputs deterministic. */
     const makeFrozen = (verify, version = 1) => item => {
@@ -800,7 +802,7 @@ test('person recovery explicitly skips one future-engine blocker and publishes a
   const later = personRequest('later-person-request', 'Later person move');
   assert.equal((await box.call(box.path + '/requests', { method: 'POST', token: box.person.token,
     body: { sequence: 2, sealed: Buffer.from(await sealMove(box.key, new TextEncoder().encode(JSON.stringify(later)), { boardId: box.id, kind: 'request', sequence: 2 })).toString('base64url') } })).status, 200);
-  const invalid = { version: 1, engine: 3, id: 'known-item-forged-claim', operation: 'claim', args: [1, { agentId: 'forged-agent' }] };
+  const invalid = { version: 1, engine: ENGINE_VERSION, id: 'known-item-forged-claim', operation: 'claim', args: [1, { agentId: 'forged-agent' }] };
   const sealFor = async (value, kind, sequence) => Buffer.from(await sealMove(box.key, new TextEncoder().encode(JSON.stringify(value)), { boardId: box.id, kind, sequence })).toString('base64url');
   const append = (sequence, kind, sealed, token = box.one.token) => box.call(box.path + (kind === 'request' ? '/requests' : '/moves'), { method: 'POST', token, body: { sequence, sealed } });
   assert.equal((await append(3, 'move', await sealFor(invalid, 'move', 3))).status, 200);
@@ -809,7 +811,7 @@ test('person recovery explicitly skips one future-engine blocker and publishes a
   assert.equal((await append(5, 'request', await sealFor(repeated, 'request', 5), box.person.token)).status, 200);
   const changed = personRequest('reused-content-id', 'Changed request');
   assert.equal((await append(6, 'request', await sealFor(changed, 'request', 6), box.person.token)).status, 200);
-  const unknownCurrent = { version: 1, engine: 3, id: 'unknown-current-operation', operation: 'notAnOperation', args: [] };
+  const unknownCurrent = { version: 1, engine: ENGINE_VERSION, id: 'unknown-current-operation', operation: 'notAnOperation', args: [] };
   assert.equal((await append(7, 'move', await sealFor(unknownCurrent, 'move', 7), box.one.token)).status, 200);
   let suppressCheckpointWrites = true;
   const proxy = createServer(async (incoming, outgoing) => {
@@ -1195,9 +1197,10 @@ test('checkpoint restore checks native digest after BEGIN IMMEDIATE against a se
   }
 });
 
-test('relay accepts engine 4 clients carrying sealed background completions [V2,H16]', async t => {
+test('relay stores engine-4 sealed background completions opaquely [V2,H16]', async t => {
   const box = await fixture(t, { machineCredentials: false });
-  const headers = { 'x-pullboard-engine': '4' };
+  // A board with agent tokens requires an engine-27 client (#579); the sealed move keeps engine 4.
+  const headers = { 'x-pullboard-engine': String(ENGINE_VERSION) };
   assert.ok(ENGINE_VERSION >= 4, 'engine-4 background completions remain supported');
   const snapshot = await box.call(box.path + '/state', {
     method: 'PUT', token: box.person.token, headers,
@@ -1223,7 +1226,7 @@ test('relay accepts engine 4 clients carrying sealed background completions [V2,
   assert.equal(read.status, 200);
   assert.equal(read.body.events.length, 1);
   const [record] = read.body.events;
-  assert.deepEqual(record.sender, { kind: 'agent', userId: box.person.user.id, agent: 'client-one' });
+  assert.deepEqual(record.sender, { kind: 'agent', userId: box.person.user.id, agent: 'client-one', policy: VERIFIER_STANDING_ENGINE });
   assert.deepEqual(box.clientOpen(record.sealed, record.kind, record.event_id), move);
 });
 
@@ -1323,7 +1326,7 @@ test('[A4,H7] malformed or unauthorized calls cannot store clear records, keys o
   });
   assert.equal(request.status, 200);
   assert.equal(request.body.event.kind, 'request');
-  assert.deepEqual(request.body.event.sender, { kind: 'agent', userId: box.person.user.id, agent: 'client-one' });
+  assert.deepEqual(request.body.event.sender, { kind: 'agent', userId: box.person.user.id, agent: 'client-one', policy: VERIFIER_STANDING_ENGINE });
   assert.deepEqual(box.clientOpen(request.body.event.sealed, request.body.event.kind, request.body.event.event_id), { request: true });
   assert.throws(() => box.clientOpen(request.body.event.sealed, 'move', request.body.event.event_id));
 
@@ -1352,7 +1355,7 @@ test('[A4,H2,H7,H16] trusted sender attribution exposes impersonation and agent 
     method: 'POST', body: { sequence: 1, sealed: box.clientSeal(forged, 'move', 1) },
   });
   assert.equal(reply.status, 200, 'the relay stores opaque bytes without reading their claimed agent');
-  const expected = { kind: 'agent', userId: box.person.user.id, agent: 'client-one' };
+  const expected = { kind: 'agent', userId: box.person.user.id, agent: 'client-one', policy: VERIFIER_STANDING_ENGINE };
   assert.deepEqual(reply.body.event.sender, expected, 'the sender comes from the credential, not sealed contents');
   const events = (await box.call(box.path + '/events?after=0')).body.events;
   assert.equal(events.length, 1);
@@ -1376,7 +1379,7 @@ test('[A4,H2,H7,H16] trusted sender attribution exposes impersonation and agent 
     method: 'POST', token: box.person.token,
     body: { sequence: 2, sealed: box.clientSeal({ person: true }, 'move', 2) },
   });
-  assert.deepEqual(personMove.body.event.sender, { kind: 'person', userId: box.person.user.id });
+  assert.deepEqual(personMove.body.event.sender, { kind: 'person', userId: box.person.user.id, policy: VERIFIER_STANDING_ENGINE });
   assert.equal((await box.call(box.path, { method: 'DELETE', token: box.person.token })).status, 200);
 });
 

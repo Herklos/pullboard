@@ -9,6 +9,59 @@
  */
 import { RECORDED_GENERIC_NEXT } from './recorded-refusal.js';
 
+/** The coordinator carries every seat's request for a person decision [B26]. */
+export const COORDINATOR_PERSON_REQUEST = 'ask the coordinator to bring it to the person: pullboard shout coordinator "<what is needed>" --decision';
+
+/**
+ * Route presentation-only person requests for a known seat; unknown callers retain existing text.
+ * This does not change a refusal receipt, actor identity or permission to make the person's move.
+ *
+ * @param {string} step
+ * @param {{ caller?: 'seat'|'coordinator'|'person'|'unknown' }} [options]
+ * @returns {string}
+ */
+export function personRequestStep(step, { caller } = {}) {
+  return caller === 'seat' && /\bask the person\b/iu.test(step) ? COORDINATOR_PERSON_REQUEST : step;
+}
+
+/** Keep quoted user text out of generated repair-clause rewriting. */
+function quotedAt(text, at) {
+  let quoted = false;
+  let escaped = false;
+  for (let index = 0; index < at; index += 1) {
+    if (escaped) { escaped = false; continue; }
+    if (text[index] === '\\') { escaped = true; continue; }
+    if (text[index] === '"') quoted = !quoted;
+  }
+  return quoted;
+}
+
+/**
+ * Present a generated person-request clause for a seat, keeping its reason and requested action.
+ * Only the explanatory first line and an explicit final next footer are guidance; raw diagnostic
+ * lines and quoted user text remain intact. Setup questions opt in to a leading imperative.
+ *
+ * @param {string} message
+ * @param {{ caller?: 'seat'|'coordinator'|'person'|'unknown', leading?: boolean }} [options]
+ * @returns {string}
+ */
+export function personRequestGuidance(message, { caller, leading = false } = {}) {
+  if (caller !== 'seat') return message;
+  const lines = String(message).split('\n');
+  /** Route only an unquoted imperative, preserving clauses that explain the refusal. */
+  const route = line => line.replace(/(^|[;.:]\s+|\b(?:or|and)\s+)ask the person(?=$|[\s:;])([^;\n]*)/giu,
+    (whole, before, action, at) => {
+      if ((!before && !leading) || quotedAt(line, at + before.length)) return whole;
+      const request = action.trim().replace(/^:?\s*(?:to\s+|for\s+)?/iu, '');
+      const needed = request.replace(/\bask the person(?:\s+to)?\s*/giu,
+        (words, offset) => quotedAt(request, offset) ? words : '');
+      return `${before}${COORDINATOR_PERSON_REQUEST}${needed ? ` (needed: ${needed})` : ''}`;
+    });
+  lines[0] = route(lines[0]);
+  if (lines.length > 1 && /^next:[ \t]*\S/u.test(lines.at(-1))) lines[lines.length - 1] = route(lines.at(-1));
+  return lines.join('\n');
+}
+
 /** @type {Readonly<Record<string, string>>} */
 export const NEXT_STEPS = Object.freeze({
   HEALTH_FINDINGS: 'run pullboard health to read the current findings, then run pullboard resume to capture a fresh observation',
@@ -64,6 +117,7 @@ export const NEXT_STEPS = Object.freeze({
   BAD_RESOURCE_PRIORITY: 'request the slot as one kind: a landing, an item check or a diagnostic',
   BAD_RESOURCE_SCOPE: 'use the machine or repo scope',
   BAD_ROUTE: 'use --route light, mid or strong',
+  BAD_SEAT_ID: 'create the seat again from the same checkout without naming it, so Pullboard picks the next free name: pullboard worktree <lane> --model "<model name>"',
   BAD_SIGNATURE: 'make sure the signer is listed, then record a fresh sign-off: pullboard spec signoff <ids>',
   BAD_SIGNER: 'set git config user.email, or pass --by <principal>',
   BAD_SIGNERS_BASE: 'restore .pullboard/signers.initial and its hash from git: git checkout HEAD -- .pullboard',
@@ -235,7 +289,7 @@ export const NEXT_STEPS = Object.freeze({
   RIGOR_UNNOTICED: 'run pullboard rigor and draft a cause it lists, or wait until the cause repeats',
   RIGOR_UNPROVEN: 'name a check that fails at --red and passes at --green: pullboard rigor draft <key> "<rule>" --check "<command>" --red <commit> --green <commit>',
   RIGOR_PERSON_ONLY: 'ask the person to mark it from the main checkout: pullboard fact <id> root-cause "<why>" --cause <key> --never-again --as person',
-  SANDBOX_BLOCKED: 'ask the person to allow the named operation, or run the gate outside the sandbox; keep the tests unchanged',
+  SANDBOX_BLOCKED: `${COORDINATOR_PERSON_REQUEST}; or run the gate outside the sandbox; keep the tests unchanged`,
   NOT_YOUR_DECISION: 'answer only decisions addressed to you; see pullboard inbox',
   NO_AGENT: 'create and join a lane worktree: pullboard worktree <lane> --model "<model name>"',
   NO_BOARD: 'initialize the board in this repository: pullboard init',
@@ -332,6 +386,7 @@ export const NEXT_STEPS = Object.freeze({
   RELAY_PRESENTATION_PENDING: 'run pullboard status again',
   RELAY_RECOVERY_HEALTHY: 'replay it normally: pullboard relay',
   RELAY_RECOVERY_PENDING: 'finish the saved recovery: pullboard relay recover --skip <sequence>',
+  RELAY_REGISTRATION: 'create the seat again from its creating seat\'s checkout, or from the main checkout: pullboard worktree <lane> --model "<model name>"',
   RELAY_REPLAY_REQUIRED: 'upgrade Pullboard: npm install -g pullboard@latest',
   RELAY_RESPONSE: 'retry once the relay answers; if it repeats, pair again: pullboard relay on --all',
   RELAY_REFUSED: 'retry after fixing the displayed relay refusal; if it repeats, upgrade Pullboard and report the refusal to the service owner',
@@ -401,6 +456,8 @@ export const NEXT_STEPS = Object.freeze({
   STACKED_ON_UNVERIFIED: 'wait for the earlier item to be accepted, or rebuild on main without its commits',
   STALE_ROW_DECISION: 'ask the person to approve the current row again in pullboard view',
   SUBMISSION_PROOF: 'rerun pullboard submit <id> with the current CLI so its selected files and fallback are recorded',
+  TOKEN_EXPIRED: 'ask the coordinator for a fresh seat: pullboard worktree <lane> --model "<model name>"; for the coordinator\'s own token, the person runs pullboard relay on in the main checkout',
+  TOKEN_REVOKED: 'stop using this seat and ask the coordinator for a fresh one: pullboard worktree <lane> --model "<model name>"',
   TOKENS_NOT_AVAILABLE: 'manage agent tokens in pullboard view or the signed-in relay account',
   TOKEN_NOT_OWNED: 'name a token id from pullboard relay tokens',
   TOO_LARGE: 'open the file in your editor instead',
@@ -411,6 +468,7 @@ export const NEXT_STEPS = Object.freeze({
   UNTRACKED: 'commit or ignore the untracked files, then run the command again',
   UNKNOWN_TOOL: 'call tools/list and use a tool name returned by that MCP server',
   USAGE: 'run pullboard help',
+  VERIFIER_STANDING: 'ask the coordinator to make an independent verifier from the main checkout: pullboard worktree <lane> --model "<model name>"',
   VERDICT_TRUNK_MOVED: 'merge the latest main into the submitted commit and ask another agent to re-review the clean composition',
   VIEW_START: 'run pullboard view in the foreground to see why it stopped',
   VIEW_PAIRING_CLEANUP: 'run pullboard relay off, then pullboard relay on --all to finish pairing cleanup',
@@ -453,14 +511,16 @@ function stepInMessage(message) {
  *
  * @param {{ code?: string, next?: string } | null | undefined} error
  * @param {string} message
+ * @param {{ caller?: 'seat'|'coordinator'|'person'|'unknown' }} [options]
  * @returns {string}
  */
-export function nextStepFor(error, message) {
+export function nextStepFor(error, message, options = {}) {
+  if (personRequestGuidance(String(message), options) !== String(message)) return COORDINATOR_PERSON_REQUEST;
   const code = typeof error?.code === 'string' ? error.code : '';
   const finalStep = /(?:^|\r?\n)next:[ \t]*([^\r\n]*\S)[ \t]*(?:\r?\n)*$/u.exec(String(message))?.[1];
-  if (finalStep) return finalStep.trim();
-  if (typeof error?.next === 'string' && error.next.trim() && error.next.trim() !== RECORDED_GENERIC_NEXT) return error.next.trim();
+  if (finalStep) return personRequestStep(finalStep.trim(), options);
+  if (typeof error?.next === 'string' && error.next.trim() && error.next.trim() !== RECORDED_GENERIC_NEXT) return personRequestStep(error.next.trim(), options);
   if (code === 'SPEC_BEHIND_MAIN') return NEXT_STEPS.SPEC_BEHIND_MAIN;
-  return stepInMessage(message) ?? NEXT_STEPS[code]
-    ?? `ask the service owner about refusal code ${code || '(unknown)'}, including the displayed refusal`;
+  return personRequestStep(stepInMessage(message) ?? NEXT_STEPS[code]
+    ?? `ask the service owner about refusal code ${code || '(unknown)'}, including the displayed refusal`, options);
 }

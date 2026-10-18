@@ -1,10 +1,13 @@
+import { MILESTONE_SHIP_ENGINE } from '../src/milestones.js';
 /** Declared models replay with their recorded engine and survive board exchange [O8,O3,H16]. */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import * as store from '../src/board.js';
 import { applyEngineMove, prepareEngineMove } from '../src/engine.js';
 import { exportBoard, importBoard } from '../src/exchange.js';
+import { AUTO_ESCALATE_ENGINE } from '../src/machine.js';
 import { ENGINE_VERSION } from '../src/machine.js';
+import { VERIFIER_STANDING_ENGINE } from '../src/machine.js';
 import { RIGOR_NOTICE_ENGINE } from '../src/rigor-source.js';
 import { HEALTH_SENTINEL_ENGINE } from '../src/health-receipts.js';
 import { CONFLICT_ENGINE } from '../src/trunk-conflict.js';
@@ -14,10 +17,14 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-test('model declarations and event snapshots retain every recorded engine [O8,O3,H16]', (t) => {
-  assert.ok(ENGINE_VERSION >= MILESTONE_SHIP_ENGINE, 'the writer retains the milestone shipment minimum and every recorded legacy engine');
+test('model declarations and event snapshots retain all supported engine semantics [O8,O3,H16]', (t) => {
+  assert.ok(ENGINE_VERSION >= AUTO_ESCALATE_ENGINE, 'the current writer retains automatic-escalation semantics');
+  assert.ok(ENGINE_VERSION >= 45, 'the current writer retains engine-45 milestone semantics');
   assert.ok(ENGINE_VERSION >= RIGOR_NOTICE_ENGINE, 'the next writer preserves every historical model snapshot through main engine 33');
   assert.ok(ENGINE_VERSION >= HEALTH_SENTINEL_ENGINE, 'the current writer retains the sentinel minimum and historical behavior');
+  assert.ok(ENGINE_VERSION >= AUTO_ESCALATE_ENGINE, 'the current writer includes automatic escalation and preserves historical model snapshots');
+  assert.ok(ENGINE_VERSION >= VERIFIER_STANDING_ENGINE, 'the current writer retains verifier standing');
+  assert.ok(ENGINE_VERSION >= MILESTONE_SHIP_ENGINE, 'the current writer retains milestone shipping');
   assert.ok(ENGINE_VERSION >= CONFLICT_ENGINE, 'the writer retains the trunk-conflict feature minimum');
   for (const version of Array.from({ length: ENGINE_VERSION }, (_, index) => index + 1)) {
     const board = store.openBoard(':memory:');

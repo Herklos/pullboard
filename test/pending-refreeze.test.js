@@ -8,7 +8,9 @@ import { test } from 'node:test';
 import * as store from '../src/board.js';
 import { appliedSequence, applyRelayMove, engineReceipt, prepareEngineMove } from '../src/engine.js';
 import { exportBoard, importBoard } from '../src/exchange.js';
+import { AUTO_ESCALATE_ENGINE } from '../src/machine.js';
 import { ENGINE_VERSION } from '../src/machine.js';
+import { VERIFIER_STANDING_ENGINE } from '../src/machine.js';
 import { RIGOR_NOTICE_ENGINE } from '../src/rigor-source.js';
 import { HEALTH_SENTINEL_ENGINE } from '../src/health-receipts.js';
 import { CONFLICT_ENGINE } from '../src/trunk-conflict.js';
@@ -265,10 +267,14 @@ async function checkDependencyLegacyClients(cleanup, directory, snapshot, target
 }
 
 test('dependency edits replay the same on every engine [B3,V2,H16]', async (t) => {
-  assert.ok(ENGINE_VERSION >= MILESTONE_SHIP_ENGINE, 'the writer retains the milestone shipment minimum and every recorded legacy engine');
+  assert.ok(ENGINE_VERSION >= AUTO_ESCALATE_ENGINE, 'the current writer retains automatic-escalation semantics');
+  assert.ok(ENGINE_VERSION >= 45, 'the current writer retains engine-45 milestone semantics');
   assert.ok(ENGINE_VERSION >= RIGOR_NOTICE_ENGINE, 'the next writer retains all recorded dependency-edit behavior');
   assert.ok(ENGINE_VERSION >= HEALTH_SENTINEL_ENGINE, 'the current writer retains the sentinel minimum and historical behavior');
+  assert.ok(ENGINE_VERSION >= AUTO_ESCALATE_ENGINE, 'the current writer retains recorded dependency-edit behavior and automatic escalation');
+  assert.ok(ENGINE_VERSION >= VERIFIER_STANDING_ENGINE, 'the current writer retains verifier standing');
   assert.ok(ENGINE_VERSION >= CONFLICT_ENGINE, 'the writer retains the trunk-conflict feature minimum');
+  assert.ok(ENGINE_VERSION >= MILESTONE_SHIP_ENGINE, 'the writer retains the milestone shipment minimum and every recorded legacy engine');
   const directory = mkdtempSync(join(tmpdir(), 'pullboard-dependency-engines-'));
   const cleanup = [];
   t.after(() => {

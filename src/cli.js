@@ -273,7 +273,6 @@ import { renderSpecView } from './view.js';
 import { tour } from './tour.js';
 import {
   commandOutput,
-  refusalDocument,
 } from './json.js';
 import {
   forgetProject,
@@ -848,6 +847,7 @@ function sayBrief(io, brief) {
  */
 function context(io) {
   const info = repoInfo(io.cwd);
+  if (info.isMain) io.caller?.('coordinator', info.root);
   const allowSchemaUpgrade = codeIsFromMain();
   const config = configHere(info);
   const file = join(info.commonDir, 'pullboard', 'board.sqlite');
@@ -908,7 +908,11 @@ function withBoard(ctx, work) {
     store.closeBoard(board);
   };
   let result;
-  try { result = work(board); }
+  try {
+    // Reuse the already-open board to identify a registered seat, without another lock or migration.
+    if (ctx.io.caller && !ctx.info.isMain && !ctx.io.callerKnown?.(ctx.info.root) && store.agentAt(board, ctx.info.root)) ctx.io.caller('seat', ctx.info.root);
+    result = work(board);
+  }
   catch (error) { finish(); throw error; }
   if (result && typeof result.then === 'function') return result.finally(finish);
   finish();
@@ -917,6 +921,12 @@ function withBoard(ctx, work) {
 
 /** Dispatch a board mutation locally, or seal it before any linked replica applies it. */
 async function ordered(ctx, board, operation, args) {
+  // Every engine-27 registration records the seat that made it: the coordinator from the main
+  // checkout, the joined agent from its worktree, or `machine` for a join no seat made (#579).
+  if (operation === 'register' && args[0] && args[0].createdBy === undefined) {
+    const joined = store.agentAt(board, ctx.info.root)?.agent_id;
+    args = [{ ...args[0], createdBy: ctx.info.isMain ? COORDINATOR : joined ?? 'machine' }, ...args.slice(1)];
+  }
   const command = ['add', 'edit', 'merged'].includes(ctx.io.relayCommand?.cliOperation) ? ctx.io.relayCommand : undefined;
   /** Dispatch while this session holds the checkout, including long-running next/run loops. */
   const execute = () => relayLinked(ctx.info.root) || relayRecovered(ctx.info.root)
@@ -1040,6 +1050,7 @@ function refuseRemoteCoordinatorModel(ctx, command) {
  */
 function whoAmI(ctx, board) {
   if (ctx.info.isMain) {
+    ctx.io.caller?.('coordinator', ctx.info.root);
     const registered = store.listAgents(board).find((agent) => agent.agent_id === COORDINATOR);
     const linked = relayLinked(ctx.info.root);
     if (linked && !registered) throw new Refused('NO_AGENT', 'the linked snapshot has no coordinator; restore a consistent relay snapshot before acting');
@@ -1051,6 +1062,7 @@ function whoAmI(ctx, board) {
   if (!agent) {
     throw new Refused('NOT_JOINED', 'this worktree has not joined a lane: pullboard join <lane> --model "<model name>" (see: pullboard lanes)');
   }
+  ctx.io.caller?.('seat', ctx.info.root);
   return { id: agent.agent_id, lane: agent.agent_lane, route: agent.agent_route, family: agent.agent_family ?? null, model: agent.agent_model ?? 'unknown', displayName: displayAgentName(agent, ctx.config.agents.names) };
 }
 
@@ -1255,7 +1267,7 @@ function agentRefusalText(message, code, name) {
 
 /** Render the refusal body without its existing final footer; structured errors retain the message. */
 function displayedRefusal(io, error) {
-  const message = error.message.replace(/\r?\nnext:[ \t]*[^\r\n]*\S[ \t]*(?:\r?\n)*$/u, '');
+  const message = io.guidance(error.message.replace(/\r?\nnext:[ \t]*[^\r\n]*\S[ \t]*(?:\r?\n)*$/u, ''));
   if (error.code === 'MODEL_REQUIRED') return message.replace(/; run pullboard .+$/u, '');
   if (!['ALREADY_JOINED', 'HELD', 'ITEM_HELD', 'LANE_HELD', 'REVIEW_HELD', 'NOT_YOURS', 'NOT_YOUR_DECISION', 'NO_AGENT', 'NOT_YOUR_CHECKOUT', 'FACT_JUDGEMENT', 'RELAY_PERSON_ONLY', 'RELAY_SENDER_MISMATCH', 'SELF_SHOUT', 'NO_READER'].includes(error.code)) return message;
   try {
@@ -1616,7 +1628,7 @@ function boardSetup(ctx, card, identity) {
     { number: 5, done: card.viewOpened,
       question: 'Ask the person: shall we open the board so you can follow the work?', command: 'pullboard view',
       afterAnswer: 'Run this in the person’s own terminal, or start it in the background as the agent so setup can continue. The view records its successful bind or authenticated reuse for this board.' },
-  ];
+  ].map(step => ({ ...step, question: ctx.io.guidance(step.question, { leading: true }) }));
   const current = steps.find(step => !step.done);
   if (!current && !recordedComplete) recordSetupState(ctx, identity, 'complete');
   else if (current && !completed && !started) recordSetupState(ctx, identity, 'started');
@@ -1624,12 +1636,13 @@ function boardSetup(ctx, card, identity) {
     const rowIds = drafted.map(row => row.id);
     const names = rowIds.join(', ');
     const command = `pullboard spec show ${rowIds[0]}`;
+    const seat = ctx.io.callerRole() === 'seat';
     return { step: 1, total: 5, ...current, steps, waitingOn: 'person-approval', rowIds,
-      question: `Waiting for the person to approve ${names}.`, command,
+      question: seat ? `Waiting for the coordinator to bring approval of ${names} to the person.` : `Waiting for the person to approve ${names}.`, command,
       personCommand: `pullboard spec approve ${rowIds.join(',')}`,
       afterAnswer: 'The person approves these rows in Pullboard View or their own terminal; then the coordinator runs pullboard spec apply.',
-      meanwhile: 'While waiting, the agent may review independent approved work or prepare questions for the person.',
-      agentNext: `wait for the person to approve ${names}; meanwhile ${command}` };
+      meanwhile: seat ? 'While waiting, review independent approved work or send questions to the coordinator with pullboard shout coordinator "<what is needed>" --decision.' : 'While waiting, the agent may review independent approved work or prepare questions for the person.',
+      agentNext: seat ? `ask the coordinator to bring approval of ${names} to the person: pullboard shout coordinator "approve ${names}" --decision; meanwhile ${command}` : `wait for the person to approve ${names}; meanwhile ${command}` };
   }
   return current ? { step: current.number, total: 5, ...current, steps } : null;
 }
@@ -2389,6 +2402,13 @@ function readCommands(io, { first, second, rest, values }) {
         const when = milestone.shipped ? ` · shipped at ${milestone.shipped.commit.slice(0, 12)} on ${milestone.shipped.at}`
           : milestone.target ? ` · target ${milestone.target}${milestone.pastTarget ? ', past target' : ''}` : '';
         io.say(`${milestone.name}: ${milestone.landed}/${milestone.total} landed${when}`);
+        if (!milestone.shipped) {
+          const summary = milestone.summary;
+          const bounds = summary.estimate;
+          const hours = bounds && (bounds.low === bounds.high ? bounds.low : `${bounds.low} to ${bounds.high}`);
+          const estimate = bounds ? `; about ${hours} h at today's pace.` : '; estimate unavailable.';
+          io.say(`  ${summary.left} left of ${summary.total}: ${summary.landed} landed, ${summary.landing} landing, ${summary.review} in review, ${summary.building} building, ${summary.waiting} waiting, ${summary.held} held${estimate}`);
+        }
         if (milestone.note) io.say(`  ${milestone.note}`);
         for (const item of milestone.items) {
           const id = typeof item.id === 'number' ? `#${item.id}` : item.id;
@@ -3161,8 +3181,10 @@ async function nextOnce(ctx, values) {
         ...(seats ? { lanes: laneNames(ctx.config).filter((lane) => lane !== COORDINATOR) } : {}),
         priority: mainRedReworkItems(ctx.info.root, board) });
     const held = item?.item_status === 'claimed';
-    const offer = held ? null : store.reviewOffer(board, { agentId: me.id, lane: me.lane, policy: ctx.config.verify.policy,
+    /** Offer only reviews this seat may give; a linked board previews its engine-27 verifier standing (#579). */
+    const findOffer = () => store.reviewOffer(board, { agentId: me.id, lane: me.lane, policy: ctx.config.verify.policy,
       familyPolicy: ctx.config.verify.family, ratio: ctx.config.verify.reviewRatio, runnable: values.runnable, routes: values.routes });
+    const offer = held ? null : relayLinked(ctx.info.root) ? store.withVerifierStanding(board, { root: true }, findOffer) : findOffer();
     if (offer && !values.build) return { item: offer.item, offer, build: item ?? null };
     if (!item) return { reasons };
     const reviewSkipped = values.build && !held
@@ -4105,7 +4127,7 @@ async function specCommand(io, { first, second, rest, values }) {
       const lost = permanenceProblems(parsed === practice ? practice.repo : parsed, { committed: history.ids, cited });
       if (name === ctx.config.spec) {
         const answered = handAnsweredQuestions(previousSources.get(name) ?? [], parsed.rows, () => hookRead(ctx, (board) => store.rowDecisions(board)) ?? []);
-        lost.push(...answered.map((id) => ({ id, message: `pending question answered by hand; ask the person to run pullboard spec answer ${id} "<choice or text>" and restore the pending row` })));
+        lost.push(...answered.map((id) => ({ id, message: io.guidance(`pending question answered by hand; ask the person to run pullboard spec answer ${id} "<choice or text>" and restore the pending row`) })));
       }
       lost.forEach((problem) => messages.push(`${name}: ${problem.id} error: ${problem.message}`));
       const fileErrors = findings.filter((finding) => finding.level === 'error').length + lost.length;
@@ -4270,6 +4292,8 @@ async function hookCommand(io, { first, second }) {
     applyFixers(info.root, ctx.config.fix).forEach((note) => io.err(`pullboard pre-commit: ${note}`));
     const agent = info.isMain ? null : hookRead(ctx, (board) => store.agentAt(board, info.root));
     const landing = hookRead(ctx, (board) => store.landingBatches(board).some((batch) => batch.root === info.root && !['landed', 'blocked'].includes(batch.state)));
+    if (landing) io.caller('coordinator', info.root);
+    else if (agent) io.caller('seat', info.root);
     problems = preCommitProblems({ root: info.root, isMain: info.isMain || landing, config: ctx.config, agent, boardFile: ctx.file });
   } else if (first === 'commit-msg') {
     const message = readFileSync(second ?? '', 'utf8');
@@ -4296,7 +4320,7 @@ async function hookCommand(io, { first, second }) {
     throw new Refused('USAGE', 'pullboard hook pre-commit | pre-merge-commit | commit-msg <file> | pre-push');
   }
   if (!problems.length) return 0;
-  io.err(`pullboard ${first}: blocked\n${problems.map((problem) => `  - ${problem}`).join('\n')}\n${FIX_NOTE}`);
+  io.err(`pullboard ${first}: blocked\n${problems.map((problem) => `  - ${io.guidance(problem)}`).join('\n')}\n${FIX_NOTE}`);
   return 1;
 }
 
@@ -4314,7 +4338,7 @@ async function runCommand(argv, io) {
   } catch (error) {
     const refusal = new Refused('USAGE', `${error.message}; run pullboard help`);
     io.refusal?.(refusal);
-    io.err(`pullboard: ${error.message}\nRun pullboard help --all for the full list.\nnext: ${refusalDocument(refusal).error.next}`);
+    io.err(`pullboard: ${error.message}\nRun pullboard help --all for the full list.\nnext: ${io.refusalDocument(refusal).error.next}`);
     return 2;
   }
   const { values, positionals } = parsed;
@@ -4424,6 +4448,8 @@ async function runCommand(argv, io) {
           const ctx = context(io);
           const agents = withBoard(ctx, (board) => store.listAgents(board));
           for (const row of result.tokens) io.say(row.id + '  ' + agentDisplayName(agents, ctx.config, row.agent) + '  ' + (row.revoked ? 'revoked' : 'expires ' + new Date(row.expires).toISOString()));
+          // The person-made coordinator credential events: who set it up, what it revoked, what it issued.
+          for (const row of result.coordinatorEvents ?? []) io.say(`coordinator ${row.reason} by person session ${row.session} at ${new Date(row.at).toISOString()}: issued ${row.issued}, revoked ${row.revoked.length ? row.revoked.join(', ') : 'none'}`);
         } else io.say('revoked token ' + result.id + '; other agent tokens are unchanged');
         return 0;
       }
@@ -4515,7 +4541,7 @@ async function runCommand(argv, io) {
   } catch (error) {
     if (error instanceof Refused) {
       io.refusal?.(error);
-      io.err(`pullboard: ${displayedRefusal(io, error)}\nnext: ${refusalDocument(error).error.next}`);
+      io.err(`pullboard: ${displayedRefusal(io, error)}\nnext: ${io.refusalDocument(error).error.next}`);
       return 1;
     }
     throw error;
@@ -4597,16 +4623,21 @@ async function runMain(argv, streams) {
   } catch { sync = false; needsRepo = false; }
   if (parsed) {
     try {
+      // Checkout identity supplies the display role even if a person-channel check refuses first.
+      try { const info = needsRepo ? repoInfo(io.cwd) : null; if (info?.isMain) io.caller('coordinator', info.root); } catch { /* Unknown checkouts retain existing guidance. */ }
       const [command, verb] = parsed.positionals;
       const remoteRelayOn = command === 'relay' && verb === 'on' && !parsed.values.all;
       if (!parsed.values.help && !parsed.values.version &&
-          (parsed.values.as === 'person' && command !== 'decisions' || command === 'relay' && ['on', 'join', 'revoke'].includes(verb) && !remoteRelayOn)) requirePersonChannel(io.personChannel);
+          (parsed.values.as === 'person' && command !== 'decisions' || command === 'relay' && ['on', 'join', 'revoke'].includes(verb) && !remoteRelayOn)) {
+        requirePersonChannel(io.personChannel);
+        io.caller('person');
+      }
       checkoutSession = await bindCheckoutSession(io, parsed.positionals, parsed.values);
       if (checkoutSession?.lease) CHECKOUT_LEASES.set(io, checkoutSession.lease);
     } catch (error) {
       if (!(error instanceof Refused)) throw error;
       io.refusal(error);
-      io.err(`pullboard: ${displayedRefusal(io, error)}\nnext: ${refusalDocument(error).error.next}`);
+      io.err(`pullboard: ${displayedRefusal(io, error)}\nnext: ${io.refusalDocument(error).error.next}`);
       io.flush(1);
       return 1;
     }
@@ -4620,7 +4651,7 @@ async function runMain(argv, streams) {
       }
       catch (error) {
         if (!(error instanceof Refused)) throw error;
-        if (!['NOT_A_REPO', 'NO_REPO', 'NO_CONFIG', 'CORE_BARE'].includes(error.code)) io.err(`pullboard: ${displayedRefusal(io, error)}\nnext: ${refusalDocument(error).error.next}`);
+        if (!['NOT_A_REPO', 'NO_REPO', 'NO_CONFIG', 'CORE_BARE'].includes(error.code)) io.err(`pullboard: ${displayedRefusal(io, error)}\nnext: ${io.refusalDocument(error).error.next}`);
       }
     };
     if (needsRepo) rememberTrunk(io);
@@ -4631,7 +4662,7 @@ async function runMain(argv, streams) {
       try { await executePersonRequests(io.cwd, io, main); }
       catch (error) {
         if (!(error instanceof Refused)) throw error;
-        if (!['NOT_A_REPO', 'NO_REPO', 'NO_CONFIG', 'CORE_BARE'].includes(error.code)) io.err(`pullboard: ${displayedRefusal(io, error)}\nnext: ${refusalDocument(error).error.next}`);
+        if (!['NOT_A_REPO', 'NO_REPO', 'NO_CONFIG', 'CORE_BARE'].includes(error.code)) io.err(`pullboard: ${displayedRefusal(io, error)}\nnext: ${io.refusalDocument(error).error.next}`);
       }
     }
     traceServeStartup('cli-command-preamble-ready');

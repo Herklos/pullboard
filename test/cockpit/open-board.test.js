@@ -35,7 +35,7 @@ function call(base, path, { method = 'GET', headers = {} } = {}) {
  * the person answers), and otherwise passed to the view the test started on its own port.
  */
 async function openBoardStand(chrome, view) {
-  const stand = { signedIn: false, linked: [], local: null, hold: false, held: [], failures: [], failList: 0 };
+  const stand = { signedIn: false, linked: [], local: null, hold: false, held: [], failures: [], failList: 0, dropped: 0 };
   const client = 'export function rememberPairing() { return null; }\nexport async function createTransport() { return { async request(path) { if (path === "/api/v1/boards") return { version: 1, boards: [], warnings: [] }; throw new Error("no paired board"); } }; }\n';
   const relay = createRelayBrowserHandler({ authenticate: async () => { if (stand.signedIn) return { kind: 'session' }; throw new Refused('AUTH_REQUIRED', 'Sign in.'); } });
   const send = (requestId, status, headers, body) => chrome.send('Fetch.fulfillRequest', { requestId, responseCode: status, responseHeaders: headers, body: Buffer.from(body).toString('base64') });
@@ -45,6 +45,15 @@ async function openBoardStand(chrome, view) {
     if (!stand.local) return chrome.send('Fetch.failRequest', { requestId, errorReason: 'ConnectionRefused' });
     const reply = await call(stand.local, address.pathname + address.search, { method: asked.method, headers: Object.fromEntries(Object.entries(asked.headers).filter(([name]) => name.toLowerCase() !== 'host')) });
     return send(requestId, reply.status, Object.entries(reply.headers).filter(([name]) => !['content-length', 'transfer-encoding', 'connection', 'keep-alive', 'date'].includes(name)).map(([name, value]) => ({ name, value: String(value) })), reply.body);
+  };
+  /**
+   * Record a reply that failed. A reply that comes after the page stopped waiting, because it moved on, reloaded or its
+   * own wait ran out, has nowhere to go: Chrome dropped that request. It is counted, never a failure; any other error
+   * still is (#829).
+   */
+  const settle = (error) => {
+    if (/Invalid InterceptionId/u.test(error.message)) stand.dropped += 1;
+    else stand.failures.push(error.message);
   };
   const listener = ({ data }) => {
     const message = JSON.parse(String(data));
@@ -78,7 +87,7 @@ async function openBoardStand(chrome, view) {
       const handled = await relay({ method: 'GET', url: address.pathname, headers: {} }, { writeHead: (status, headers) => { head = headers; }, end: (content) => { body = content ?? ''; } });
       if (!handled) return chrome.send('Fetch.failRequest', { requestId, errorReason: 'Failed' });
       return fulfil(requestId, head['content-type'], body, [{ name: 'Content-Security-Policy', value: head['content-security-policy'].replace("connect-src 'self'", "connect-src 'self' " + view.base) }]);
-    })().catch((error) => stand.failures.push(error.message));
+    })().catch(settle);
   };
   chrome.socket.addEventListener('message', listener);
   await chrome.send('Fetch.enable', { patterns: [{ urlPattern: HOSTED + '/*', requestStage: 'Request' }, { urlPattern: LOCAL + '/*', requestStage: 'Request' }, { urlPattern: view.base + '/api/v1/boards', requestStage: 'Request' }, { urlPattern: view.base + '/api/v1/boards?*', requestStage: 'Request' }] });
@@ -117,7 +126,7 @@ async function openBoardStand(chrome, view) {
   stand.release = async () => {
     stand.hold = false;
     const held = stand.held.splice(0);
-    for (const entry of held) await toView(entry);
+    for (const entry of held) await toView(entry).catch(settle);
   };
   /** Stop serving the stand-in. */
   stand.stop = async () => {
@@ -403,5 +412,102 @@ test('the page moves on by itself when the view starts [N26,H5]', { timeout: 120
         finally { rmSync(profile, { recursive: true, force: true }); }
       }
     }
+  }
+});
+
+
+test('the link invitation closes, stays closed and comes back [N26,H5]', async t => {
+  const executable = chromeExecutable();
+  if (!executable) return t.skip('Install Chrome for the real link invitation check.');
+  const box = machine();
+  const demo = project(box, 'link-invitation');
+  box.run(demo.repo, 'milestone', 'add', 'Delivery');
+  const profile = mkdtempSync(join(tmpdir(), 'pullboard-link-invitation-'));
+  let view; let chrome; let available = true;
+  const failures = [];
+  try {
+    view = await startView(box);
+    chrome = await openSnapshotChrome(executable, 'about:blank', profile);
+    // Only availability is supplied; the board, rendering, storage and all clicks are real.
+    chrome.socket.addEventListener('message', ({ data }) => {
+      const message = JSON.parse(String(data));
+      if (message.method !== 'Fetch.requestPaused') return;
+      chrome.send('Fetch.fulfillRequest', { requestId: message.params.requestId, responseCode: 200,
+        responseHeaders: [{ name: 'Content-Type', value: 'application/json' }],
+        body: Buffer.from(JSON.stringify({ version: 1, available })).toString('base64') }).catch(error => failures.push(error.message));
+    });
+    await chrome.send('Fetch.enable', { patterns: [{ urlPattern: view.base + '/api/v1/view-link', requestStage: 'Request' }] });
+    await chrome.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
+    await chrome.send('Page.navigate', { url: view.link.href });
+    await chrome.waitFor("data?.project?.root && !document.body.classList.contains('loading')");
+    await chrome.stable('sharingReady');
+    assert.equal(await chrome.stable("document.querySelector('#share-note b')?.textContent"), 'Open your boards on any device');
+    assert.equal(await chrome.stable("document.querySelector('#share-note .share-txt > span')?.textContent"), 'Sign in to use pullboard.dev while on the go.');
+    assert.deepEqual(JSON.parse(await chrome.stable("JSON.stringify((() => { const a = document.querySelector('#share-note .share-txt a'); return a ? [a.textContent, a.href, a.target, a.rel] : null; })())")), ['How the relay works', 'https://pullboard.dev/relay/', '_blank', 'noopener']);
+    assert.equal(await chrome.stable("document.querySelector('#share-start').textContent.trim()"), 'Sign in with GitHub');
+    assert.equal(await chrome.stable("Boolean(document.querySelector('#share-start svg') && document.querySelector('#share-note .share-ic svg'))"), true);
+    assert.equal(await chrome.stable("document.querySelector('#share-hide')?.getAttribute('aria-label')"), 'Hide this; bring it back from the projects list');
+    assert.equal(await chrome.stable("document.querySelector('#share-again')?.hidden"), true, 'no redundant entry while the card shows');
+    await press(chrome, "document.querySelector('#share-hide')");
+    assert.equal(await chrome.stable("document.querySelector('#share-note').hidden"), true);
+    assert.equal(await chrome.stable("document.querySelector('#share-again').hidden"), false);
+    await chrome.send('Page.reload');
+    await chrome.waitFor("data?.project?.root && !document.body.classList.contains('loading')");
+    await chrome.stable('sharingReady');
+    assert.equal(await chrome.stable("document.querySelector('#share-note').hidden"), true, 'the machine remembers dismissal after reload');
+    assert.equal(await chrome.stable("document.querySelector('#share-again').textContent"), 'Link boards to pullboard.dev…');
+    await press(chrome, "document.querySelector('#share-again')");
+    assert.equal(await chrome.stable("document.querySelector('#share-note').hidden"), false);
+    assert.equal(await chrome.stable("document.querySelector('#share-again').hidden"), true);
+    const backgrounds = new Set();
+    for (const width of [1280, 390, 375]) {
+      await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
+      await press(chrome, "document.querySelector('[data-tab=roadmap]')");
+      await chrome.waitFor("document.querySelector('.roadmap-list') && document.querySelector('.roadmap-panel')");
+      for (const theme of ['light', 'dark']) {
+        await chrome.stable(`document.documentElement.dataset.theme = '${theme}'`);
+        const measured = JSON.parse(await chrome.stable(`JSON.stringify((() => {
+          const card = document.querySelector('#share-note'), rect = card.getBoundingClientRect();
+          const parts = [...document.querySelectorAll('.roadmap-list, .roadmap-panel')].map(part => part.getBoundingClientRect());
+          const button = document.querySelector('#share-start');
+          const link = card.querySelector('.share-txt a'), line = card.querySelector('.share-txt > span'), linkRect = link.getBoundingClientRect();
+          return { left: rect.left, right: rect.right, columnsLeft: Math.min(...parts.map(part => part.left)),
+            columnsRight: Math.max(...parts.map(part => part.right)), background: getComputedStyle(card).backgroundColor,
+            githubBackground: getComputedStyle(button).backgroundColor, overflow: document.documentElement.scrollWidth > innerWidth,
+            buttonFits: button.getBoundingClientRect().right <= rect.right,
+            linkFits: linkRect.left >= rect.left && linkRect.right <= rect.right,
+            linkBelowLine: linkRect.top >= line.getBoundingClientRect().bottom - 1,
+            linkColor: getComputedStyle(link).color, entryColor: getComputedStyle(document.querySelector('#share-again')).color,
+            closeWidth: document.querySelector('#share-hide').getBoundingClientRect().width,
+            closeHeight: document.querySelector('#share-hide').getBoundingClientRect().height,
+            buttonHeight: button.getBoundingClientRect().height };
+        })())`));
+        assert.ok(Math.abs(measured.left - measured.columnsLeft) < 1 && Math.abs(measured.right - measured.columnsRight) < 1,
+          `${width}/${theme}: the full card spans both Roadmap and Releases columns`);
+        assert.equal(measured.githubBackground, 'rgb(31, 35, 40)', 'the existing GitHub style stays dark');
+        assert.equal(measured.overflow, false, `${width}/${theme}: no horizontal overflow`);
+        assert.equal(measured.buttonFits, true);
+        assert.equal(measured.linkFits, true, `${width}/${theme}: the relay link stays inside the card`);
+        assert.equal(measured.linkColor, measured.entryColor, `${width}/${theme}: the relay link uses the view accent`);
+        if (width < 600) assert.equal(measured.linkBelowLine, true, `${width}/${theme}: the relay link wraps below the quiet line`);
+        const target = width < 900 ? 44 : 32;
+        assert.ok(measured.closeWidth >= target && measured.closeHeight >= target && measured.buttonHeight >= target,
+          `${width}/${theme}: close and sign-in retain the view's existing tap target`);
+        backgrounds.add(measured.background);
+      }
+      await proofShot(chrome, 'link-invitation', width);
+    }
+    assert.equal(backgrounds.size, 2, 'the card uses the light and dark surface tokens');
+    available = false;
+    await chrome.send('Page.reload');
+    await chrome.waitFor("data?.project?.root && !document.body.classList.contains('loading')");
+    await chrome.stable('sharingReady');
+    assert.equal(await chrome.stable("document.querySelector('#share-note').hidden"), true);
+    assert.equal(await chrome.stable("document.querySelector('#share-again').hidden"), true, 'no entry when sharing is unavailable');
+    assert.deepEqual(failures, []);
+  } finally {
+    if (chrome) await closeSnapshotChrome(chrome);
+    if (view) await view.stop();
+    rmSync(profile, { recursive: true, force: true });
   }
 });
