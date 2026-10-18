@@ -258,8 +258,9 @@ a.ghost { color: var(--ink); }
 .milestone-head { display: flex; align-items: center; gap: 10px; min-height: 44px; cursor: pointer; border-radius: 8px; }
 .milestone-head .milestone-count { margin-left: auto; }
 /* A small triangle that turns down when its part is open. */
-.roadmap-layout .caret { flex: none; width: 7px; height: 9px; background: var(--ink-faint); clip-path: polygon(0 0, 100% 50%, 0 100%); transition: transform .15s; }
-.milestone-head[aria-expanded="true"] > .caret { transform: rotate(90deg); }
+.roadmap-layout .caret { display: inline-block; flex: none; width: 16px; height: 16px; margin: calc((1lh - 16px) / 2) 8px 0 0; vertical-align: top; color: var(--ink-muted); transition: transform .15s, color .15s; }
+.milestone-head:hover .caret { color: var(--ink); }
+.milestone-head[aria-expanded="true"] .caret { transform: rotate(90deg); }
 .shipped { padding: 4px 16px; }
 .shipped > .milestone-head h2 { margin: 0; font-size: 15px; color: var(--ink-muted); }
 .shipped-one { border-top: 1px solid var(--line); }
