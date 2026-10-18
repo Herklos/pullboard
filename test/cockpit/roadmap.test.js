@@ -840,3 +840,58 @@ test('the roadmap panel counts the next release by stage [N26]', {
     await view.stop();
   }
 });
+
+test('a blocked roadmap item shows its dot and expands to say why [N26]', { timeout: 90_000 }, async (t) => {
+  const executable = chromeExecutable();
+  assert.ok(executable, 'Chrome is required for the roadmap blocker check.');
+  const box = machine();
+  const alpha = project(box, 'blocked-roadmap');
+  box.run(alpha.repo, 'add', 'web', 'Base work', '--specs', 'G1', '--criterion', 'renders');
+  box.run(alpha.repo, 'add', 'web', 'Waits on base', '--specs', 'G1', '--criterion', 'renders', '--after', '1');
+  box.run(alpha.repo, 'add', 'web', 'Free work', '--specs', 'G1', '--criterion', 'renders');
+  box.run(alpha.repo, 'milestone', 'add', 'Next', '--items', '1,2,3');
+  const view = await startView(box);
+  const profile = mkdtempSync(join(tmpdir(), 'pullboard-blocked-roadmap-chrome-'));
+  let chrome;
+  /** Read the three rows: their state dot, blocker dot and unfolded reason. */
+  const read = async () => JSON.parse(await chrome.stable(`JSON.stringify([...document.querySelectorAll('#roadmap-list > [data-key="m:Next"] .milestone-body > ul > li')].map((li) => ({
+    id: li.querySelector('.milestone-item .id').textContent,
+    dot: Boolean(li.querySelector('.milestone-item > .dot')),
+    blocker: li.querySelector('.block-dot')?.getAttribute('aria-label') || null,
+    why: li.querySelector('.milestone-why')?.hidden === false ? li.querySelector('.milestone-why').textContent : null,
+  })))`));
+  try {
+    chrome = await openSnapshotChrome(executable, view.link.href, profile);
+    await chrome.waitFor('data?.project?.milestones?.length === 1');
+    await press(chrome, "document.querySelector('[data-tab=roadmap]')");
+    await chrome.waitFor("!document.querySelector('[data-pane=roadmap]').hidden && document.querySelector('#roadmap-list > [data-key=\"m:Next\"]')");
+    const folded = await read();
+    const byId = Object.fromEntries(folded.map((row) => [row.id, row]));
+    assert.equal(byId['#2'].blocker, 'Blocked: waits on #1 (open)', 'the gated item has a blocker dot naming what it waits on');
+    assert.equal(byId['#3'].dot, true, 'an unblocked item keeps its state dot');
+    assert.equal(byId['#3'].blocker, null, 'an unblocked item has no blocker dot');
+    assert.equal(byId['#1'].blocker, null, 'the item others wait on is not itself blocked');
+    assert.ok(folded.every((row) => row.why === null), 'every row starts folded');
+    // From here on, record every request the page makes: unfolding must not fetch an item's detail.
+    await chrome.stable("window.__requests = []; window.__fetch = window.__fetch || window.fetch; window.fetch = (url, options) => { window.__requests.push(String(url)); return window.__fetch(url, options); }; true");
+    await press(chrome, "[...document.querySelectorAll('#roadmap .milestone-item.blocked')].find((row) => row.querySelector('.id').textContent === '#2')");
+    await chrome.waitFor("document.querySelector('#roadmap .milestone-why:not([hidden])')");
+    const open = Object.fromEntries((await read()).map((row) => [row.id, row]));
+    assert.match(open['#2'].why, /waits on#1 open/, 'the unfolded row names the item it waits on and that item\'s state');
+    assert.match(open['#2'].why, /state.*open, nobody holds it/, 'the unfolded row says its own state and who holds it');
+    assert.equal(open['#3'].why, null, 'unblocked rows stay as they were');
+    const requests = JSON.parse(await chrome.stable('JSON.stringify(window.__requests)'));
+    assert.deepEqual(requests.filter((url) => /\/items\/\d/.test(url)), [], 'unfolding reads the summaries already held and makes no detail request');
+    await press(chrome, "document.querySelector('#roadmap .milestone-why:not([hidden]) a.ref')");
+    await chrome.waitFor("!document.querySelector('[data-pane=items]').hidden && document.querySelector('#detail h2')?.textContent.includes('Waits on base')");
+    await press(chrome, "document.querySelector('[data-tab=roadmap]')");
+    await chrome.waitFor("!document.querySelector('[data-pane=roadmap]').hidden");
+    await press(chrome, "[...document.querySelectorAll('#roadmap .milestone-item.blocked')].find((row) => row.querySelector('.id').textContent === '#2')");
+    await chrome.waitFor("!document.querySelector('#roadmap .milestone-why:not([hidden])')");
+    assert.deepEqual(chrome.exceptions, [], 'the blocked roadmap raises no uncaught page exception');
+  } finally {
+    if (chrome) await closeSnapshotChrome(chrome);
+    rmSync(profile, { recursive: true, force: true });
+    await view.stop();
+  }
+});

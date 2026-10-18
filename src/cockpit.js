@@ -21,6 +21,7 @@ import {
   hostedState,
 } from './view/hosted.js';
 import { staleChip } from './view/stale.js';
+import { roadmapBlock } from './view/roadmap-block.js';
 
 /** The CLI's default phrases, ordered by depth for the existing prose inventory guard. */
 export const PULLBOARD_COMMANDS = Object.freeze(commandPhrases().sort((left, right) => right.split(' ').length - left.split(' ').length));
@@ -570,6 +571,8 @@ const STATES = { building: ['building', 'busy'], verify: ['to verify', 'warn'], 
 const chip = (s) => '<span class="chip ' + STATES[s][1] + '">' + STATES[s][0] + '</span>';
 // A verified item's stale mark from src/view/stale.js (#726): Core publishes verdictState and the page only draws it.
 const staleChip = (${staleChip.toString()});
+// A roadmap item's blocker dot and unfolded reason from src/view/roadmap-block.js (#605), read from the summaries held.
+const roadmapBlock = (${roadmapBlock.toString()});
 /** Parse the bounded reference syntax before requesting additional committed line windows. */
 function codeReferenceParts(ref) {
   const match = /^(.+):(\\d+)(?:-(\\d+))?@([0-9a-f]{7,40})$/.exec(String(ref));
@@ -2185,6 +2188,7 @@ function milestoneItem(entry, p) {
     titles: new Map((root === view.root ? p.items : root ? named[0].items : []).map((i) => [String(i.id), i.title])),
     state: read ? stateOf(read) : null,
     stale: item ? staleChip(item) : '',
+    block: item ? roadmapBlock(item, { holds: root === view.root ? p.holds : named[0].holds, items: root === view.root ? p.items : named[0].items, name: (id) => agentName(id), address: (id) => itemAddress(id, root) }) : null,
     stage: item ? pipelineStage(item) : entry.status,
     word: entry.status,
     open: item ? { root, id } : null,
@@ -2237,7 +2241,14 @@ function jumpToRoadmap(key) {
  */
 function milestoneRow(row, titles) {
   const title = row.title ? inline(String(row.title).replace(/\\s+/g, ' '), row.titles || titles, true, row.root) : '<span class="muted">' + esc(row.why) + '</span>';
-  const inner = '<span class="dot' + (row.state ? ' ' + row.state : '') + '"></span><span class="t"><span class="id">' + esc(row.label) + '</span>' + title + '</span>' + (row.stale || '') + (row.state ? chip(row.state) : '<span class="chip">' + esc(row.word) + '</span>');
+  const inner = '<span class="dot' + (row.state ? ' ' + row.state : '') + '"></span><span class="t"><span class="id">' + esc(row.label) + '</span>' + title + (row.block ? row.block.dot : '') + '</span>' + (row.stale || '') + (row.state ? chip(row.state) : '<span class="chip">' + esc(row.word) + '</span>');
+  if (row.block && row.open) {
+    // A blocked row unfolds in place to say why (#605); its detail links over to Items.
+    const key = 'i:' + row.label, open = view.roadmapOpen.get(JSON.stringify([view.root, key])) === true;
+    const toggle = 'class="milestone-item blocked" data-roadmap-key="' + esc(key) + '" aria-expanded="' + open + '" title="' + esc(row.title) + '"';
+    return '<li>' + (title.includes('class="ref"') ? '<div ' + toggle + ' role="button" tabindex="0">' + inner + '</div>' : '<button ' + toggle + ' type="button">' + inner + '</button>')
+      + '<div class="milestone-why"' + (open ? '' : ' hidden') + '>' + row.block.detail + '</div></li>';
+  }
   if (!row.open) return '<li><div class="milestone-item" title="' + esc(row.title ? row.title + ' (' + row.why + ')' : row.why) + '">' + inner + '</div></li>';
   const attributes = 'class="milestone-item" data-go="item:' + row.open.id + '"' + (row.open.root === view.root ? '' : ' data-board="' + esc(row.open.root) + '"') + ' title="' + esc(row.title) + '"';
   // A title with its own links needs a separate containing control, never a nested button.
@@ -3631,6 +3642,7 @@ document.addEventListener('keydown', (event) => {
   const row = event.target.closest('.milestone-item[role="button"]');
   if (event.target !== row) return;
   event.preventDefault();
+  if (row.dataset.roadmapKey !== undefined) { row.click(); return; }
   go(row.dataset.go, row.dataset.board || view.root);
 });
 // In a focused Spec or Doctrine list the arrow keys move the pick, and A approves the picked row and D asks why it is
