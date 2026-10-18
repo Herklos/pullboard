@@ -657,7 +657,7 @@ globalThis.fetch = function tracedFetch(input, init) {
       const envKey = { ...otherEnv, PULLBOARD_RELAY_KEY: environmentKey };
       return childResult(otherRoot, envKey, [CLI, ...args, '--json']);
     }
-    return { joined: document, machine: link.machine, exported: exported.document, cli: run, syncWithEnvironmentKey,
+    return { joined: document, machine: link.machine, exported: exported.document, cli: run, root: otherRoot, env: otherEnv, syncWithEnvironmentKey,
       /** Check that the paired clone still has no persisted board-key file. */
       keyFileExists() { return existsSync(otherKeyFile); } };
   }

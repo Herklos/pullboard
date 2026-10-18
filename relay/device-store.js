@@ -24,6 +24,8 @@ export function createDeviceStore({ directory, now = Date.now }) {
           board TEXT NOT NULL, device TEXT NOT NULL, action TEXT NOT NULL, machine TEXT NOT NULL, expires INTEGER NOT NULL,
           context TEXT NOT NULL, sealed TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'waiting', response TEXT);
         CREATE UNIQUE INDEX IF NOT EXISTS phone_approval_pending ON phone_approval(account,board,action) WHERE state='waiting';`);
+      // The phone's last contact lets its owner see from the linked computer whether it still reads the boards.
+      if (!opened.prepare('PRAGMA table_info(device)').all().some(column => column.name === 'seen')) opened.exec('ALTER TABLE device ADD COLUMN seen INTEGER');
       db = opened;
       return db;
     } catch (error) { opened.close(); throw error; }
@@ -40,6 +42,10 @@ export function createDeviceStore({ directory, now = Date.now }) {
     const row = database().prepare('SELECT * FROM enrollment WHERE account=? AND locator=?').get(account, locator);
     if (!row) throw new Refused('DEVICE_PAIR_EXPIRED', 'Run pullboard relay on --all for a fresh one-time pairing link.');
     return row;
+  }
+  /** Record a phone read as its last contact, at most once a minute. */
+  function touch(account, id) {
+    database().prepare('UPDATE device SET seen=? WHERE account=? AND id=? AND (seen IS NULL OR seen<?)').run(now(), account, id, now() - 60_000);
   }
   /** Keep expired approval metadata visible without renewing it or silently asking the phone again. */
   function expireApprovals() {
@@ -95,6 +101,7 @@ export function createDeviceStore({ directory, now = Date.now }) {
     /** List only this paired phone's account inbox; a machine never gets the account inventory. */
     approvals(account, device) {
       active(account, device);
+      touch(account, device);
       expireApprovals();
       return database().prepare("SELECT * FROM phone_approval WHERE account=? AND device=? AND state='waiting' ORDER BY expires,id").all(account, device).map(approval);
     },
@@ -137,13 +144,24 @@ export function createDeviceStore({ directory, now = Date.now }) {
     /** List only this account/device's opaque grants; the HTTP boundary rechecks board access. */
     wraps(account, id) {
       active(account, id);
+      touch(account, id);
       return database().prepare('SELECT board,engine,wrapped FROM wrapped_key WHERE account=? AND device=? ORDER BY board').all(account, id);
+    },
+    /** Return when a phone of this account last read its approvals or keys, and whether it was revoked; null fields for an unknown id. */
+    status(account, id) {
+      const row = database().prepare('SELECT seen, revoked FROM device WHERE account=? AND id=?').get(account, id);
+      return row ? { seen: row.seen ?? null, revoked: row.revoked === 1 } : { seen: null, revoked: null };
+    },
+    /** List the phones of this account that hold this board's key, by id only: names stay on the computer that paired them. */
+    boardDevices(account, board) {
+      return database().prepare('SELECT d.id AS deviceId, d.seen AS seen, d.revoked AS revoked FROM wrapped_key w JOIN device d ON d.account=w.account AND d.id=w.device WHERE w.account=? AND w.board=? ORDER BY d.id')
+        .all(account, board).map(row => ({ deviceId: row.deviceId, seen: row.seen ?? null, revoked: row.revoked === 1 }));
     },
     /** Tombstone first and delete grants atomically, refusing any stale in-flight upload. */
     revoke(account, id) {
       database().exec('BEGIN IMMEDIATE');
       try {
-        database().prepare('INSERT INTO device VALUES(?,?,1) ON CONFLICT(account,id) DO UPDATE SET revoked=1').run(account, id);
+        database().prepare('INSERT INTO device(account,id,revoked) VALUES(?,?,1) ON CONFLICT(account,id) DO UPDATE SET revoked=1').run(account, id);
         database().prepare('DELETE FROM wrapped_key WHERE account=? AND device=?').run(account, id);
         database().exec('COMMIT');
       } catch (error) { database().exec('ROLLBACK'); throw error; }
