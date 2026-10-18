@@ -453,7 +453,7 @@ test('auth diagnostics tolerate malformed refusals and preserve the original row
     assert.equal(report.cookies.length, 1, 'the actual browser cookie attributes remain observable');
     assert.equal(report.cookies[0].httpOnly, true);
     let originalError;
-    try { await chrome.waitFor("document.querySelector('#row-that-never-arrives')", 250); }
+    try { await chrome.waitFor("document.querySelector('#row-that-never-arrives')", 250); } // budget: declared missing-row fault and hang ceiling, caught to test diagnostics; no throughput promise.
     catch (error) { originalError = error; }
     assert.ok(originalError, 'the real browser row wait fails in the controlled fixture');
     const diagnostics = [];
