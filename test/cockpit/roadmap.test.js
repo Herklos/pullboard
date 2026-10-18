@@ -881,7 +881,7 @@ test('the roadmap shows landed, accepted and past target [N26]', { timeout: 90_0
     box.run(alpha.repo,'merged',String(id),box.git(alpha.repo,'rev-parse','HEAD'));
   }
   for(const id of [1,2,4,5,6]) {build(box,alpha,id,`item-${id}.txt`);accept(box,alpha,id);if([1,4,5].includes(id))land(id);}
-  box.run(alpha.repo,'withdraw','11','--reason','Removed from this release');
+  box.run(alpha.repo,'withdraw','11','Removed from this release');
   build(box,alpha,7,'item-7.txt');box.run(alpha.web,'claim','8');box.run(alpha.repo,'hold','ops','--reason','Waiting for the person');
   box.run(alpha.repo,'shout','person','#9 Approve the release','--decision');
   box.run(alpha.repo,'milestone','add','Past target','--items','1,2,3');
