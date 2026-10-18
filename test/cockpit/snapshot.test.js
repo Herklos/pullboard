@@ -630,11 +630,18 @@ test('an exported roadmap has its own address under a folder, and Back and Forwa
     const seen = await readRoadmap(chrome);
     assert.deepEqual(seen.cards[0].rows.map(({ id, label, tone, button }) => ({ id, label, tone, button })), [
       { id: '#2', label: 'unclaimed', tone: 'free', button: true },
-      { id: 'beacon#1', label: 'unclaimed', tone: 'free', button: false },
+      { id: 'beacon#1', label: 'unclaimed', tone: 'free', button: true },
       { id: '#1', label: 'verified', tone: 'ok', button: true },
-    ], "the snapshot's rows read as its Items tab does; another repo's item, not in the snapshot, opens nothing");
+    ], "the snapshot's rows expand in place; another repo's unavailable item has no Items link");
     assert.equal(seen.cards[0].rows.find((row) => row.id === 'beacon#1').tip, 'Billing webhook retries (not in this snapshot)', 'and says why');
     assert.deepEqual([seen.cards[1].name, seen.cards[1].empty], ['Later', 'No items yet.']);
+
+    await press(chrome, roadmapRow('beacon#1'));
+    await chrome.waitFor(roadmapRow('beacon#1') + ".getAttribute('aria-expanded') === 'true'");
+    assert.equal(await chrome.stable('location.pathname + location.hash'), '/demo/#roadmap');
+    assert.match(await chrome.stable(roadmapRow('beacon#1') + ".parentElement.querySelector('.milestone-why').textContent"), /not in this snapshot/u);
+    assert.equal(await chrome.stable(roadmapRow('beacon#1') + ".parentElement.querySelectorAll('.milestone-why a[data-go]').length"), 0, 'unavailable items expand to why, without a false navigation target');
+    await press(chrome, roadmapRow('beacon#1'));
 
     // The address survives a reload on a static host, and Back and Forward show the tab it names,
     // whether the browser keeps the page for an entry or loads it again.
@@ -645,6 +652,9 @@ test('an exported roadmap has its own address under a folder, and Back and Forwa
     await travel(chrome, 1);
     await settled(chrome, `${ready} && ${showing('roadmap', '/demo/#roadmap')} && !!${roadmapRow('#2')}`);
     await press(chrome, roadmapRow('#2'));
+    await chrome.waitFor(roadmapRow('#2') + ".getAttribute('aria-expanded') === 'true'");
+    assert.equal(await chrome.stable('location.pathname + location.hash'), '/demo/#roadmap', 'a snapshot row click stays on Roadmap');
+    await press(chrome, roadmapRow('#2') + ".parentElement.querySelector('.milestone-why a[data-go]')");
     await chrome.waitFor(`${showing('items', '/demo/#items/2')} && document.querySelector('#detail h2')?.innerText.includes('Open page')`);
     await travel(chrome, -1);
     await settled(chrome, `${ready} && ${showing('roadmap', '/demo/#roadmap')}`);

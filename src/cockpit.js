@@ -2314,7 +2314,7 @@ function milestoneRow(row, titles) {
   const inner = '<span class="dot' + (row.state ? ' ' + row.state : '') + '"></span><span class="t">' + text + '</span>' + (row.stale || '') + (row.state ? chip(row.state) : '<span class="chip">' + esc(row.word) + '</span>');
   const key = 'i:' + row.label, open = view.roadmapOpen.get(JSON.stringify([view.root, key])) === true;
   const board = row.open && row.open.root !== view.root ? ' data-board="' + esc(row.open.root) + '"' : '';
-  const toggle = 'class="milestone-item' + (row.block?.dot ? ' blocked' : '') + '" data-roadmap-key="' + esc(key) + '" aria-expanded="' + open + '"' + board + ' title="' + esc(row.title || row.why) + '"';
+  const toggle = 'class="milestone-item' + (row.block?.dot ? ' blocked' : '') + '" data-roadmap-key="' + esc(key) + '" aria-expanded="' + open + '"' + board + ' title="' + esc(row.title ? row.title + (!row.open && row.why ? ' (' + row.why + ')' : '') : row.why) + '"';
   const detail = row.block ? row.block.detail : '<p>' + esc(row.why || row.word) + '</p>';
   // Every row stays on the Roadmap; only its explicit Open in Items link navigates (#605).
   return '<li><div ' + toggle + ' role="button" tabindex="0">' + inner + '</div>'
