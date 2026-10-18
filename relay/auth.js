@@ -571,7 +571,7 @@ export function createRelayAuth({ database, github, now = Date.now, sessionTTL =
     minimumEngineVersion(board) {
       open();
       identifier(board, 'BAD_BOARD');
-      // Machine and agent credentials now carry engine-35 seat provenance; older clients would skip it.
+      // Machine and agent credentials now carry engine-48 seat provenance; older clients would skip it.
       if (db.prepare("SELECT 1 FROM relay_credentials WHERE board=? AND kind IN ('machine','board') LIMIT 1").get(board)) return VERIFIER_STANDING_ENGINE;
       return db.prepare("SELECT 1 FROM relay_credentials WHERE board=? AND kind='board' LIMIT 1").get(board) ? 3 : 1;
     },
