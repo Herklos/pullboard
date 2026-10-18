@@ -252,9 +252,9 @@ test('the roadmap reads every item as the Items tab does, opens each one, anothe
 
     // It updates live as items move, here and on the other repo's board.
     accept(box, alpha, 4);
-    await chrome.waitFor(`${roadmapRow('#4')}?.querySelector('.chip').innerText === 'accepted' && document.querySelector('#roadmap .roadmap-left [aria-label]').getAttribute('aria-label') === '1/5 landed'`, 15_000); // budget: live acceptance must not advance the landed count.
+    await chrome.waitFor(`${roadmapRow('#4')}?.querySelector('.chip').innerText === 'accepted' && document.querySelector('#roadmap .roadmap-left [aria-label]').getAttribute('aria-label') === '1/5 landed'`, 15_000); // budget: hang ceiling for the accepted receipt and unchanged landed count to reach the browser; no throughput claim.
     landRoadmapItem(box, alpha, 4);
-    await chrome.waitFor(`${roadmapRow('#4')}?.querySelector('.chip').innerText === 'landed' && document.querySelector('#roadmap .roadmap-left [aria-label]').getAttribute('aria-label') === '2/5 landed'`, 15_000); // budget: the real merge receipt advances the live landed count.
+    await chrome.waitFor(`${roadmapRow('#4')}?.querySelector('.chip').innerText === 'landed' && document.querySelector('#roadmap .roadmap-left [aria-label]').getAttribute('aria-label') === '2/5 landed'`, 15_000); // budget: hang ceiling for the real merge receipt and landed count to reach the browser; no throughput claim.
     box.run(beacon.web, 'claim', '1');
     await chrome.waitFor(`${roadmapRow('beacon#1')}?.querySelector('.chip').innerText === 'building'`, 15_000); // budget: hang ceiling for the claimed external item to refresh; no throughput claim.
 
