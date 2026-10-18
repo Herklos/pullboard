@@ -1,0 +1,166 @@
+/** Complete setup with only its own writes, keeping the user's index and identity [I1,I2]. */
+import {
+  createHash,
+  randomUUID,
+} from 'node:crypto';
+import { spawnSync } from 'node:child_process';
+import {
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  writeFileSync,
+} from 'node:fs';
+import {
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from 'node:path';
+import { createInterface } from 'node:readline';
+import {
+  git,
+  tryGit,
+} from './git.js';
+import { loadConfig } from './config.js';
+import {
+  alreadyAddedLine,
+  initWaitingRows,
+  waitingRowLines,
+} from './blueprint-report.js';
+import {
+  initBlueprintLines,
+  initBlueprintResult,
+} from './blueprint-set.js';
+import {
+  askedLaneNotes,
+  proposeLanes,
+  refreshInitPermissions,
+  relayOfferAtInit,
+} from './init.js';
+import { Refused } from './refused.js';
+
+export const SETUP_COMMIT_QUESTION = 'Commit Pullboard setup now? [Y/n] ';
+export const SETUP_COMMIT_LATER = "To commit Pullboard's files: pullboard init --yes";
+
+/** Hash regular files only, refusing paths outside the repository and symlink targets. */
+function setupFile(root, name) {
+  if (typeof name !== 'string' || isAbsolute(name) || name.includes('\0')) return null;
+  const path = resolve(root, name), inside = relative(root, path);
+  if (!inside || inside === '..' || inside.startsWith('..' + sep)) return null;
+  try {
+    if (!lstatSync(path).isFile()) return null;
+    const physical = relative(root, realpathSync(path));
+    if (physical === '..' || physical.startsWith('..' + sep)) return null;
+    return createHash('sha256').update(readFileSync(path)).digest('hex');
+  } catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+}
+
+/** Capture existing edits before init writes, and retain only unchanged previous setup receipts. */
+export function beginInitCommit(info) {
+  const status = spawnSync('git', ['--no-replace-objects', 'status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignored=matching'],
+    { cwd: info.root, encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 });
+  if (status.status !== 0) throw new Refused('NOT_COMMITTED', 'Git could not read the existing changes; fix Git before running pullboard init again');
+  const entries = status.stdout.split('\0'), blocked = new Set();
+  for (let index = 0; index < entries.length; index++) {
+    const entry = entries[index];
+    if (!entry) continue;
+    blocked.add(entry.slice(3));
+    if (/[RC]/u.test(entry.slice(0, 2))) blocked.add(entries[++index]);
+  }
+  const file = join(info.commonDir, 'pullboard', 'setup-written-files.json');
+  let previous = {};
+  try {
+    const saved = JSON.parse(readFileSync(file, 'utf8'));
+    if (saved.version === 1 && saved.root === info.root && saved.files && typeof saved.files === 'object') previous = saved.files;
+  } catch (error) { if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error; }
+  const files = new Map(), skipped = new Set();
+  for (const [name, hash] of Object.entries(previous)) {
+    const actual = setupFile(info.root, name);
+    if (hash && actual === hash) files.set(name, hash);
+    else if (actual) skipped.add(name);
+  }
+  const owned = new Set(files.keys());
+  /** Retain the exact bytes init wrote, without adopting a file that already held user edits. */
+  function written(name) {
+    if (typeof name !== 'string') return;
+    if (!owned.has(name) && [...blocked].some(path => path === name || (path?.endsWith('/') && name.startsWith(path)))) { skipped.add(name); return; }
+    const hash = setupFile(info.root, name);
+    if (hash) { owned.add(name); files.set(name, hash); }
+  }
+  return { info, file, files, written, skipped };
+}
+
+/** Ask once; closing stdin is a decline, while Enter accepts the displayed file list. */
+function askCommit(io) {
+  return new Promise(resolveAnswer => {
+    const reader = createInterface({ input: io.stdin, output: io.stdout, terminal: false });
+    let answer = null;
+    reader.once('line', line => { answer = line; reader.close(); });
+    reader.once('close', () => { io.stdin.pause?.(); resolveAnswer(answer); });
+    io.stdout.write(SETUP_COMMIT_QUESTION);
+  });
+}
+
+/** Confirm and commit exact setup paths through ordinary hooks, never unrelated staged files. */
+export async function finishInitCommit(plan, { io, yes, landed, permissions }) {
+  const { info, files } = plan;
+  if (landed.some(added => !added.marked)) {
+    const config = loadConfig(info.root);
+    for (const name of ['pullboard.json', config.spec, config.practice]) plan.written(name);
+    if (permissions) refreshInitPermissions(info.root, plan.written);
+  }
+  const retained = [...files].filter(([name, hash]) => setupFile(info.root, name) === hash);
+  mkdirSync(dirname(plan.file), { recursive: true });
+  const temporary = plan.file + '.' + randomUUID();
+  writeFileSync(temporary, JSON.stringify({ version: 1, root: info.root, files: Object.fromEntries(retained) }) + '\n', { mode: 0o600 });
+  renameSync(temporary, plan.file);
+  const head = tryGit(info.root, ['rev-parse', '--verify', 'HEAD']);
+  const changed = retained.filter(([name]) => head.status !== 0
+    || tryGit(info.root, ['diff', '--quiet', 'HEAD', '--', `:(literal)${name}`]).status !== 0
+    || !tryGit(info.root, ['ls-tree', 'HEAD', '--', `:(literal)${name}`]).stdout);
+  if (!changed.length) return { state: 'unchanged', files: [], skipped: [...plan.skipped] };
+  const paths = changed.map(([name]) => name);
+  let accepted = Boolean(yes);
+  if (!accepted && !io.json && relayOfferAtInit({ enabled: true, shared: false, stdin: io.stdin, stdout: io.stdout }) === 'ask') {
+    io.say('Pullboard setup files: ' + paths.join(', '));
+    const answer = await askCommit(io);
+    accepted = answer !== null && ['', 'y', 'yes'].includes(answer.trim().toLowerCase());
+  }
+  if (!accepted) return { state: 'pending', files: paths, skipped: [...plan.skipped] };
+  if (changed.some(([name, hash]) => setupFile(info.root, name) !== hash)) {
+    throw new Refused('NOT_COMMITTED', 'a setup file changed while confirmation was open; review the change and run pullboard init --yes again');
+  }
+  try {
+    git(info.root, ['add', '-f', '--', ...paths.map(name => `:(literal)${name}`)]);
+    git(info.root, ['commit', '--only', '-q', '-m', 'chore: set up Pullboard', '--', ...paths.map(name => `:(literal)${name}`)]);
+  } catch (error) {
+    // Every selected path was clean or absent before init; restore only those index entries.
+    if (head.status === 0) tryGit(info.root, ['reset', '-q', head.stdout, '--', ...paths.map(name => `:(literal)${name}`)]);
+    else tryGit(info.root, ['rm', '--cached', '-q', '--ignore-unmatch', '--', ...paths.map(name => `:(literal)${name}`)]);
+    throw new Refused('NOT_COMMITTED', `Git did not commit Pullboard setup: ${String(error.stderr ?? error.message).trim()}; fix the reported identity or hook problem, then run pullboard init --yes`, 'fix the Git error above, then run pullboard init --yes');
+  }
+  return { state: 'committed', files: paths, skipped: [...plan.skipped], commit: git(info.root, ['rev-parse', 'HEAD']) };
+}
+
+/** Report setup and blueprint notes together, keeping the CLI command itself bounded. */
+export function reportInitSetup(io, info, notes, landed) {
+  const fresh = landed.filter(added => !added.marked);
+  const waiting = landed.length ? initWaitingRows(info.root, { rows: fresh.flatMap(added => added.rows) }) : [];
+  /** Give each blueprint the same complete list of still-undecided rows. */
+  const blueprintResult = added => ({ ...initBlueprintResult(added), marked: added.marked, waitingRows: waiting });
+  const result = { root: info.root, notes, proposedLanes: proposeLanes(info.root),
+    ...(landed.length ? { blueprint: blueprintResult(landed[0]), blueprints: landed.map(blueprintResult) } : {}) };
+  io.result?.(result);
+  const staging = notes.at(-1)?.startsWith('git add -f -- ') ? notes.at(-1) : null;
+  (staging ? notes.slice(0, -1) : notes).forEach(note => io.say(note));
+  for (const added of landed) {
+    if (added.marked) io.say(alreadyAddedLine(added.blueprint));
+    else initBlueprintLines(added, askedLaneNotes(added.items, loadConfig(info.root))).forEach(line => io.say(line));
+  }
+  if (fresh.length) waitingRowLines(waiting).forEach(line => io.say(line));
+  return { result, staging };
+}

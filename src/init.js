@@ -569,10 +569,10 @@ function writeCodexLoopRules(root, gate, onWrite) {
 /**
  * Set the repo up. Must run in the main checkout, which becomes the coordinator.
  *
- * @param {{ info: { root: string, isMain: boolean }, openBoardHere: () => any, register: Function, closeBoard: Function, model?: string, permissions?: boolean }} context
+ * @param {{ info: { root: string, isMain: boolean }, openBoardHere: () => any, register: Function, closeBoard: Function, model?: string, permissions?: boolean, onWritten?: (path: string) => void }} context
  * @returns {string[]} What happened, one line each.
  */
-export function initRepo({ info, openBoardHere, register, closeBoard, model, permissions = true }) {
+export function initRepo({ info, openBoardHere, register, closeBoard, model, permissions = true, onWritten }) {
   if (!info.isMain) {
     throw new Refused('NOT_MAIN', 'run init in the main checkout; worktrees join a lane instead');
   }
@@ -583,7 +583,7 @@ export function initRepo({ info, openBoardHere, register, closeBoard, model, per
   const configured = configuredGate(root);
   const written = [];
   /** Record only paths setup actually writes; unrelated files never enter its staging command. */
-  const onWrite = (path) => { if (!written.includes(path)) written.push(path); };
+  const onWrite = (path) => { if (!written.includes(path)) written.push(path); onWritten?.(path); };
   const notes = [
     writeNew(join(root, CONFIG_FILE), configTemplate(gate, detectFixers(root)), CONFIG_FILE, onWrite),
     writeNew(join(root, 'SPEC.md'), specTemplate(basename(root), gate), 'SPEC.md', onWrite),
@@ -625,6 +625,12 @@ export function initRepo({ info, openBoardHere, register, closeBoard, model, per
 
 /** The one command that shares every board on this computer with the phone and pullboard.dev. */
 export const RELAY_ON_ALL = 'pullboard relay on --all';
+
+/** Refresh only managed permission files after a blueprint supplies the final gate command. */
+export function refreshInitPermissions(root, onWritten) {
+  const gate = configuredGate(root) || detectGate(root);
+  return [writeClaudeLoopPermissions(root, gate, onWritten), writeCodexLoopRules(root, gate, onWritten)];
+}
 
 /** The question init asks a person at the end of setup; Enter means yes. */
 export const RELAY_OFFER_QUESTION = 'See this board on your phone and pullboard.dev? Sign in with GitHub [Y/n] ';
