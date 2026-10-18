@@ -5,6 +5,7 @@ import * as store from '../src/board.js';
 import { applyEngineMove, prepareEngineMove } from '../src/engine.js';
 import { exportBoard, importBoard } from '../src/exchange.js';
 import { ENGINE_VERSION } from '../src/machine.js';
+import { MILESTONE_SHIP_ENGINE, WITHDRAW_MILESTONE_ENGINE } from '../src/milestones.js';
 import { RIGOR_NOTICE_ENGINE } from '../src/rigor-source.js';
 import { HEALTH_SENTINEL_ENGINE } from '../src/health-receipts.js';
 import { configProblems, defaults, loadConfig } from '../src/config.js';
@@ -12,8 +13,10 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-test('model declarations and event snapshots retain engines 1 through 45 semantics [O8,O3,H16]', (t) => {
-  assert.equal(ENGINE_VERSION, 45, 'the current writer retains historical behavior through engine 44');
+test('model declarations and event snapshots retain engines 1 through 51 semantics [O8,O3,H16]', (t) => {
+  assert.equal(WITHDRAW_MILESTONE_ENGINE, ENGINE_VERSION, 'withdraw writes use the allocated feature engine');
+  assert.equal(MILESTONE_SHIP_ENGINE, 45, 'shipment retains its engine-45 meaning');
+  assert.ok(ENGINE_VERSION >= MILESTONE_SHIP_ENGINE, 'the current writer retains all milestone shipment behavior');
   assert.ok(ENGINE_VERSION >= RIGOR_NOTICE_ENGINE, 'the next writer preserves every historical model snapshot through main engine 33');
   assert.ok(ENGINE_VERSION >= HEALTH_SENTINEL_ENGINE, 'the current writer retains the sentinel minimum and historical behavior');
   for (const version of Array.from({ length: ENGINE_VERSION }, (_, index) => index + 1)) {

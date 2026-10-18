@@ -24,6 +24,9 @@ import {
 /** The engine at which a milestone carries a target and ships; older moves replay as they did. */
 export const MILESTONE_SHIP_ENGINE = 45;
 
+/** First writer for withdraw-and-remove milestone behavior; shipment remains engine 45. */
+export const WITHDRAW_MILESTONE_ENGINE = 51;
+
 /** The engine a move runs under: its recorded one during replay, else this client's. */
 function engineOf(board) {
   return board.executionEngineVersion ?? ENGINE_VERSION;
@@ -42,6 +45,18 @@ export function roadmapState(status, landed) {
   return status === 'verified' ? 'accepted' : status;
 }
 
+/** Order work for shipping: unfinished items first, then verified items, preserving each group. */
+export function shippingOrder(entries) {
+  const kept = entries.filter((item) => item.status !== 'withdrawn');
+  const verified = kept.filter((item) => item.status === 'verified');
+  return [...kept.filter((item) => item.status !== 'verified'), ...verified];
+}
+
+/** Return local milestones that list an item, in stored roadmap order including shipped milestones. */
+export function milestonesListing(board, id) {
+  return milestones(board).filter((milestone) => milestone.items.includes(id)).map((milestone) => milestone.name);
+}
+
 /**
  * Return milestones with each item's current status and state, a landed count, and the
  * milestone's target and shipment. `done` is the landed count: accepted work has not shipped yet.
@@ -54,7 +69,7 @@ export function roadmap(board, resolveExternal = null) {
   const items = new Map(listItems(board, { all: true }).map((item) => [item.item_id, item]));
   const at = board.clock.now().getTime();
   return milestones(board).map((milestone) => {
-    const entries = milestone.items.map((id) => {
+    const named = milestone.items.map((id) => {
       if (typeof id === 'number') {
         const item = items.get(id);
         return item
@@ -64,6 +79,7 @@ export function roadmap(board, resolveExternal = null) {
       const external = resolveExternal?.(id) ?? { id, title: id, status: 'unavailable' };
       return { id: external.id, title: external.title, status: external.status, state: roadmapState(external.status, Boolean(external.landed)) };
     });
+    const entries = shippingOrder(named);
     const landed = entries.filter((item) => item.state === 'landed').length;
     const target = milestone.target ?? null;
     return {
@@ -76,6 +92,7 @@ export function roadmap(board, resolveExternal = null) {
       landed,
       done: landed,
       total: entries.length,
+      withdrawn: named.length - entries.length,
     };
   });
 }

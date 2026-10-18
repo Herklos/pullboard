@@ -274,6 +274,7 @@ import {
   registeredProjectRootsSnapshot,
 } from './projects.js';
 import { milestoneRoadmap } from './roadmap.js';
+import { milestonesListing } from './milestones.js';
 import {
   rigorLines,
   rigorReport,
@@ -3693,8 +3694,10 @@ function workCommands(io, args) {
     }),
     withdraw: () => act(async (ctx, board, me) => {
       await ordered(ctx, board, 'withdraw', [idArg(first), { agentId: me.id, reason: [second, ...rest].filter(Boolean).join(' ') }]);
-      io.result?.({ id: idArg(first), reason: [second, ...rest].filter(Boolean).join(' ') });
-      io.say(`withdrew #${first}`);
+      const left = milestonesListing(board, idArg(first));
+      for (const name of left) await ordered(ctx, board, 'editMilestoneItems', [name, { agentId: me.id, remove: [idArg(first)] }]);
+      io.result?.({ id: idArg(first), reason: [second, ...rest].filter(Boolean).join(' '), milestones: left });
+      io.say(`withdrew #${first}${left.length ? `; removed it from milestone ${left.join(', ')}` : ''}`);
       return 0;
     }),
     refreeze: () => act(async (ctx, board, me) => {
