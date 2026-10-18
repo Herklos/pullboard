@@ -1082,7 +1082,9 @@ async function runLandingTests(args, env, concurrency) {
             if (waivers.length && details.error?.failureType === 'subtestsFailed' && waivedFiles.get(file) === true) return;
             waivedFiles.set(file, false);
             firstFailure = { file, name, error: details.error };
-            abortLandingRun();
+            // Node emits completion before finalizing its result. Aborting inside that callback
+            // replaces the real failure with cancellation; let the current publication finish.
+            queueMicrotask(abortLandingRun);
           }
         });
         tests.on('test:summary', data => {
@@ -1092,7 +1094,7 @@ async function runLandingTests(args, env, concurrency) {
             completedFiles.add(data.file);
             if (data.success === false && !firstFailure && waivedFiles.get(data.file) !== true) {
               firstFailure = { file: data.file, name: 'test file failed before a test completed' };
-              abortLandingRun();
+              queueMicrotask(abortLandingRun);
             }
           }
         });
