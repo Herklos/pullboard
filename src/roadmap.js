@@ -10,6 +10,7 @@ import {
   events,
   laneHolds,
   listItems,
+  milestones,
   openDecisions,
   PERSON,
   openBoard,
@@ -28,6 +29,22 @@ export function resolveMilestoneProjectReference(reference, projects) {
   const [, repo, number] = match;
   const candidates = projects.filter((project) => project.name === repo || basename(project.root) === repo);
   return { repo, number, project: candidates.length === 1 ? candidates[0] : null };
+}
+
+/** Collect unambiguous registered aliases for one local item before milestone cleanup. */
+export function localMilestoneAliases(root, board, id) {
+  const projects = listApiProjects();
+  const localRoot = resolve(root);
+  const aliases = new Set();
+  for (const milestone of milestones(board)) {
+    for (const reference of milestone.items) {
+      if (typeof reference !== 'string') continue;
+      const parsed = resolveMilestoneProjectReference(reference, projects);
+      if (!parsed?.project || !Number.isSafeInteger(Number(parsed.number)) || Number(parsed.number) !== id) continue;
+      if (resolve(parsed.project.root) === localRoot) aliases.add(reference);
+    }
+  }
+  return [...aliases];
 }
 
 /** Resolve a repo-qualified milestone item against registered boards, optionally within an API scope.

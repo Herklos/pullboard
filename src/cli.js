@@ -272,13 +272,8 @@ import {
   registerProjectAndLink,
   registeredProjectRootsSnapshot,
 } from './projects.js';
-import {
-  milestoneRoadmap,
-  resolveMilestoneProjectReference,
-} from './roadmap.js';
-import {
-  milestoneReferencesToRemove,
-} from './milestones.js';
+import { milestoneRoadmap, localMilestoneAliases } from './roadmap.js';
+import { milestoneReferencesToRemove } from './milestones.js';
 import {
   rigorLines,
   rigorReport,
@@ -3722,18 +3717,7 @@ function workCommands(io, args) {
     withdraw: () => act(async (ctx, board, me) => {
       const id = idArg(first);
       await ordered(ctx, board, 'withdraw', [id, { agentId: me.id, reason: [second, ...rest].filter(Boolean).join(' ') }]);
-      const projects = listApiProjects();
-      const localRoot = resolve(ctx.info.root);
-      const aliases = new Set();
-      for (const milestone of store.milestones(board)) {
-        for (const reference of milestone.items) {
-          if (typeof reference !== 'string') continue;
-          const parsed = resolveMilestoneProjectReference(reference, projects);
-          if (!parsed?.project || !Number.isSafeInteger(Number(parsed.number)) || Number(parsed.number) !== id) continue;
-          if (resolve(parsed.project.root) === localRoot) aliases.add(reference);
-        }
-      }
-      const removals = milestoneReferencesToRemove(board, [id, ...aliases]);
+      const removals = milestoneReferencesToRemove(board, [id, ...localMilestoneAliases(ctx.info.root, board, id)]);
       const left = removals.map(({ name }) => name);
       for (const { name, remove } of removals) {
         await ordered(ctx, board, 'editMilestoneItems', [name, { agentId: me.id, remove }]);
