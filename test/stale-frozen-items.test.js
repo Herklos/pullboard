@@ -64,7 +64,7 @@ function project(t) {
   git(root, 'config', 'user.name', 'Stale-frozen fixture');
   git(root, 'config', 'user.email', 'stale-frozen@example.invalid');
   const initialized = pullboard(root, 'init');
-  assert.equal(initialized.status, 0, `${initialized.stdout}${initialized.stderr}`);
+  assert.equal(initialized.status, 0, `${initialized.stdout}${initialized.context}`);
   writeFileSync(join(root, 'pullboard.json'), `${JSON.stringify({
     gate: 'true', spec: 'SPEC.md', verify: 'coordinator', lease: '2h',
     lanes: { web: { owns: ['web/'], specs: ['G1', 'G3'] } }, shared: [],
@@ -73,24 +73,24 @@ function project(t) {
   mkdirSync(join(root, 'web'));
   git(root, 'add', '-A');
   const initial = runFixtureChild('git', ['commit', '-q', '-m', 'chore: initialize stale-frozen fixture'], { cwd: root, env, encoding: 'utf8' });
-  assert.equal(initial.status, 0, `${initial.stdout}${initial.stderr}`);
+  assert.equal(initial.status, 0, `${initial.stdout}${initial.context}`);
   git(root, 'worktree', 'add', '-q', web, '-b', 'web/stale-frozen');
   const joined = pullboard(web, 'join', 'web');
-  assert.equal(joined.status, 0, `${joined.stdout}${joined.stderr}`);
+  assert.equal(joined.status, 0, `${joined.stdout}${joined.context}`);
   return { dir, root, web, env, git, pullboard };
 }
 
 /** Create a real item that cites one frozen row and return its persisted id. */
 function addItem(box, title, specId = 'G1') {
   const result = box.pullboard(box.root, 'add', 'web', title, '--criterion', `Check ${title}.`, '--specs', specId, '--json');
-  assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+  assert.equal(result.status, 0, `${result.stdout}${result.context}`);
   return JSON.parse(result.stdout).item.item_id;
 }
 
-/** Run a CLI command and require its successful result. */
+/** Run a CLI command and require its successful result; a killed child names its signal and elapsed time [S19]. */
 function succeeds(box, cwd, ...args) {
   const result = box.pullboard(cwd, ...args);
-  assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+  assert.equal(result.status, 0, `${result.stdout}${result.context}`);
   return result;
 }
 
@@ -108,7 +108,7 @@ function submit(box, id, name) {
   writeFileSync(join(box.web, relative), `${name}\n`);
   box.git(box.web, 'add', relative);
   const committed = runFixtureChild('git', ['commit', '-m', `feat(web): build ${name} [G1]`], { cwd: box.web, env: box.env, encoding: 'utf8' });
-  assert.equal(committed.status, 0, `${committed.stdout}${committed.stderr}`);
+  assert.equal(committed.status, 0, `${committed.stdout}${committed.context}`);
   const head = box.git(box.web, 'rev-parse', 'HEAD');
   succeeds(box, box.web, 'submit', String(id));
   return head;
@@ -174,11 +174,11 @@ test('[S19,V3] doctor and resume list stale frozen items in every lifecycle stat
   claim(box, ids.claimed);
 
   const decision = box.pullboard(box.root, 'spec', 'approve', 'G1', '--text', NEW_TEXT, '--json');
-  assert.equal(decision.status, 0, `${decision.stdout}${decision.stderr}`);
+  assert.equal(decision.status, 0, `${decision.stdout}${decision.context}`);
   succeeds(box, box.root, 'spec', 'apply', '--json');
   box.git(box.root, 'add', 'SPEC.md');
   const appliedCommit = runFixtureChild('git', ['commit', '-m', 'docs: update approved G1 wording [G1]'], { cwd: box.root, env: box.env, encoding: 'utf8' });
-  assert.equal(appliedCommit.status, 0, `${appliedCommit.stdout}${appliedCommit.stderr}`);
+  assert.equal(appliedCommit.status, 0, `${appliedCommit.stdout}${appliedCommit.context}`);
   assert.ok(readFileSync(join(box.root, 'SPEC.md'), 'utf8').includes(NEW_TEXT));
 
   const expected = [ids.open, ids.claimed, ids.submitted, ids.verified, ids.merged, ids.withdrawn].sort((a, b) => a - b);
