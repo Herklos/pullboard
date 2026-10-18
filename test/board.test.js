@@ -13,11 +13,11 @@ import * as store from '../src/board.js';
 import { displayAgentName } from '../src/agent-names.js';
 import { projectState } from '../src/serve.js';
 import { applyEngineMove, prepareEngineMove } from '../src/engine.js';
-import { exportBoard } from '../src/exchange.js';
+import { exportBoard, importBoard } from '../src/exchange.js';
 import { main } from '../src/cli.js';
 import { briefFiles } from '../src/brief.js';
 import { JSON_SHAPES } from '../src/json.js';
-import { AUTO_ESCALATE_ENGINE, ENGINE_VERSION } from '../src/machine.js';
+import { AUTO_ESCALATE_ENGINE, ENGINE_VERSION, STRONG_REJECTION_NOTICE_ENGINE } from '../src/machine.js';
 import { pathToFileURL } from 'node:url';
 import { unpackRelease } from './release-archive.js';
 
@@ -930,7 +930,31 @@ test('a coordinator route edit starts a new rejection count [B15,B13]', () => {
   ]);
 });
 
+test('two send-backs at the strongest route record no escalation [B15,B13,H16]', () => {
+  const id = routed('Strong rework notice', 'strong');
+  rejectRevision(id, SHA_A, 'first strong send-back: missing output');
+  rejectRevision(id, SHA_B, 'second strong send-back: output still wrong');
+  const item = store.getItem(board, id);
+  assert.deepEqual([item.item_status, item.item_route, item.item_owner, item.item_lease_until], ['open', 'strong', null, null], 'ordinary rejection still reopens without a retained or renewed lease');
+  const events = store.events(board, { itemId: id });
+  assert.equal(events.filter(event => event.event_kind === 'escalate').length, 0, 'no automatic strong-to-strong route event');
+  const rejections = store.verdictsFor(board, id).filter(entry => entry.verdict_decision === 'REJECT');
+  const notices = store.allShouts(board).filter(entry => entry.shout_to === 'coordinator' && entry.shout_text.includes(`#${id} has two send-backs at the strongest route`));
+  assert.equal(notices.length, 1, 'one coordinator notice for this rejection pair');
+  assert.match(notices[0].shout_text, /web-1 built it/u);
+  for (const rejection of rejections) assert.ok(notices[0].shout_text.includes(`#${rejection.verdict_id}`), 'the notice names both rejection receipts');
+  rejectRevision(id, SHA_C, 'third strong send-back');
+  assert.equal(store.allShouts(board).length, 1, 'one further rejection cannot repeat the pair notice');
+  rejectRevision(id, SHA_D, 'fourth strong send-back');
+  const nextNotices = store.allShouts(board);
+  assert.equal(nextNotices.length, 2, 'a new pair gets its own single notice');
+  const nextRejections = store.verdictsFor(board, id).filter(entry => entry.verdict_decision === 'REJECT').slice(-2);
+  for (const rejection of nextRejections) assert.ok(nextNotices[1].shout_text.includes(`#${rejection.verdict_id}`));
+  assert.equal(store.events(board, { itemId: id }).filter(event => event.event_kind === 'escalate').length, 0);
+});
+
 test('an item at strong stays at strong after more failures [B15,B13]', () => {
+  board.executionEngineVersion = AUTO_ESCALATE_ENGINE;
   const id = routed('Strong ceiling', 'strong');
   rejectRevision(id, SHA_A, 'strong reject one');
   rejectRevision(id, SHA_B, 'strong reject two');
@@ -945,6 +969,45 @@ test('an item at strong stays at strong after more failures [B15,B13]', () => {
     return detail.from === 'strong' && detail.to === 'strong' && detail.rejections.length === 2;
   }));
 });
+
+for (const version of [50, 51, 52, 53, STRONG_REJECTION_NOTICE_ENGINE]) {
+  test(`engine ${version} ceiling send-backs replay identically on replicas [B15,H16]`, (t) => {
+    const id = routed('Recorded ceiling behavior', 'strong');
+    const copy = store.openBoard(':memory:', clock);
+    t.after(() => store.closeBoard(copy));
+    importBoard(copy, exportBoard(board));
+    const frozen = item => ({ text: JSON.stringify({ criterion: item.item_criterion,
+      policy: { version: 1, commit: SHA_A, verify: { policy: 'any', family: 'off' } } }), digest: `digest:${item.item_title}` });
+    const proof = { version: 1, files: [], full: false, deferred: true, reason: 'synthetic replay fixture' };
+    let sequence = 0;
+    let latest;
+    const apply = (operation, args) => {
+      sequence += 1;
+      latest = { ...prepareEngineMove(board, operation, args, { id: `ceiling-${version}-${sequence}` }), engine: version };
+      for (const replica of [board, copy]) {
+        const result = applyEngineMove(replica, latest, { sequence, at: `2026-10-18T00:00:0${sequence}.000Z` });
+        assert.equal(result.error, undefined, `${operation} applies at engine ${version}`);
+      }
+    };
+    for (const [commit, note] of [[SHA_A, 'first send-back'], [SHA_B, 'second send-back']]) {
+      apply('claim', [id, { agentId: 'web-1', lane: 'web', leaseMs: HOUR, freeze: frozen }]);
+      apply('submit', [id, { agentId: 'web-1', commit, tree: `tree-${commit[0]}`, submissionProof: proof }]);
+      apply('verify', [id, { agentId: 'web-2', decision: 'REJECT', reason: 'TEST_FAILURE', note,
+        head: commit, digest: 'digest:Recorded ceiling behavior', policy: 'any' }]);
+    }
+    const events = store.events(board, { itemId: id });
+    const current = version >= STRONG_REJECTION_NOTICE_ENGINE;
+    assert.equal(events.filter(event => event.event_kind === 'escalate').length, current ? 0 : 1, 'old engine50..53 retains its recorded ceiling event');
+    assert.equal(events.filter(event => event.event_kind === 'strong-rejection-notice').length, current ? 1 : 0);
+    assert.equal(store.allShouts(board).length, current ? 1 : 0);
+    assert.deepEqual(store.getItem(copy, id), store.getItem(board, id));
+    assert.deepEqual(store.events(copy), store.events(board));
+    assert.deepEqual(store.allShouts(copy), store.allShouts(board));
+    const before = exportBoard(board);
+    applyEngineMove(board, latest, { sequence, at: `2026-10-18T00:00:0${sequence}.000Z` });
+    assert.deepEqual(exportBoard(board), before, 'replaying the exact receipt cannot duplicate the notice');
+  });
+}
 
 test('engine 40 reject moves replay without automatic escalation [B15,H16]', () => {
   const id = routed('Legacy engine', 'light');
