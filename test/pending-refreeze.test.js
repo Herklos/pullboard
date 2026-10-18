@@ -1,4 +1,3 @@
-import { HEALTH_SENTINEL_ENGINE } from '../src/health-receipts.js';
 /** Pending coordinator corrections keep a live claim until its frozen bar is adopted [V2,H16]. */
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -12,6 +11,7 @@ import { exportBoard, importBoard } from '../src/exchange.js';
 import { AUTO_ESCALATE_ENGINE } from '../src/machine.js';
 import { ENGINE_VERSION } from '../src/machine.js';
 import { RIGOR_NOTICE_ENGINE } from '../src/rigor-source.js';
+import { HEALTH_SENTINEL_ENGINE } from '../src/health-receipts.js';
 import { createE2eHelpers } from './e2e-helpers.js';
 import { unpackRelease } from './release-archive.js';
 
@@ -265,6 +265,7 @@ async function checkDependencyLegacyClients(cleanup, directory, snapshot, target
 
 test('dependency edits replay the same on every engine [B3,V2,H16]', async (t) => {
   assert.equal(ENGINE_VERSION, AUTO_ESCALATE_ENGINE, 'the current writer is the automatic-escalation engine');
+  assert.ok(ENGINE_VERSION >= 45, 'the current writer retains engine-45 milestone semantics');
   assert.ok(ENGINE_VERSION >= RIGOR_NOTICE_ENGINE, 'the next writer retains all recorded dependency-edit behavior');
   assert.ok(ENGINE_VERSION >= HEALTH_SENTINEL_ENGINE, 'the current writer retains the sentinel minimum and historical behavior');
   assert.equal(AUTO_ESCALATE_ENGINE, ENGINE_VERSION, 'the current writer retains recorded dependency-edit behavior and automatic escalation');
