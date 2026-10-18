@@ -1,4 +1,3 @@
-import { HEALTH_SENTINEL_ENGINE } from '../src/health-receipts.js';
 /** Declared models replay with their recorded engine and survive board exchange [O8,O3,H16]. */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
@@ -7,12 +6,14 @@ import { applyEngineMove, prepareEngineMove } from '../src/engine.js';
 import { exportBoard, importBoard } from '../src/exchange.js';
 import { ENGINE_VERSION } from '../src/machine.js';
 import { RIGOR_NOTICE_ENGINE } from '../src/rigor-source.js';
+import { HEALTH_SENTINEL_ENGINE } from '../src/health-receipts.js';
 import { configProblems, defaults, loadConfig } from '../src/config.js';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-test('model declarations and event snapshots retain engines 1 through 34 semantics [O8,O3,H16]', (t) => {
+test('model declarations and event snapshots retain engines 1 through 45 semantics [O8,O3,H16]', (t) => {
+  assert.equal(ENGINE_VERSION, 45, 'the current writer retains historical behavior through engine 44');
   assert.ok(ENGINE_VERSION >= RIGOR_NOTICE_ENGINE, 'the next writer preserves every historical model snapshot through main engine 33');
   assert.ok(ENGINE_VERSION >= HEALTH_SENTINEL_ENGINE, 'the current writer retains the sentinel minimum and historical behavior');
   for (const version of Array.from({ length: ENGINE_VERSION }, (_, index) => index + 1)) {
