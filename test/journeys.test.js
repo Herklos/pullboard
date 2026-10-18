@@ -10,6 +10,8 @@ import { createRelayBrowserHandler } from '../relay/browser-page.js';
 import { relayClientFixture } from './relay-client-fixture.js';
 import { relayWorkBudgetMs, findChromeExecutable } from './relay-browser-fixture.js';
 import { startFixtureChild } from './fixture-child.js';
+import { apiStatus } from '../src/api-http.js';
+import { NEXT_STEPS } from '../src/next-steps.js';
 import { machine, project, startView, fetchLive, openSnapshotChrome, closeSnapshotChrome, press, pickProject, chromeExecutable, boardOf } from './cockpit/fixture.js';
 
 const JOURNEY_HOSTED = 'https://app.pullboard.dev';
@@ -320,8 +322,10 @@ function journeyRefusalBody(response) {
     const value = JSON.parse(response.base64Encoded ? Buffer.from(response.body, 'base64').toString('utf8') : response.body);
     const error = value?.error;
     if (!error || typeof error !== 'object' || Array.isArray(error)) return { code: 'invalid', kind: 'invalid' };
-    // These are the relay HTTP adapter's public 401/403 codes, not arbitrary uppercase response text.
-    const codes = new Set(['AUTH_REQUIRED', 'DEVICE_REVOKED', 'NO_REPO_ACCESS', 'TOKEN_BOARD', 'TOKEN_NOT_OWNED', 'HUMAN_REQUIRED', 'BAD_ORIGIN', 'WRITE_REQUIRED']);
+    // Public 401/403 codes only, never arbitrary uppercase response text: the relay adapter's, and every catalogued code
+    // the shared API answers with 401 or 403 (API_ORIGIN among them, #825 review).
+    const codes = new Set(['AUTH_REQUIRED', 'DEVICE_REVOKED', 'NO_REPO_ACCESS', 'TOKEN_BOARD', 'TOKEN_NOT_OWNED', 'HUMAN_REQUIRED', 'BAD_ORIGIN', 'WRITE_REQUIRED',
+      ...Object.keys(NEXT_STEPS).filter((key) => [401, 403].includes(apiStatus({ code: key })))]);
     const text = typeof error.message === 'string' ? error.message : '';
     return { code: codes.has(error.code) ? error.code : 'other',
       kind: JOURNEY_REFUSAL_KINDS.find(([start]) => text.startsWith(start))?.[1] ?? 'other' };
@@ -338,6 +342,8 @@ function journeyAuthTrace(chrome, hostedOrigin = JOURNEY_HOSTED) {
   const navigations = [];
   const refusals = [];
   const watched = new Map();
+  // Body reads still in flight, so a read settles them before it reports (#825 review).
+  const reading = new Set();
   let startedAt = performance.now();
   let active = false;
   const clock = () => Math.round(Math.max(0, performance.now() - startedAt));
@@ -366,9 +372,15 @@ function journeyAuthTrace(chrome, hostedOrigin = JOURNEY_HOSTED) {
     } else if (message.method === 'Network.loadingFinished' && watched.has(params.requestId)) {
       const refusal = watched.get(params.requestId);
       watched.delete(params.requestId);
-      chrome.send('Network.getResponseBody', { requestId: params.requestId }).then((response) => {
+      const body = chrome.send('Network.getResponseBody', { requestId: params.requestId }).then((response) => {
         refusals.push({ ...refusal, ...journeyRefusalBody(response) });
-      }, () => { refusals.push({ ...refusal, code: 'unread', kind: 'unread' }); });
+      }, () => { refusals.push({ ...refusal, code: 'unread', kind: 'unread' }); }).finally(() => reading.delete(body));
+      reading.add(body);
+    } else if (message.method === 'Network.loadingFailed' && watched.has(params.requestId)) {
+      // The refusal arrived but its body never did, as when the connection drops: it still counts, unread (#825 review).
+      const refusal = watched.get(params.requestId);
+      watched.delete(params.requestId);
+      refusals.push({ ...refusal, code: 'unread', kind: 'interrupted' });
     }
   };
   chrome.socket.addEventListener('message', listener);
@@ -377,12 +389,15 @@ function journeyAuthTrace(chrome, hostedOrigin = JOURNEY_HOSTED) {
     begin() { navigations.length = 0; refusals.length = 0; watched.clear(); startedAt = performance.now(); active = true; },
     /** What was recorded, with the pb_session cookies' attributes as Chrome holds them now. */
     async read() {
+      // Settle body reads already asked for, briefly, and keep any refusal whose body has not arrived as pending.
+      await Promise.race([Promise.allSettled([...reading]), new Promise((done) => { setTimeout(done, 1_000); })]); // budget: hang ceiling for bodies Chrome already holds; no throughput claim.
+      const waiting = [...watched.values()].map((refusal) => ({ ...refusal, code: 'pending', kind: 'pending' }));
       let cookies = 'unavailable';
       try {
         cookies = (await chrome.send('Network.getAllCookies')).cookies.filter((cookie) => cookie.name === 'pb_session')
           .map(({ domain, path, secure, session, sameSite, sourceScheme, sourcePort, httpOnly }) => ({ domain, path, secure, session, sameSite, sourceScheme, sourcePort, httpOnly }));
       } catch { /* The rest of the record still stands. */ }
-      return { navigations: navigations.slice(), refusals: refusals.slice(), cookies };
+      return { navigations: navigations.slice(), refusals: [...refusals, ...waiting], cookies };
     },
     /** Stop listening. */
     close() { active = false; chrome.socket.removeEventListener('message', listener); },
@@ -406,6 +421,9 @@ test('auth diagnostics tolerate malformed refusals and preserve the original row
     ['forbidden', { status: 403, body: JSON.stringify({ error: { code: 'BAD_ORIGIN', message: 'send cookie-authorized writes from the relay origin' } }), code: 'BAD_ORIGIN', kind: 'other' }],
     ['invalid', { status: 401, contentType: 'text/html', body: '<html>' + marker + '</html>', code: 'invalid', kind: 'invalid' }],
     ['unknown', { status: 401, body: JSON.stringify({ error: { code: privateCode, message: marker } }), code: 'other', kind: 'other' }],
+    // The shared API's own 403 keeps its public code (#825 review), and a refusal whose body never arrives is still counted.
+    ['api-origin', { status: 403, body: JSON.stringify({ error: { code: 'API_ORIGIN', message: 'this view answers only its own page' } }), code: 'API_ORIGIN', kind: 'other' }],
+    ['interrupted', { status: 401, interrupt: true, body: '{"error":{"code":"AUTH_REQUIRED","mess', code: 'unread', kind: 'interrupted' }],
   ]);
   const cookieArrivals = [];
   const server = createServer((req, res) => {
@@ -418,7 +436,8 @@ test('auth diagnostics tolerate malformed refusals and preserve the original row
     const entry = cases.get(address.searchParams.get('case'));
     if (!entry) { res.writeHead(404); res.end(); return; }
     cookieArrivals.push((req.headers.cookie ?? '').split(';').some(part => part.trim() === 'pb_session=' + marker));
-    res.writeHead(entry.status, { 'Content-Type': entry.contentType ?? 'application/json', 'Cache-Control': 'no-store' });
+    res.writeHead(entry.status, { 'Content-Type': entry.contentType ?? 'application/json', 'Cache-Control': 'no-store', ...(entry.interrupt ? { 'Content-Length': '4096' } : {}) });
+    if (entry.interrupt) { res.write(entry.body); setTimeout(() => res.destroy(), 50); return; } // budget: lets the headers and first bytes reach Chrome before the connection drops; no throughput claim.
     res.end(entry.body);
   });
   const profile = mkdtempSync(join(tmpdir(), 'pullboard-journey-auth-trace-'));
@@ -436,7 +455,8 @@ test('auth diagnostics tolerate malformed refusals and preserve the original row
       const path = '/api/v1/boards/' + marker + '/state?case=' + name + '&private=' + marker;
       const status = await chrome.stable(`(async () => {
         const response = await fetch(${JSON.stringify(path)}, { credentials: 'include' });
-        await response.text(); return response.status;
+        try { await response.text(); } catch { /* the interrupted case's body never completes */ }
+        return response.status;
       })()`);
       assert.equal(status, entry.status, 'the actual browser fetch returned the HTTP refusal status');
     }
@@ -447,7 +467,7 @@ test('auth diagnostics tolerate malformed refusals and preserve the original row
     const order = (left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right));
     assert.deepEqual(report.refusals.map(project).sort(order), [...cases.values()].map(({ status, code, kind }) =>
       ({ status, code, kind, pathKind: '/api/v1/boards/:id/state' })).sort(order));
-    assert.deepEqual(cookieArrivals, [true, true, true, true], 'real HTTP requests carried the isolated cookie');
+    assert.deepEqual(cookieArrivals, [...cases.keys()].map(() => true), 'real HTTP requests carried the isolated cookie');
     assert.ok(!JSON.stringify(report).includes(marker), 'no body, cookie value or URL identifier enters the trace');
     assert.ok(!JSON.stringify(report).includes(privateCode), 'unknown uppercase response codes are redacted');
     assert.equal(report.cookies.length, 1, 'the actual browser cookie attributes remain observable');
