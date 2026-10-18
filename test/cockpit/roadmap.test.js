@@ -879,7 +879,7 @@ test('the roadmap panel counts the next release by stage [N26]', {
         const expected = [['landed', '1'], ['landing', '1'], ['review', '1'], ['building', '1'], ['waiting', '1'], ['held', '0']];
         assert.deepEqual(counts.headerCounts, expected, `${width}/${scheme}: the header reads every supplied state`);
         assert.deepEqual(counts.counts, width < 900 ? [] : expected, `${width}/${scheme}: the desktop companion panel shares those supplied counts`);
-        assert.deepEqual(counts.shipped, width < 900 ? null : ['Last shipped', '0.8.6', 'The last shipped note.'], `${width}/${scheme}: the last shipped row includes only the note's first line`);
+        assert.deepEqual(counts.shipped, ['Last shipped', '0.8.6', 'The last shipped note.'], `${width}/${scheme}: the last shipped row includes only the note's first line`);
         assert.ok(counts.documentWidth <= counts.viewport, `${width}/${scheme}: the page never scrolls sideways`);
         if (width < 900) assert.ok(counts.heading.top < counts.mobileCounts.top && counts.mobile.height > 0 && counts.desktop.height === 0, `${width}/${scheme}: counts sit under the actual next release heading on the phone`);
         else assert.ok(counts.desktop.height > 0 && counts.mobile.height > 0, `${width}/${scheme}: desktop shipping counts stay in the right panel alongside the header`);

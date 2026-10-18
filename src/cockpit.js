@@ -2365,6 +2365,7 @@ function roadmapCards(p, titles) {
   const lastShipped = '<p class="roadmap-last-shipped"><span>Last shipped</span><b>' + esc(shipped[0]?.milestone.name || 'None yet') + '</b>'
     + (shipped[0]?.milestone.note ? '<small>' + esc(firstLine(shipped[0].milestone.note)) + '</small>' : '') + '</p>';
   const mobileShipping = '<section class="roadmap-shipping roadmap-mobile-shipping" aria-label="Shipping counts">' + shippingCounts + lastShipped + '</section>';
+  const mobileHistory = '<section class="roadmap-shipping roadmap-mobile-shipping" aria-label="Last shipped release">' + lastShipped + '</section>';
   /** Keep supplied landed progress beside an upcoming release without a modern summary. */
   const count = (m) => m.total ? '<span class="milestone-count" aria-label="' + m.done + '/' + m.total + ' landed">' + m.done + '/' + m.total + ' landed</span>' : '';
   /** Render the existing milestone items, progress and complete note when opened. */
@@ -2384,7 +2385,7 @@ function roadmapCards(p, titles) {
     const header = headerFor(m);
     const legacyTarget = m.milestone.target ? '<div class="milestone-targetline">Target <time datetime="' + esc(m.milestone.target) + '">' + when(m.milestone.target) + '</time>' + (m.milestone.pastTarget ? ' <span class="chip warn">past target</span>' : '') + '</div>' : '';
     return wrap('section', 'card-panel milestone' + (header ? ' roadmap-has-summary' : ''), 'm:' + m.milestone.name, true,
-      '<h2>' + linked(m.milestone.name, titles) + '</h2>' + (header ? header.count : count(m)), body(m), header ? header.detail : legacyTarget + (m === next ? mobileShipping : ''));
+      '<h2>' + linked(m.milestone.name, titles) + '</h2>' + (header ? header.count : count(m)), body(m), header ? header.detail + (m === next ? mobileHistory : '') : legacyTarget + (m === next ? mobileShipping : ''));
   };
   /** Summarize one shipped milestone with its first note line and total count. */
   const line = (m) => wrap('div', 'milestone shipped-one', 'm:' + m.milestone.name, false, '<h2>' + esc(m.milestone.name) + '</h2><small>' + esc(firstLine(m.milestone.note)) + '</small>' + (m.milestone.shipped?.commit ? '<code class="roadmap-shipped-commit" title="' + esc(m.milestone.shipped.commit) + '">' + esc(m.milestone.shipped.commit.slice(0, 12)) + '</code>' : '') + '<span class="milestone-count">' + m.total + (m.total === 1 ? ' item' : ' items') + '</span>', body(m));
