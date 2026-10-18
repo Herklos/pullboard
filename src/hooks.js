@@ -251,10 +251,10 @@ export function blockedPaths(paths, protect) {
  * changes outside its folders. The main checkout is the coordinator's and may change anything; any
  * other worktree must have joined a lane.
  *
- * @param {{ root: string, isMain: boolean, config: any, agent: any, boardFile?: string, preMergeHook?: boolean }} context
+ * @param {{ root: string, isMain: boolean, config: any, agent: any, boardFile?: string, preMergeHook?: boolean, onNotice?: (message: string) => void }} context
  * @returns {string[]}
  */
-export function preCommitProblems({ root, isMain, config, agent, boardFile, preMergeHook = false }) {
+export function preCommitProblems({ root, isMain, config, agent, boardFile, preMergeHook = false, onNotice }) {
   if (!isMain) refuseGrafts(root);
   const { touched, written } = stagedPaths(root);
   const problems = blockedPaths(written, config.protect).map(
@@ -283,9 +283,15 @@ export function preCommitProblems({ root, isMain, config, agent, boardFile, preM
     ? [...new Set([...touched, ...mergeHeads.flatMap((mergeHead) => stagedPaths(root, mergeHead).touched)])]
       .filter((path) => !outOfLane(ownershipConfig, agent.agent_lane, [path]).length || !unchangedMergePath(root, path, mergeHeads))
     : touched;
-  const foreign = outOfLane(ownershipConfig, agent.agent_lane, ownershipTouched);
+  const foreignPaths = ownershipTouched.filter((path) => outOfLane(ownershipConfig, agent.agent_lane, [path]).length);
+  const resolved = mergeHeads && !preMergeHook
+    ? foreignPaths.filter((path) => resolvedMergeConflictPath(root, path, mergeHeads))
+    : [];
+  resolved.forEach((path) => onNotice?.(`resolved accepted-main conflict in ${path}; the coordinator owns ${path}`));
   problems.push(
-    ...foreign.map((path) => `outside the ${agent.agent_lane} lane: ${path}; shout its owner instead`),
+    ...foreignPaths.filter((path) => !resolved.includes(path))
+      .flatMap((path) => outOfLane(ownershipConfig, agent.agent_lane, [path]))
+      .map((path) => `outside the ${agent.agent_lane} lane: ${path}; shout its owner instead`),
   );
   return problems;
 }
@@ -485,10 +491,45 @@ function committedObject(root, commit, path) {
   return fields ? fields[1] + ' ' + fields[2] : null;
 }
 
-/** Main integration may preserve either parent's exact foreign object; a new resolution remains lane-owned. */
+/** Main integration may preserve either parent's exact foreign object. */
 function unchangedMergePath(root, path, mergeHeads) {
   const staged = stagedObject(root, path);
   return staged !== null && (mergeHeads.some((mergeHead) => staged === committedObject(root, mergeHead, path)) || staged === committedObject(root, 'HEAD', path));
+}
+
+/** Allow a new foreign object only when Git records both exact parents in the resolved conflict index. */
+function resolvedMergeConflictPath(root, path, mergeHeads) {
+  const staged = stagedObject(root, path);
+  if (!staged) return false;
+  const records = git(root, ['ls-files', '--resolve-undo', '--stage', '-z', '--', ':(literal)' + path])
+    .split('\0').filter(Boolean);
+  const stages = new Map();
+  for (const record of records) {
+    const separator = record.indexOf('\t');
+    if (separator === -1 || record.slice(separator + 1) !== path) continue;
+    const fields = /^(\d{6}) ([0-9a-f]{40,64}) ([0123])$/iu.exec(record.slice(0, separator));
+    if (fields?.[3] === '0') {
+      if (fields[1] + ' ' + fields[2] !== staged) return false;
+      continue;
+    }
+    if (!fields || stages.has(fields[3])) return false;
+    stages.set(fields[3], fields[1] + ' ' + fields[2]);
+  }
+  const bases = mergeHeads.flatMap((mergeHead) => {
+    const result = tryGit(root, ['merge-base', '--all', 'HEAD', mergeHead]);
+    return result.status === 0 ? result.stdout.trim().split(/\r?\n/u).filter(Boolean) : [];
+  });
+  if (!bases.length) return false;
+  const baseStage = stages.get('1');
+  const hasBaseProvenance = baseStage
+    ? bases.some((base) => baseStage === committedObject(root, base, path))
+    : bases.every((base) => committedObject(root, base, path) === '');
+  const stagedMode = staged.split(' ', 1)[0];
+  const parentModes = [stages.get('2'), stages.get('3')].filter(Boolean).map((entry) => entry.split(' ', 1)[0]);
+  return hasBaseProvenance
+    && stages.get('2') === committedObject(root, 'HEAD', path)
+    && mergeHeads.some((mergeHead) => stages.get('3') === committedObject(root, mergeHead, path))
+    && parentModes.includes(stagedMode);
 }
 
 /**

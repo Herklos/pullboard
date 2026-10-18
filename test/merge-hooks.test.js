@@ -89,6 +89,41 @@ function nativeCommit(box, cwd, message = 'test: native fixture commit') {
   return box.git(cwd, 'commit', '-m', message);
 }
 
+/** Stage a real conflict between coordinator-authored policy versions after the lane joins. */
+function stagedCoordinatorPolicyConflict(t) {
+  const box = nativeFixture(t);
+  let result = box.git(box.main, 'switch', '-c', 'historical-policy');
+  assert.equal(result.status, 0, result.stderr);
+  const historicalConfig = { ...box.config, lease: '3h' };
+  writeFileSync(join(box.main, 'pullboard.json'), JSON.stringify(historicalConfig, null, 2));
+  result = box.git(box.main, 'add', 'pullboard.json');
+  assert.equal(result.status, 0);
+  result = nativeCommit(box, box.main, 'chore: retain historical coordinator policy');
+  assert.equal(result.status, 0, result.stderr);
+  result = box.git(box.lane, 'reset', '--hard', 'historical-policy');
+  assert.equal(result.status, 0, result.stderr);
+
+  result = box.git(box.main, 'switch', 'main');
+  assert.equal(result.status, 0, result.stderr);
+  const mainConfig = { ...box.config, lease: '4h' };
+  writeFileSync(join(box.main, 'pullboard.json'), JSON.stringify(mainConfig, null, 2));
+  result = box.git(box.main, 'add', 'pullboard.json');
+  assert.equal(result.status, 0);
+  result = nativeCommit(box, box.main, 'chore: update accepted coordinator policy');
+  assert.equal(result.status, 0, result.stderr);
+  const mainHead = box.git(box.main, 'rev-parse', 'HEAD').stdout.trim();
+
+  result = box.git(box.lane, 'merge', '--no-edit', 'main');
+  assert.equal(result.status, 1, 'the fixture must create a real policy conflict');
+  assert.match(result.stdout + result.stderr, /CONFLICT.*pullboard\.json/u);
+  assert.match(box.git(box.lane, 'ls-files', '--unmerged').stdout, /pullboard\.json/u);
+  const resolvedConfig = { ...box.config, lease: '5h' };
+  writeFileSync(join(box.lane, 'pullboard.json'), JSON.stringify(resolvedConfig, null, 2));
+  result = box.git(box.lane, 'add', 'pullboard.json');
+  assert.equal(result.status, 0);
+  return { box, mainHead };
+}
+
 /** Commit one lane-owned edit and one main-owned edit to force a real pending merge. */
 function diverge(box, { conflict = false } = {}) {
   writeFileSync(join(box.lane, 'core', 'file'), 'lane core\n');
@@ -128,7 +163,7 @@ test('owned conflict resolutions commit while foreign edits and mode changes rem
     'an unchanged blob does not authorize a different executable mode');
 });
 
-test('a foreign resolution identical to HEAD is allowed, including literal odd filenames [L3]', (t) => {
+test('an accepted-main conflict permits a foreign resolution, including literal odd filenames [L3,H16,B26]', (t) => {
   const box = fixture(t);
   const path = 'view/literal [x] \n file';
   writeFileSync(join(box.main, path), 'base literal\n');
@@ -149,8 +184,8 @@ test('a foreign resolution identical to HEAD is allowed, including literal odd f
   assert.deepEqual(preCommitProblems(box.context), []);
   writeFileSync(join(box.lane, path), 'neither parent\n');
   git(box.lane, 'add', '--', path);
-  assert.ok(preCommitProblems(box.context).some((problem) => problem.includes('literal')),
-    'a new foreign object is refused without interpreting brackets or line breaks');
+  assert.deepEqual(preCommitProblems(box.context), [],
+    'a resolved accepted-main conflict may choose new content at its coordinator-owned path');
 });
 
 test('merging an unaccepted branch never authorizes foreign changes [L3]', (t) => {
@@ -287,6 +322,39 @@ test("merging main brings in main's own changes outside the lane [H16,B26]", (t)
     'the automatic merge completed and created a merge commit');
   assert.deepEqual(JSON.parse(readFileSync(join(box.lane, 'pullboard.json'), 'utf8')), mainConfig,
     'the exact policy change from main is present in the lane checkout');
+});
+
+test('resolving a foreign main conflict completes the merge and names the coordinator [H16,B26]', (t) => {
+  const { box, mainHead } = stagedCoordinatorPolicyConflict(t);
+  const result = nativeCommit(box, box.lane, 'chore: resolve accepted coordinator policy');
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stderr, /the coordinator owns pullboard\.json/u);
+  assert.equal(box.git(box.lane, 'rev-parse', 'HEAD^2').stdout.trim(), mainHead,
+    'the resolved commit retains the accepted main commit as its second parent');
+});
+
+test('a foreign edit beside a resolved main conflict remains refused [H16,B26]', (t) => {
+  const { box } = stagedCoordinatorPolicyConflict(t);
+  writeFileSync(join(box.lane, 'view', 'file'), 'unrelated foreign edit\n');
+  let result = box.git(box.lane, 'add', 'view/file');
+  assert.equal(result.status, 0);
+  result = nativeCommit(box, box.lane, 'chore: resolve policy with foreign edit');
+  assert.notEqual(result.status, 0, 'the conflict exception cannot authorize unrelated foreign content');
+  assert.match(result.stderr, /outside the core lane: view\/file/u);
+  assert.notEqual(box.git(box.lane, 'rev-parse', '--verify', 'HEAD^2').status, 0,
+    'the refused commit did not finish the merge');
+});
+
+test('a mode change on a resolved foreign main conflict remains refused [H16,B26]', (t) => {
+  const { box } = stagedCoordinatorPolicyConflict(t);
+  chmodSync(join(box.lane, 'pullboard.json'), 0o755);
+  const staged = box.git(box.lane, 'add', 'pullboard.json');
+  assert.equal(staged.status, 0, staged.stderr);
+  const result = nativeCommit(box, box.lane, 'chore: resolve policy with mode change');
+  assert.notEqual(result.status, 0, 'conflict resolution cannot authorize a new executable mode');
+  assert.match(result.stderr, /outside the core lane: pullboard\.json/u);
+  assert.notEqual(box.git(box.lane, 'rev-parse', '--verify', 'HEAD^2').status, 0,
+    'the refused commit did not finish the merge');
 });
 
 test('an inherited main candidate cannot authorize an automatic merge from an unaccepted branch [H16,B26]', (t) => {
