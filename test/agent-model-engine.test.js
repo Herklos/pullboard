@@ -7,6 +7,7 @@ import { exportBoard, importBoard } from '../src/exchange.js';
 import {
   AUTO_ESCALATE_ENGINE,
   ENGINE_VERSION,
+  STRONG_REJECTION_NOTICE_ENGINE,
   VERIFIER_STANDING_ENGINE,
 } from '../src/machine.js';
 import {
@@ -22,6 +23,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 test('model declarations and event snapshots retain all supported engine semantics [O8,O3,H16]', (t) => {
+  assert.equal(STRONG_REJECTION_NOTICE_ENGINE, 54, 'ceiling notices retain their allocated feature engine');
+  assert.ok(ENGINE_VERSION >= STRONG_REJECTION_NOTICE_ENGINE, 'the current writer retains paired ceiling notices');
   assert.equal(AUTO_ESCALATE_ENGINE, 50, 'automatic escalation retains its allocated engine');
   assert.equal(WITHDRAW_MILESTONE_ENGINE, 51, 'withdraw retains its allocated feature engine');
   assert.ok(ENGINE_VERSION >= WITHDRAW_MILESTONE_ENGINE, 'the current writer includes the withdraw feature');
