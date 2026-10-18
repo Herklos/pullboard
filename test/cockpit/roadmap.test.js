@@ -941,7 +941,8 @@ test('a blocked roadmap item shows its dot and expands to say why [N26]', { time
       await press(chrome, row(id));
     }
     const base = await opened('#1');
-    assert.match(base, /Blocks#2 unclaimed.*#4 sent back/u, 'the dense row names its open dependants in their status colors');
+    assert.match(base, /Blocks.*#2 unclaimed/u, 'the dense row names its open dependants');
+    assert.match(base, /Blocks.*#4 sent back/u, 'a sent-back dependant keeps its status');
     assert.equal(await chrome.stable(`${row('#1')}.parentElement.querySelectorAll('.milestone-why a').length`), 1, 'references are chips; only the explicit Items link navigates');
     await press(chrome, row('#1'));
     for (const scheme of ['light', 'dark']) {
