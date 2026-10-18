@@ -178,6 +178,10 @@ Receipts
   pullboard log [id]                    every move, in order
   pullboard rigor                       failure causes that repeated: on 2 items, or 1 item at 2 commits;
                                         each with its items and whether it reads as work, product or both
+  pullboard rigor draft <key> "<rule>" --check "<command>" --red <commit> --green <commit> [--section <letter>]
+                                        --red is a noticed failure commit; prove its check red, then green at --green
+                                        draft Doctrine (work), spec (product) or both; only the person approves
+                                        test: causes need literal node --test <file> and the named test actually failing, then passing
 
 Spec
   pullboard spec --json                 parsed SPEC.md and doctrine rows as JSON
@@ -225,7 +229,7 @@ const HELP_NAMES = [
   'tour', 'init', 'worktree', 'join', 'takeover', 'whoami', 'lanes', 'lane', 'lane add', 'status', 'resources', 'settings', 'view', 'view export',
   'serve', 'mcp', 'relay', 'relay recover', 'resume', 'hooks', 'add', 'edit', 'escalate', 'run', 'list', 'doctor', 'health', 'skills', 'show', 'next', 'land',
   'check', 'check accept', 'claim', 'release', 'submit', 'done', 'verify', 'fact', 'why', 'shout', 'answer', 'pass', 'decisions', 'inbox', 'watch', 'export', 'digest', 'import',
-  'sweep', 'merged', 'withdraw', 'refreeze', 'reopen', 'hold', 'stats', 'ledger', 'log', 'rigor', 'spec', 'spec check', 'spec view',
+  'sweep', 'merged', 'withdraw', 'refreeze', 'reopen', 'hold', 'stats', 'ledger', 'log', 'rigor', 'rigor draft', 'spec', 'spec check', 'spec view',
   'spec show', 'spec unmet', 'spec signoff', 'spec draft', 'spec signers', 'spec signers add', 'doctrine', 'doctrine check', 'forget', 'prompt', 'gate', 'hook',
   'hook pre-commit', 'hook pre-merge-commit', 'hook commit-msg', 'hook pre-push', 'view export', 'version', 'lifecycle', 'help',
   'roadmap', 'milestone', 'runner', 'runner add', 'blueprint', 'blueprint add', 'blueprint fit', 'blueprint save', 'spec fit',
@@ -254,7 +258,7 @@ const HELP_EXAMPLES = {
   status: 'pullboard status', view: 'pullboard view', digest: 'pullboard digest --out briefing.md', mcp: 'pullboard mcp', stats: 'pullboard stats --since 2026-10-08', log: 'pullboard log 12', ledger: 'pullboard ledger',
   relay: 'pullboard relay on --all', 'relay recover': 'pullboard relay recover --skip 12',
   'lane add': 'pullboard lane add web --owns apps/web/', lane: 'pullboard lane add web --owns apps/web/',
-  roadmap: 'pullboard roadmap', rigor: 'pullboard rigor', milestone: 'pullboard milestone add "0.7.0" --items 12,13',
+  roadmap: 'pullboard roadmap', rigor: 'pullboard rigor', 'rigor draft': 'pullboard rigor draft "refusal:MERGE_LOST" "Merges keep every hunk" --check "node bin/checks/merges.js" --red 0123456 --green 89abcde', milestone: 'pullboard milestone add "0.7.0" --items 12,13',
   runner: 'pullboard runner add studio --slots 2 --browser 1', 'runner add': 'pullboard runner add studio --slots 2 --browser 1',
   edit: 'pullboard edit 12 --brief "Add the upload page"', release: 'pullboard release 12',
   land: 'pullboard land --max 4',
