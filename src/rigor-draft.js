@@ -6,9 +6,13 @@
  * approves or applies a row.
  */
 import { Refused } from './refused.js';
-import { causeProblem, rigorReport } from './rigor.js';
+import {
+  causeProblem,
+  rigorReport,
+} from './rigor.js';
 import { draftRow } from './spec-draft.js';
 import { proveCauseCheck } from './rigor-proof.js';
+import { rigorSource } from './rigor-source.js';
 
 /**
  * Draft the rows for a repeated cause, after proving its check. Refused when the key is malformed,
@@ -30,9 +34,10 @@ export async function rigorDraft({ root, config, events, person, agent }, { key,
   const items = cause.items.map((item) => `#${item.id}`).join(', ');
   const why = `Why: rigor ${key.replaceAll('|', '/')} ${cause.neverAgain ? 'was marked never again by the person' : `failed on ${items}`}; red at ${proof.red.commit}, green at ${proof.green.commit}.`;
   const rowText = `${text.trim()} ${why}`;
+  const source = rigorSource(cause, proof);
   const drafts = [];
-  if (cause.reads !== 'product') drafts.push(draftRow(root, config, { target: 'doctrine', text: rowText, gate: `check ${proof.countCheck}`, fields: ['count: 0'], section }));
-  if (cause.reads !== 'work') drafts.push(draftRow(root, config, { target: 'spec', text: rowText, gate: proof.check, section }));
+  if (cause.reads !== 'product') drafts.push(draftRow(root, config, { target: 'doctrine', text: rowText, gate: `check ${proof.countCheck}`, fields: ['count: 0', `source: ${source}`], section }));
+  if (cause.reads !== 'work') drafts.push(draftRow(root, config, { target: 'spec', text: rowText, gate: proof.check, fields: [`source: ${source}`], section }));
   return { key, reads: cause.reads, evidence: { items: cause.items, occurrences: cause.occurrences, neverAgain: cause.neverAgain },
     proof: { check: proof.check, red: proof.red, green: proof.green }, drafts };
 }

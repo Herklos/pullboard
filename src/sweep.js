@@ -4,7 +4,10 @@
  * item per file, in the lane that owns it, with the exact problems in its brief and the same tool,
  * run on that file, as its check. Much of a codebase's rigor is just running that loop.
  */
-import { relative, isAbsolute } from 'node:path';
+import {
+  relative,
+  isAbsolute,
+} from 'node:path';
 
 const TSC_RE = /^(.+?)\((\d+),(\d+)\): (?:error|warning) (TS\d+): (.+)$/;
 const LINE_RE = /^([^\s:][^:]*?):(\d+)(?::(\d+))?:?\s+(.+)$/;

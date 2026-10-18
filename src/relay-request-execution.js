@@ -1,15 +1,30 @@
 /** Native person requests run the actual CLI outside the relay lock [H12,H16]. */
-import { createHash, randomUUID } from 'node:crypto';
+import {
+  createHash,
+  randomUUID,
+} from 'node:crypto';
 import { join } from 'node:path';
 import * as store from './board.js';
 import { executeMove } from './api.js';
 import { loadConfig } from './config.js';
-import { codeIsFromMain, git, repoInfo } from './git.js';
+import {
+  codeIsFromMain,
+  git,
+  repoInfo,
+} from './git.js';
 import { laneNames } from './lanes.js';
 import { refusalDocument } from './json.js';
 import { Refused } from './refused.js';
-import { relayLinked, relayOperation, relayRequestDevice } from './relay.js';
-import { personRequestRecords, requestIntentDigest, requestStageText } from './relay-requests.js';
+import {
+  relayLinked,
+  relayOperation,
+  relayRequestDevice,
+} from './relay.js';
+import {
+  personRequestRecords,
+  requestIntentDigest,
+  requestStageText,
+} from './relay-requests.js';
 
 /** Read durable intake without retaining a SQLite connection while the CLI runs. */
 function requests(root) {

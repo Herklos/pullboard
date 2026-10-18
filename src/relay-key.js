@@ -1,10 +1,22 @@
 /** Device-only board keys, kept outside repositories and relay requests [H1,H15,H17]. */
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { decodeBoardKey, encodeBoardKey } from './seal.js';
+import {
+  decodeBoardKey,
+  encodeBoardKey,
+} from './seal.js';
 import { Refused } from './refused.js';
 
 /** Validate a persistent board identity before using it as a file or credential name. */

@@ -1,10 +1,29 @@
 /** Exact person row decisions and coordinator file application [B26,S18,S19]. */
-import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import {
+  dirname,
+  join,
+} from 'node:path';
 import { loadDoctrine } from './doctrine.js';
 import { answerFromText } from './blueprints.js';
-import { loadSpec, parseSpec, SIGNOFFS_FILE } from './spec.js';
-import { defaultPrincipal, hasSignerFile, signRowDecision, verifyRowDecision } from './signature.js';
+import {
+  loadSpec,
+  parseSpec,
+  SIGNOFFS_FILE,
+} from './spec.js';
+import {
+  defaultPrincipal,
+  hasSignerFile,
+  signRowDecision,
+  verifyRowDecision,
+} from './signature.js';
 import { Refused } from './refused.js';
 
 /** Resolve qualified doctrine ids while bare ids continue to name the spec. */

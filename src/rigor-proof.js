@@ -1,10 +1,28 @@
 /** Commit-bound, observed proof for a noticed failure cause; uncertain execution proves no rule [D1,D3,S1]. */
-import { spawn, spawnSync } from 'node:child_process';
-import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import {
+  spawn,
+  spawnSync,
+} from 'node:child_process';
+import {
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
-import { isAbsolute, join, posix } from 'node:path';
-import { literalShellWords, resolveExecutable } from './browser-admission.js';
-import { cleanGitEnvironment, resolveCommit, tryGit } from './git.js';
+import {
+  isAbsolute,
+  join,
+  posix,
+} from 'node:path';
+import {
+  literalShellWords,
+  resolveExecutable,
+} from './browser-admission.js';
+import {
+  cleanGitEnvironment,
+  resolveCommit,
+  tryGit,
+} from './git.js';
 import { parseProcessCensus } from './process-census.js';
 import { withGateSlot } from './gate.js';
 import { gateSlotEnvironment } from './resources.js';

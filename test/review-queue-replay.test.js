@@ -1,4 +1,5 @@
 /** In-memory engine replay coverage for sealed review-skipped snapshots [Q1,V15,H3,H16]. */
+import { submitFixture } from './board-submit-fixture.js';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import * as store from '../src/board.js';
@@ -82,7 +83,7 @@ test('v4 review releases keep their replay semantics; v5 notes add cooldowns [V1
   for (const board of [legacyBoard, currentBoard]) {
     store.claim(board, item, { agentId: 'web-1', lane: 'web', leaseMs: LEASE_MS,
       freeze: () => ({ text: 'review criterion', digest: 'c'.repeat(64) }) });
-    store.submit(board, item, { agentId: 'web-1', commit: 'a'.repeat(40), tree: 'b'.repeat(40) });
+    submitFixture(board, item, { agentId: 'web-1', commit: 'a'.repeat(40), tree: 'b'.repeat(40) });
     store.reserveReview(board, item, { agentId: 'web-2', leaseMs: LEASE_MS, policy: 'any' });
   }
   assert.throws(() => prepareEngineMove(currentBoard, 'release', [item, 'web-2']), (error) => error.code === 'NOTE_REQUIRED');

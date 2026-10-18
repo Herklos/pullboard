@@ -1,3 +1,4 @@
+import { submitFixture } from './board-submit-fixture.js';
 import assert from 'node:assert/strict';
 import { startFixtureChild as spawn, reportFixtureChildFailure, runFixtureChild, runFixtureGit } from './fixture-child.js';
 import { performance } from 'node:perf_hooks';
@@ -243,7 +244,7 @@ function attackCommit(box, cwd) {
 function historicalCheckSubmission(box, commit) {
   box.git(box.web, 'update-ref', `refs/pullboard/items/1/${commit.slice(0, 12)}`, commit);
   const board = store.openBoard(join(box.repo, '.git/pullboard/board.sqlite'));
-  try { store.submit(board, 1, { agentId: 'web-1', commit, tree: box.git(box.web, 'rev-parse', `${commit}^{tree}`) }); }
+  try { submitFixture(board, 1, { agentId: 'web-1', commit, tree: box.git(box.web, 'rev-parse', `${commit}^{tree}`) }); }
   finally { store.closeBoard(board); }
 }
 

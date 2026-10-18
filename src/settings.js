@@ -1,11 +1,24 @@
 /** Machine-wide settings shared by every Pullboard checkout on this machine. */
-import { mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { setResourceCapacity, updateRunnerSettings } from './resources.js';
+import {
+  setResourceCapacity,
+  updateRunnerSettings,
+} from './resources.js';
 import { validateRunner } from './runners.js';
 import { Refused } from './refused.js';
-import { gateQueueSettings, machineSettingsFile, readMachineSettingsFile, validateGateQueue } from './queue-settings.js';
+import {
+  gateQueueSettings,
+  machineSettingsFile,
+  readMachineSettingsFile,
+  validateGateQueue,
+} from './queue-settings.js';
 
 // The gate queue's settings live in queue-settings.js so the runner runtime can read them too.
 export { gateQueueSettings, machineSettingsFile };
@@ -19,6 +32,9 @@ export function loadMachineSettings() {
   const file = machineSettingsFile();
   const value = readMachineSettingsFile(file);
   if (!value) return { gateSlots: DEFAULT_GATE_SLOTS, browserSlots: DEFAULT_BROWSER_SLOTS };
+  if (value.health?.sentinel !== undefined && typeof value.health.sentinel !== 'boolean') {
+    throw new Refused('BAD_MACHINE_SETTINGS', `health.sentinel in ${file} must be true or false`);
+  }
   if (value.gate?.browserFreeChecks !== undefined && typeof value.gate.browserFreeChecks !== 'boolean') {
     throw new Refused('BAD_MACHINE_SETTINGS', `gate.browserFreeChecks in ${file} must be true or false`);
   }
@@ -80,6 +96,14 @@ export function browserByLaunchEnabled() {
  */
 export function viewBackgroundEnabled() {
   return loadMachineSettings().view?.background !== false;
+}
+
+/** The automatic health observer is on unless the machine or this board explicitly turns it off. */
+export function healthSentinelEnabled(config = {}) {
+  if (config.health?.sentinel !== undefined && typeof config.health.sentinel !== 'boolean') {
+    throw new Refused('BAD_CONFIG', 'health.sentinel in pullboard.json must be true or false');
+  }
+  return config.health?.sentinel !== false && loadMachineSettings().health?.sentinel !== false;
 }
 
 /**

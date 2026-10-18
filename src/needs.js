@@ -6,7 +6,8 @@ export function personNeeds(state) {
     return agent?.displayName || (agent ? `${id} (${agent.model || agent.agent_model || 'unknown'})` : id);
   };
   const rows = (state.spec ?? []).filter(row => !row.decision);
-  const drafts = rows.filter(row => row.status === 'draft').length;
+  const rigorDrafts = state.rigorDrafts ?? [];
+  const drafts = rows.filter(row => row.status === 'draft' && !rigorDrafts.some(draft => draft.target === `spec:${row.id}`)).length;
   return [
     ...(state.decisions ?? []).map(ask => ({ kind: 'decision', id: ask.shout_id,
       ref: name(ask.shout_from), text: ask.shout_text, what: 'decision', at: ask.shout_at })),
@@ -14,6 +15,7 @@ export function personNeeds(state) {
       ref: row.id, text: row.text, what: 'answer in SPEC.md' })),
     ...(state.holds ?? []).map(hold => ({ kind: 'hold', id: hold.hold_lane,
       ref: hold.hold_lane, text: hold.hold_reason, what: 'lane held by ' + name(hold.hold_by) })),
+    ...rigorDrafts,
     ...(drafts ? [{ kind: 'draft', id: 'drafts', count: drafts, ref: String(drafts),
       text: 'draft spec rows to approve or drop', what: 'review in SPEC.md', target: 'tab:spec' }] : []),
   ];

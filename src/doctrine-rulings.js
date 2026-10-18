@@ -7,16 +7,40 @@
  * worktree sees it without moving its branch, and each checkout's next resume names it once.
  */
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+} from 'node:fs';
+import {
+  dirname,
+  join,
+} from 'node:path';
 import * as store from './board.js';
-import { CONFIG_FILE, DOCTRINE_FILE, LEGACY_DOCTRINE_FILE } from './config.js';
-import { appliedDoctrine, doctrineFromSource, loadDoctrine } from './doctrine.js';
-import { git, mainCheckout, resolveCommit, tryGit } from './git.js';
+import {
+  CONFIG_FILE,
+  DOCTRINE_FILE,
+  LEGACY_DOCTRINE_FILE,
+} from './config.js';
+import {
+  appliedDoctrine,
+  doctrineFromSource,
+  loadDoctrine,
+} from './doctrine.js';
+import {
+  git,
+  mainCheckout,
+  resolveCommit,
+  tryGit,
+} from './git.js';
 import { Refused } from './refused.js';
 import { writeRowApply } from './row-decisions.js';
 import { loadSpec } from './spec.js';
-import { policyAt, trunkRef } from './trusted-policy.js';
+import {
+  policyAt,
+  trunkRef,
+} from './trusted-policy.js';
 
 /**
  * Read one doctrine file at a commit, falling back to the other default name the way loadDoctrine

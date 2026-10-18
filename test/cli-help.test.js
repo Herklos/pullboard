@@ -1,11 +1,17 @@
+/** @pullboard-test-input source-tree */
 /** The layered CLI help stays short, command-specific, and in parity with its declaration [N37,I1]. */
 import assert from 'node:assert/strict';
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { runFixtureChild, runFixtureGit } from './fixture-child.js';
 import { after, test } from 'node:test';
 import { HELP, resultCommands } from '../src/cli.js';
+import * as helpDeclaration from '../src/help.js';
+import { importStyleViolations } from './import-style-helpers.js';
+import { pathToFileURL } from 'node:url';
+import { loadConfig } from '../src/config.js';
+import { laneOf } from '../src/lanes.js';
 
 const BIN = resolve(import.meta.dirname, '../bin/pullboard.js');
 const sandboxes = [];
@@ -122,6 +128,64 @@ test('next help exposes explicit build intent alongside review reservations [Q1,
   const all = run('help', '--all');
   assert.match(all.stdout, /pullboard next \[--wait <minutes>\]\s+offer an eligible review when reviews pile up, otherwise claim work/u);
   assert.match(all.stdout, /pullboard next --build\s+claim a build explicitly, recording a skipped review offer/u);
+});
+
+test('help names come from the command declarations [C7,N37]', async (t) => {
+  const overview = run('help');
+  const all = run('help', '--all');
+  assert.equal(overview.status, 0, overview.failure);
+  assert.equal(all.status, 0, all.failure);
+  assert.equal(overview.stdout, HELP.overview + '\n');
+  assert.equal(all.stdout, HELP.all + '\n');
+  const undocumented = run('help', 'milestone', 'items');
+  assert.equal(undocumented.status, 2, 'the existing undocumented help stays refused');
+  assert.equal(undocumented.stdout, '');
+  assert.equal(undocumented.stderr, 'pullboard: no command "milestone items"; closest match is "milestone order". Run pullboard help --all for the full list.\n');
+  t.diagnostic('help overview bytes ' + JSON.stringify(overview.stdout));
+
+  const directory = resolve(import.meta.dirname, '../src');
+  const config = loadConfig(resolve(directory, '..'));
+  const sources = readdirSync(directory, { recursive: true })
+    .filter((file) => file.endsWith('.js') && laneOf(config, `src/${file}`) === 'core')
+    .map((file) => ({ file, source: readFileSync(join(directory, file), 'utf8') }));
+  assert.ok(sources.length > 0, 'the core lane owns source files');
+  assert.deepEqual(importStyleViolations(sources), [], 'each actual static import has one binding per line');
+  const styles = [
+    { file: 'same-line', source: "import { first, second as renamed } from 'module';" },
+    { file: 'mixed', source: "import initial, { first } from 'module';" },
+    { file: 'namespace', source: "import initial, * as space from 'module';" },
+    { file: 'formatted', source: "import {\n first,\n second as renamed,\n} from 'module';" },
+    { file: 'comments', source: "import /* before */ { first, /* middle */ second } from 'module';" },
+    { file: 'attributes', source: "import { first, second } from 'module' with { type: 'json' };" },
+    { file: 'text', source: "const text = 'import { first, second }'; const raw = `import { first, second }`; const expression = /import { first, second }/; /* import { first, second } */" },
+    { file: 'quoted', source: "import { 'a,b' as first } from 'module';" },
+    { file: 'line-separator', source: "import { // comment\u2028 first, second } from 'module';" },
+    { file: 'paragraph-separator', source: "import // comment\u2029 { first, second } from 'module';" },
+  ];
+  assert.deepEqual(importStyleViolations(styles), ['same-line', 'mixed', 'namespace', 'comments', 'attributes']
+    .map((file) => ({ file, line: 1, count: 2 })).concat([
+      { file: 'line-separator', line: 2, count: 2 },
+      { file: 'paragraph-separator', line: 2, count: 2 },
+    ]));
+
+  assert.equal(typeof helpDeclaration.buildHelp, 'function', 'help is built from declarations');
+  const generated = helpDeclaration.buildHelp([...resultCommands(), 'future-command']);
+  for (const name of resultCommands()) assert.ok(generated.commands[name], `${name} is derived`);
+  assert.deepEqual(generated.commands['future-command']?.usages, ['pullboard future-command']);
+  assert.equal(generated.overview, HELP.overview, 'a new declaration preserves the overview bytes');
+  assert.equal(generated.all, HELP.all, 'a new declaration preserves the full-help bytes');
+
+  const original = readFileSync(join(directory, 'cli.js'), 'utf8');
+  const declaration = /function readCommands\(io, \{ first, second, rest, values \}\) \{\s*return \{/u;
+  assert.match(original, declaration);
+  const extended = original.replace(declaration, (text) => text + "\n/** A private new command proves help follows actual dispatch declarations. */\n'future-command': () => 0,")
+    .replace(/\bfrom (['"])(\.[^'"]+)\1/gu, (_match, _quote, path) => 'from ' + JSON.stringify(pathToFileURL(resolve(directory, path)).href));
+  const privateCli = await import('data:text/javascript;base64,' + Buffer.from(extended).toString('base64'));
+  assert.ok(privateCli.resultCommands().includes('future-command'));
+  assert.deepEqual(privateCli.HELP.commands['future-command']?.usages, ['pullboard future-command'],
+    'adding an actual command requires no edit to help.js');
+  assert.equal(privateCli.HELP.overview, HELP.overview);
+  assert.equal(privateCli.HELP.all, HELP.all);
 });
 
 test('init help names --blueprint [I1,N37]', () => {
