@@ -18,8 +18,9 @@ test('a pullboard command in prose chips only the command [N26]', async () => {
   // declares, choices in [a|b] or a|b, and commands after " | ", and nothing else.
   const declared = new Set();
   const read = (text) => {
-    // Usage alternatives may follow an argument: spec approve <ids> | decline <ids>.
-    for (const branch of text.matchAll(/pullboard ((?:[a-z-]+ )+)(?:<[^>]+> )?\| ([a-z-]+)/g)) {
+    // Usage alternatives may follow an argument or an optional group: spec approve <ids> | decline <ids>, and
+    // spec fit [approve <batch>] | fit edit <row>, whose alternative restates the last word.
+    for (const branch of text.matchAll(/pullboard ((?:[a-z-]+ )+)(?:<[^>]+> |\[[^\]]+\] )?\| ([a-z-]+(?: [a-z-]+)*)/g)) {
       const shared = branch[1].trim().split(' ').slice(0, -1);
       read('pullboard ' + [...shared, branch[2]].join(' '));
     }
