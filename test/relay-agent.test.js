@@ -7,7 +7,8 @@ import { chmodSync, existsSync, readFileSync, realpathSync, unlinkSync, writeFil
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { after, test } from 'node:test';
-import { claim as claimStoredItem, closeBoard, openBoard, register as registerStoredAgent, submit as submitStoredItem } from '../src/board.js';
+import { claim as claimStoredItem, closeBoard, openBoard, register as registerStoredAgent } from '../src/board.js';
+import { submitFixture as submitStoredItem } from './board-submit-fixture.js';
 import { serveApi } from '../src/api.js';
 import { main } from '../src/cli.js';
 import { ENGINE_VERSION } from '../src/machine.js';

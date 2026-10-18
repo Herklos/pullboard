@@ -2,6 +2,7 @@
  * pullboard health names every stuck item, why, since when, the next step and who takes it, on a
  * real SQLite board in a real git repo with an injected clock, and never changes either [A6].
  */
+import { submitFixture } from './board-submit-fixture.js';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
@@ -114,7 +115,7 @@ test('health names each stuck cause with its next step and owner [A6]', async (t
   const otherReviewer = store.register(board, { lane: 'review', path: join(box.dir, 'review-2') });
   const add = (title, extra = {}) => store.addItem(board, { by: 'coordinator', lane: 'core', title, ...extra });
   const claim = (id, agentId, leaseMs = 2 * HOUR) => store.claim(board, id, { agentId, lane: 'core', leaseMs, freeze });
-  const submit = (id, agentId, commit) => store.submit(board, id, { agentId, commit, tree: `tree-${id}` });
+  const submit = (id, agentId, commit) => submitFixture(board, id, { agentId, commit, tree: `tree-${id}` });
   const decide = (id, decision, commit, title, by = reviewer) => store.verify(board, id, { agentId: by, decision,
     reason: decision === 'ACCEPT' ? 'CRITERION_MET' : 'TEST_FAILURE', note: 'checked the fixture', head: commit, digest: `digest:${title}`, policy: 'any' });
   /** Build an item through claim and submit, optionally to an accept or a reject. */
@@ -254,7 +255,7 @@ test('health on a healthy board says nothing is stuck [A6]', async (t) => {
   moving.at(30 * HOUR);
   const done = store.addItem(moving.board, { by: 'coordinator', lane: 'core', title: 'Done' });
   store.claim(moving.board, done, { agentId: builder, lane: 'core', leaseMs: 2 * HOUR, freeze });
-  store.submit(moving.board, done, { agentId: builder, commit, tree: 'tree' });
+  submitFixture(moving.board, done, { agentId: builder, commit, tree: 'tree' });
   store.verify(moving.board, done, { agentId: reviewer, decision: 'ACCEPT', reason: 'CRITERION_MET', note: 'ran it', head: commit, digest: 'digest:Done', policy: 'any' });
   store.merged(moving.board, done, { agentId: 'coordinator', commit });
   moving.at(HOUR / 2);
@@ -262,7 +263,7 @@ test('health on a healthy board says nothing is stuck [A6]', async (t) => {
   store.claim(moving.board, building, { agentId: builder, lane: 'core', leaseMs: 2 * HOUR, freeze });
   const reviewing = store.addItem(moving.board, { by: 'coordinator', lane: 'core', title: 'Reviewing' });
   store.claim(moving.board, reviewing, { agentId: second, lane: 'core', leaseMs: 2 * HOUR, freeze });
-  store.submit(moving.board, reviewing, { agentId: second, commit, tree: 'tree' });
+  submitFixture(moving.board, reviewing, { agentId: second, commit, tree: 'tree' });
   store.reserveReview(moving.board, reviewing, { agentId: reviewer, leaseMs: HOUR, policy: 'any' });
   store.addItem(moving.board, { by: 'coordinator', lane: 'core', title: 'Fresh work' });
   const asked = store.shout(moving.board, { from: builder, to: 'coordinator', text: 'Which wording?', lanes: ['core', 'docs', 'review'], decision: true });

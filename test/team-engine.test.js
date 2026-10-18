@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { test } from 'node:test';
 import * as store from '../src/board.js';
+import { submitFixture } from './board-submit-fixture.js';
 import { exportBoard, importBoard } from '../src/exchange.js';
 import { applyEngineMove, appliedSequence, engineReceipt, prepareEngineMove } from '../src/engine.js';
 import { ENGINE_VERSION, VERDICT_REVIEW_ENGINE } from '../src/machine.js';
@@ -27,7 +28,7 @@ function submitted(t) {
   const id = store.addItem(board, { by: 'coordinator', lane: 'web', title: 'Sealed review fixture' });
   store.claim(board, id, { agentId: 'web-1', lane: 'web', leaseMs: 3_600_000, head: BASE,
     freeze: () => ({ text: JSON.stringify({ rows: [], policy: { version: 1, commit: BASE, verify: { policy: 'any', family: 'off' } } }), digest: DIGEST }) });
-  store.submit(board, id, { agentId: 'web-1', commit: COMMIT, tree: TRUNK, files: ['web/feature.js'], policyCommit: BASE });
+  submitFixture(board, id, { agentId: 'web-1', commit: COMMIT, tree: TRUNK, files: ['web/feature.js'], policyCommit: BASE });
   return board;
 }
 
@@ -153,6 +154,7 @@ test('a landing snapshot binds the checked composition through replay and final 
     branch: 'refs/heads/main', root: '/fixture/landing', owner: 'fixture', logPath: '/fixture/landing.log',
     candidates: [entry], items: [entry], revision: 0 };
   const record = prepareEngineMove(one, 'recordLandingBatch', [{ agentId: 'coordinator', batch }], { id: 'checked-landing-snapshot' });
+  assert.equal(VERDICT_REVIEW_ENGINE, 33, 'checked reviews retain their stable first engine');
   // A new move carries the writer's current engine; the checked-review feature only sets the minimum (17 Oct: pinning the
   // current version to the feature number broke every later engine item).
   assert.equal(VERDICT_REVIEW_ENGINE, 33, 'checked compositions retain their stable introduction engine');

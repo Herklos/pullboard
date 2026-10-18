@@ -7,6 +7,7 @@ import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { test } from 'node:test';
 import * as store from '../src/board.js';
+import { submitFixture } from './board-submit-fixture.js';
 import { appliedSequence, applyRelayMove } from '../src/engine.js';
 import { ENGINE_VERSION, VERIFIER_STANDING_ENGINE } from '../src/machine.js';
 import { createRelayJournal } from '../relay/journal.js';
@@ -51,12 +52,12 @@ function freezer() {
   return () => ({ text, digest: createHash('sha256').update(text).digest('hex') });
 }
 
-/** Put one item in submitted state on a board, built by `builder`. */
+/** Create synthetic submitted history for the credential test; this fixture does not run a gate. */
 function submitted(board, builder, lane) {
   const added = store.addItem(board, { by: 'coordinator', lane, title: 'provenance review', criterion: 'an independent seat accepts it' });
   const item = { item_id: typeof added === 'number' ? added : added.item_id };
   store.claim(board, item.item_id, { agentId: builder, lane, leaseMs: 3_600_000, freeze: freezer(), head: 'a'.repeat(40) });
-  store.submit(board, item.item_id, { agentId: builder, commit: 'b'.repeat(40), tree: 'c'.repeat(40) });
+  submitFixture(board, item.item_id, { agentId: builder, commit: 'b'.repeat(40), tree: 'c'.repeat(40) });
   return store.getItem(board, item.item_id);
 }
 
