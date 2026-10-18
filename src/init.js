@@ -580,7 +580,7 @@ export function initRepo({ info, openBoardHere, register, closeBoard, model, per
   const { root } = info;
   const worktreeMode = existsSync(join(root, CONFIG_FILE)) ? loadConfig(root).worktrees : 'inside';
   const doctrine = existsSync(join(root, CONFIG_FILE)) ? loadConfig(root).practice : doctrineFile(root);
-  const gate = detectGate(root);
+  const gate = detectGate(root) || 'pullboard spec check';
   const configured = configuredGate(root);
   const written = [];
   /** Record only paths setup actually writes; unrelated files never enter its staging command. */

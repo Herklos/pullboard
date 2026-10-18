@@ -112,7 +112,7 @@ Each move checks its guards in this order and refuses with the first one that do
 | DIRTY | the worktree has no uncommitted changes | commit your changes, then submit |
 | UNTRACKED | the worktree has no untracked files | commit or ignore them, then submit |
 | NO_COMMIT | there is a commit to submit | commit your work, then submit |
-| NO_GATE | the repo names a gate command | set "gate" in pullboard.json, e.g. "npm test" |
+| NO_GATE | the repo names a gate command | set "gate" in pullboard.json to "pullboard spec check", then commit it |
 | OUTSIDE_LANE | the full claimed diff respects committed coordinator ownership | restore foreign paths or shout their owner |
 | NO_POLICY | the full claimed diff respects committed coordinator ownership | restore the claim base or ask the coordinator to refreeze |
 | BAD_CONFIG | the full claimed diff respects committed coordinator ownership | restore the committed coordinator configuration |

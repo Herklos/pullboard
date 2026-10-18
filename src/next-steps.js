@@ -351,7 +351,7 @@ export const NEXT_STEPS = Object.freeze({
   NO_FILE: 'check the path and pass a file that exists',
   NO_FILES_LANE: 'run pullboard lanes, then file the build in a lane that owns files, or pass --after <id> if it reviews that item',
   NO_FIRST_COMMIT: 'commit the repo, then pullboard spec signers add',
-  NO_GATE: 'set "gate" in pullboard.json, such as "npm test", and commit it',
+  NO_GATE: 'set "gate" in pullboard.json to "pullboard spec check", then commit it',
   NO_ITEM: 'find the item id: pullboard list --all',
   NO_LANE: 'pick a lane from pullboard lanes',
   NO_LINES: 'name a line range inside the file',
