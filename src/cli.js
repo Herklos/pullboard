@@ -1347,7 +1347,7 @@ function resumeHere(io, view) {
     const staleVerdicts = pendingMerges.filter(item => item.item_verdict_state);
     const decisionSections = isMain ? coordinatorDecisionSections(board, ctx) : null;
     const { shouts = [], ...decisions } = decisionSections ?? {};
-    const needsState = personNeedsState(root, { board });
+    const needsState = personNeedsState(root, { board, includeRigorUndrafted: me.id === COORDINATOR });
     return {
       me,
       all,

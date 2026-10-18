@@ -12,7 +12,7 @@ import { rigorDraftNeeds, undraftedRigor } from './rigor-notices.js';
 import { personNeeds } from './needs.js';
 
 /** Borrow an existing connection or open a read-only one; retain exact row-decision matching. */
-export function personNeedsState(root, { board: providedBoard = null } = {}) {
+export function personNeedsState(root, { board: providedBoard = null, includeRigorUndrafted = false } = {}) {
   const info = repoInfo(root);
   const board = providedBoard ?? { db: store.openBoardReadOnly(join(info.commonDir, 'pullboard', 'board.sqlite')) };
   try {
@@ -21,7 +21,8 @@ export function personNeedsState(root, { board: providedBoard = null } = {}) {
     const config = loadConfig(root);
     const rows = projectRowDecisions(decisions, { spec: loadSpec(root, config).rows, practice: loadDoctrine(root, config).rows });
     const rigorDrafts = rigorDraftNeeds(rows);
-    const projected = { ...state, rigorDrafts, rigorUndrafted: undraftedRigor(store.events(board), rows, { person: store.PERSON }) };
+    const projected = { ...state, rigorDrafts, ...(includeRigorUndrafted
+      ? { rigorUndrafted: undraftedRigor(store.events(board), rows, { person: store.PERSON }) } : {}) };
     return { ...projected, needs: personNeeds(projected) };
   } finally {
     if (!providedBoard) store.closeBoard(board);

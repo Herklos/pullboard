@@ -1,5 +1,5 @@
 /** Automatic repeated-cause notices and proved rows waiting on the person [D1,D3,S1]. */
-import { causeProblem, eventCauses, rigorReport } from './rigor.js';
+import { causeProblem, eventCauses, isMergeConflict, rigorReport } from './rigor.js';
 import { parseSpec } from './spec.js';
 import { readRigorSource, RIGOR_NOTICE_ENGINE } from './rigor-source.js';
 
@@ -42,7 +42,8 @@ function declinedRepeat(cause, state) {
 
 /** The move that crosses the repeat threshold posts once, and a third failure stays quiet. */
 export function newRigorNotices(events, trigger, { person }) {
-  const keys = new Set(rigorTriggerCauses(trigger, person));
+  const keys = new Set(rigorTriggerCauses(trigger, person).filter(key => !isMergeConflict(key)));
+  if (!keys.size) return [];
   const state = noticeState(events, person);
   return rigorReport(events, { person }).causes.filter(cause => {
     if (!keys.has(cause.key) || declinedRepeat(cause, state)) return false;
