@@ -841,6 +841,7 @@ test('the roadmap panel counts the next release by stage [N26]', {
   }
 });
 
+
 test('the roadmap shows landed, accepted and past target [N26]', { timeout: 90_000 }, async () => {
   const executable = chromeExecutable(); assert.ok(executable, 'Chrome is required for the roadmap header check.');
   const box=machine(), alpha=project(box,'roadmap-truth',SPEC,{lanes:{web:{owns:['web/'],specs:['G']},ops:{owns:['ops/'],specs:['G']}}});
@@ -864,6 +865,8 @@ test('the roadmap shows landed, accepted and past target [N26]', { timeout: 90_0
   const milestone=name=>`document.querySelector('[data-key="m:${name}"]')`;
   try {
     chrome=await openSnapshotChrome(executable,view.link.href,profile);await chrome.waitFor('data?.project?.milestones?.length===3');
+    // Temporary #820 contract fixture for the permitted parallel build. Its shape is provisional until the backend lands; this is not real CLI summary proof.
+    await chrome.stable(`(()=>{const m=data.project.milestones.find(m=>m.name==='State summary');m.summary={total:6,left:5,landed:1,landing:1,review:1,building:1,waiting:1,held:1,needsYou:[9],pace:{last6h:3,last2h:3},estimate:{low:3.5,high:10}};return true})()`);
     await press(chrome,"document.querySelector('[data-tab=roadmap]')");
     await chrome.waitFor(`${milestone('Past target')}?.querySelector('.milestone-head')`);
     const truth=await chrome.stable(`${milestone('Past target')}.textContent`);
@@ -873,7 +876,23 @@ test('the roadmap shows landed, accepted and past target [N26]', { timeout: 90_0
     await press(chrome,"document.querySelector('[data-key=shipped] > .milestone-head')");
     await chrome.waitFor(`${milestone('Shipped release')}?.querySelector('.milestone-head')`);
     assert.match(await chrome.stable(`${milestone('Shipped release')}.textContent`),new RegExp(shipped.slice(0,12)),'the shipped release names its actual commit');
-    // #820 summary assertions will be added after its exact JSON shape is confirmed.
+    for(const width of [375,1280]) {
+      await chrome.send('Emulation.setDeviceMetricsOverride',{width,height:950,deviceScaleFactor:1,mobile:false});
+      for(const scheme of ['light','dark']) {
+        await chrome.send('Emulation.setEmulatedMedia',{features:[{name:'prefers-color-scheme',value:scheme}]});
+        const read=JSON.parse(await chrome.stable(`JSON.stringify((()=>{const m=${milestone('State summary')},bar=m.querySelector('.roadmap-summary-bar');return {text:m.textContent,legend:[...m.querySelectorAll('[data-summary-state]')].map(x=>[x.dataset.summaryState,x.querySelector('b').textContent]),segments:[...m.querySelectorAll('[data-summary-segment]')].map(x=>[x.dataset.summarySegment,Number(x.dataset.count),x.getBoundingClientRect().width]),bar:bar?.getBoundingClientRect().width,width:document.documentElement.scrollWidth,viewport:innerWidth};})())`));
+        assert.match(read.text,/5 left.*1 of 6 landed/u);assert.match(read.text,/About 3\.5 to 10 h/u);assert.match(read.text,/3 landed in the last 6 h, 3 in the last 2 h/u);assert.match(read.text,/Needs you:.*#9 Approve the release/u);
+        assert.deepEqual(read.legend,[['landed','1'],['landing','1'],['review','1'],['building','1'],['waiting','1'],['held','1']]);
+        assert.equal(read.segments.reduce((sum,row)=>sum+row[1],0),6,'the six supplied states sum to total');
+        assert.ok(read.segments.every(row=>row[2]>0&&Math.abs(row[2]-read.bar/6)<1),`${width}/${scheme}: every supplied state occupies its share`);
+        assert.ok(read.width<=read.viewport,`${width}/${scheme}: the header stays inside the viewport`);
+      }
+    }
+    // The API owns counts: changing held item summaries cannot change the supplied milestone summary.
+    await chrome.stable("window.__originalItems=data.project.items;window.__originalRoadmapItems=data.project.milestones.find(m=>m.name==='State summary').items;data.project.items=data.project.items.map(item=>({...item,status:'open',stage:'open',merged:null,claim:null}));data.project.milestones.find(m=>m.name==='State summary').items=window.__originalRoadmapItems.map(item=>({...item,status:'open',state:'open'}));render();true");
+    assert.equal(await chrome.stable(`${milestone('State summary')}.querySelector('[data-summary-state=building] b').textContent`),'1');
+    await chrome.stable("data.project.items=window.__originalItems;const m=data.project.milestones.find(m=>m.name==='State summary');m.items=window.__originalRoadmapItems;m.summary.estimate=null;m.summary.needsYou=[];render();true");
+    assert.equal(await chrome.stable(`${milestone('State summary')}.querySelectorAll('.roadmap-estimate,.roadmap-pace,.roadmap-summary-needs').length`),0,'absent JSON omits forecast and person line');
     assert.deepEqual(chrome.exceptions,[]);
   } finally {if(chrome)await closeSnapshotChrome(chrome);rmSync(profile,{recursive:true,force:true});await view.stop();}
 });
