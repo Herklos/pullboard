@@ -95,6 +95,6 @@ export function recordRejectedItemRoute(board, id, engine, item, { escalate, sho
     engine: STRONG_REJECTION_NOTICE_ENGINE, route: item.item_route, builder, rejections: escalation.rejections,
   });
   const receipts = escalation.rejections.map(entry => `#${entry.verdictId} (${entry.reason})`).join(', ');
-  shout(board, { from: COORDINATOR, to: COORDINATOR, lanes: [COORDINATOR],
+  shout(board, { from: 'sentinel', to: COORDINATOR, lanes: [COORDINATOR],
     text: `#${id} has two send-backs at the strongest route; ${builder} built it. Rejections: ${receipts}.` });
 }
