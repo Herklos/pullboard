@@ -22,7 +22,10 @@ import {
   hostedState,
 } from './view/hosted.js';
 import { staleChip } from './view/stale.js';
-import { roadmapHeaders, roadmapSummary } from './view/roadmap-summary.js';
+import {
+  roadmapHeaders,
+  roadmapSummary,
+} from './view/roadmap-summary.js';
 import { roadmapBlock } from './view/roadmap-block.js';
 import { applyStateDelta } from './api-http.js';
 
