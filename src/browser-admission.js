@@ -53,7 +53,7 @@ const SAFE_CHILD_PROCESS_MODULES = new Map([
 ]);
 
 /** Split a literal shell command into words, refusing expansion, operators, and incomplete quoting. */
-function literalShellWords(command) {
+export function literalShellWords(command) {
   if (typeof command !== 'string' || !command.trim()) return null;
   const words = [];
   let word = '';
@@ -114,7 +114,7 @@ function explicitRunnerFiles(args) {
  * @param {string | undefined} pathValue
  * @returns {string | null}
  */
-function resolveExecutable(command, pathValue = process.env.PATH) {
+export function resolveExecutable(command, pathValue = process.env.PATH) {
   if (command.includes('/')) return resolve(command);
   const suffixes = process.platform === 'win32' ? (process.env.PATHEXT ?? '.EXE;.CMD;.BAT').split(';') : [''];
   for (const directory of (pathValue ?? '').split(process.platform === 'win32' ? ';' : ':')) {
