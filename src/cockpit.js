@@ -2356,11 +2356,10 @@ function nextMilestone(p) {
 }
 
 /**
- * The Roadmap (N26, N38) leads with what ships next: every milestone with work still to verify, in the board's order,
- * open by default; then one Shipped section, folded, holding nonempty milestones with only verified items, newest
- * first, each a line with its name, its item count and its note's first line. A milestone opens to a card as before:
- * how many of its items are verified as a count and a bar, a row for each, and the note to the person in its own
- * highlighted line; one with no items says so. Each part stays open or closed as the person left it.
+ * The Roadmap (N26, N38) opens unshipped milestones in board order, then folds explicit shipments into Shipped.
+ * Each header displays the backend's supplied state partition, remaining work, forecast and person decisions.
+ * Accepted and landed rows stay distinct; shipped history carries its commit. Older exports keep their legacy
+ * completion rule. Each part preserves the person's disclosure choice for this visit.
  */
 function roadmapCards(p, titles) {
   // Opened from the status bar's release, the Roadmap is that release alone, with a way back to all of them.
@@ -2391,7 +2390,7 @@ function roadmapCards(p, titles) {
   const lastShipped = '<p class="roadmap-last-shipped"><span>Last shipped</span><b>' + esc(shipped[0]?.milestone.name || 'None yet') + '</b>'
     + (shipped[0]?.milestone.note ? '<small>' + esc(firstLine(shipped[0].milestone.note)) + '</small>' : '') + '</p>';
   const mobileShipping = '<section class="roadmap-shipping roadmap-mobile-shipping" aria-label="Shipping counts">' + shippingCounts + lastShipped + '</section>';
-  /** Keep the existing verified-item count beside an upcoming release. */
+  /** Keep supplied landed progress beside an upcoming release without a modern summary. */
   const count = (m) => m.total ? '<span class="milestone-count" aria-label="' + m.done + '/' + m.total + ' landed">' + m.done + '/' + m.total + ' landed</span>' : '';
   /** Render the existing milestone items, progress and complete note when opened. */
   const body = (read) => {
