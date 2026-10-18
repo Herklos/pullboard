@@ -251,7 +251,6 @@ const HELP_EXAMPLES = {
   'lane add': 'pullboard lane add web --owns apps/web/', lane: 'pullboard lane add web --owns apps/web/',
   roadmap: 'pullboard roadmap', rigor: 'pullboard rigor', 'rigor draft': 'pullboard rigor draft "refusal:MERGE_LOST" "Merges keep every hunk" --check "node bin/checks/merges.js" --red 0123456 --green 89abcde', milestone: 'pullboard milestone add "0.7.0" --items 12,13',
   'milestone order': 'pullboard milestone order "0.7.0" 13,12',
-  'milestone items': 'pullboard milestone items "0.7.0" --add 12,13',
   runner: 'pullboard runner add studio --slots 2 --browser 1', 'runner add': 'pullboard runner add studio --slots 2 --browser 1',
   edit: 'pullboard edit 12 --brief "Add the upload page"', release: 'pullboard release 12',
   land: 'pullboard land --max 4',
@@ -279,6 +278,7 @@ const HELP_ALIASES = {
   status: { usage: 'pullboard status', source: 'whoami' },
   done: { usage: 'pullboard done <id>', source: 'submit <id>' },
   inbox: { usage: 'pullboard inbox', source: null },
+  'check accept': { usage: 'pullboard check accept <id>', source: 'check accept' },
   relay: { source: 'relay', every: true },
   lifecycle: { usage: 'pullboard lifecycle', source: null },
   escalate: { usage: 'pullboard escalate <id> --note "..." [--note-file <file>]', source: 'escalate <id> --note "what was tried and how it failed"', extraFlags: ['--note-file <file>'] },
@@ -341,10 +341,7 @@ function commandHelpRows(fullHelp, commandNames) {
     ...commandNames,
     ...Object.keys(HELP_ALIASES),
     ...Object.keys(HELP_EXAMPLES).filter((name) => /^[a-z][a-z0-9-]*(?: [a-z][a-z0-9-]*)*$/u.test(name)),
-    ...rows.flatMap((row) => {
-      const words = commandWords(row.usage);
-      return row.usage.includes(' | ') ? words.slice(0, 1) : words.map((_, index) => words.slice(0, index + 1).join(' '));
-    }).filter((name) => /^[a-z][a-z0-9-]*(?: [a-z][a-z0-9-]*)*$/u.test(name)),
+    ...rows.map((row) => commandWords(row.usage)[0]).filter(Boolean),
   ])];
   return Object.fromEntries(names.map((name) => {
     const parts = name.split(' ');

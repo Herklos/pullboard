@@ -1,9 +1,9 @@
 {
-  "sourceCommit": "47f1703d5bd7e27d4180aace337bdc9ecad4c1f9",
+  "sourceCommit": "154bf93644c339792011022b4efcc28cb4e8f03d",
   "help": {
     "overview": "Pullboard is a local-first work board for coding agents; nothing ships until a second agent verifies it.\nNew here? pullboard tour, then pullboard init.\n\nStart\n  pullboard tour\n  pullboard init\n  pullboard worktree\nWork\n  pullboard add\n  pullboard list\n  pullboard claim\nReview\n  pullboard submit\n  pullboard next\n  pullboard verify\nSee\n  pullboard status\n  pullboard view\n  pullboard log\n\nMore: pullboard help <command>; pullboard help --all for the full list.",
     "firstRun": "New here? pullboard tour, then pullboard init.\nPullboard is a local-first work board for coding agents; nothing ships until a second agent verifies it.\n\nStart\n  pullboard tour\n  pullboard init\n  pullboard worktree\nWork\n  pullboard add\n  pullboard list\n  pullboard claim\nReview\n  pullboard submit\n  pullboard next\n  pullboard verify\nSee\n  pullboard status\n  pullboard view\n  pullboard log\n\nMore: pullboard help <command>; pullboard help --all for the full list.",
-    "all": "pullboard 0.9.0: the local-first work board for teams of coding agents.\nNothing ships until a second agent verifies it.\n\nSet up\n  pullboard tour                        see it work: a reject and its rework, scripted, in thirty seconds\n  pullboard init [--model <name>] [--blueprint <name or file>]... [--no-permissions]  config, SPEC.md, agent instructions, git hooks, board and project agent rules; optional coordinator model\n  pullboard worktree <lane> --model <name> [--route light] [--family <name>]   make and join a worktree for a new agent\n                                        pullboard.json worktrees: inside or beside; init defaults to inside\n  pullboard join <lane> --model <name> [--route light] [--family <name>]       register this worktree as an agent\n                                        A model is required (or set PULLBOARD_MODEL); family is a separate declaration\n  pullboard join coordinator --model <name>                                 declare the main checkout's coordinator model\n                                        pullboard.json agents.names: suffix (default) or prefix\n  pullboard whoami | lanes | status     who you are, the lanes, the board at a glance\n  pullboard lane add <name> --owns <path>[,<path>]   add a lane that owns those folders to pullboard.json\n                                        refuses a lane name or a path that is already owned, naming the owner\n  pullboard takeover                   rebind this checkout when the same agent starts a new session\n  pullboard resources                  local resource holders and their FIFO queues\n  pullboard settings [gateSlots <n> | browserSlots <n>]  view or set machine capacity (gate default 2; browser default 1)\n                                        browser-free check slots are opt-in: gate.browserFreeChecks in ~/.pullboard/settings.json (default false)\n                                        a test file takes a browser slot only if it launches Chrome: gate.browserByLaunch (default false)\n                                        reviews-first queue order is opt-in: gate.queue.reviewsFirst (default false), gate.queue.agingMinutes (default 30)\n                                        release priority is opt-in: gate.queue.currentReleaseFirst (default false), within each board's otherwise-tied positions\n                                        memory hold is opt-in: gate.memoryFloorMB in ~/.pullboard/settings.json holds the queue under that many MB free or critical pressure (default off)\n                                        short slots for runs that name their test files are opt-in: pullboard settings gate.shortSlots <n> (default 0)\n  pullboard runner add <ssh-host> --slots <n> --browser <n> [--node <remote-path>] [--root <remote-path>]\n                                        register SSH test capacity; no runner sign-in; root defaults to ~/.pullboard-runner\n  pullboard view [--project] [--port N] [--no-open]  every project on this machine in your browser; default http://127.0.0.1:4890\n                                        items, shouts, doctrine, agents and activity; --port 0 chooses a free port\n                                        --project limits this view to the registered project for this repository\n                                        add items, shout and hold lanes from it\n  pullboard view --export <dir>         a read-only snapshot with event replay, for any static host\n  pullboard serve [--port N]           local API v1: boards, state, moves, requests and live events,\n                                        behind the session secret in its printed address\n  pullboard mcp                        MCP tools over stdio for this worktree's agent, started by its MCP client:\n                                        board status, show, shout and capture an idea; a person's move is refused\n  pullboard relay [status|on|off|pair|join <code>] [--url <address>]  link, inspect or unlink this board's sealed relay\n                                        on signs in through GitHub; the address defaults to https://app.pullboard.dev\n                                        pair prints a one-use machine code; join stores it in another clone\n  pullboard relay on --all [--url <address>]  link every registered project after one sign-in; pair the phone once\n                                        keep this command open until pairing finishes; later projects link on registration\n  pullboard relay devices               list paired device ids and their public-key fingerprints\n  pullboard relay revoke <device>       stop future key delivery; already received keys remain known\n                                        approve on another paired phone, or sign in again with GitHub\n  pullboard relay tokens                list this board's agent token ids, agents and expiry, never credentials\n  pullboard relay revoke <token-id>     revoke one token from that list; other agents keep working\n  pullboard relay recover --skip <sequence>  person-only recovery of one blocked next relay position\n  pullboard resume                      where you are: your claim, branch, uncommitted work, what came back,\n                                        unread shouts, what to do next; run it to start any session\n  pullboard hooks                       reinstall the git hooks (e.g. after a fresh clone)\n\nWork\n  pullboard add <lane> <title> [--criterion \"...\"] [--specs G1.2,K3] [--after 3,4] [--parent <id>]\n                [--brief \"...\" | --brief-file <file>] [--route light|mid]\n                                        --after: claiming waits until those items are verified\n                                        --brief: what a cold agent needs; --route light: any model can build it\n                [--check \"<command>\"] [--wait]   the command that proves it; --wait waits for its main baseline\n                                        with --criterion and a brief, --check is needed below strong\n  pullboard edit <id> [--brief \"...\" | --brief-file <file>] [--route light|mid|strong] [--criterion \"...\"] [--check \"...\"]\n                [--wait]                wait for a new check's baseline; otherwise it runs in the background\n                [--reason \"what the old bar got wrong\"]   needed to change the criterion or check of an item\n                                        that was ever claimed; show and stats list each correction\n  pullboard escalate <id> --note \"what was tried and how it failed\"   hand it one tier up\n  pullboard run --agent \"<command>\" [--attempts 3] [--minutes 15] [--items N] [--wait M]\n                                        build routed items unattended in this worktree: the agent command reads\n                                        the context pack at $PULLBOARD_PACK (and $PULLBOARD_CHECK, $PULLBOARD_ITEM,\n                                        $PULLBOARD_ATTEMPT, $PULLBOARD_TIER); green work is submitted, red escalated\n                [--agent-light \"...\"] [--agent-mid \"...\"] [--agent-strong \"...\"]   a command per tier\n  pullboard list [lane] [--all] [--route light|mid|strong]   open and active items; --all adds closed ones\n  pullboard roadmap                     ordered milestones and each item's live status\n  pullboard milestone add <name> [--note ...] [--items 1,2,3]   create a milestone and optionally add items\n  pullboard milestone items <name> --add|--remove ids          append or remove item references\n  pullboard milestone order <name> <ids>                       rank these items within their milestone (agents)\n  pullboard milestone move <name> --before <other>             reorder a milestone\n  pullboard milestone edit <name> [--name <new>] [--note <text>]\n                                        rename or update a milestone note\n  pullboard milestone remove <name>                            remove a milestone without changing its items\n  pullboard doctor                     check board integrity without changing it\n  pullboard health                     every stuck item: why, since when, the next step and who takes it\n                                        reads the board and changes nothing; exits 1 when something is stuck\n                                        pullboard.json health.stuck (default 1h), health.holds (1d), health.release (1d)\n  pullboard skills --update            refresh unchanged Claude Code skills from shipped versions\n  pullboard show <id> [--history]       an item, the criterion frozen at claim, its verdicts: the latest in full,\n                                        earlier ones as one line; --history prints every note in full\n  pullboard fact <id> <kind> <text> [--supersedes <fact-id>] [--ref path:lines@full-sha] [--implies <ids>]\n                                        append an observation or a holder/coordinator judgement to its thread\n                                        --implies 12,13: each named item gets a fact citing this decision,\n                                        and is told again when the decision is superseded\n                                        the person adds --cause <key> --never-again --as person: rigor lists it at once\n  pullboard why <id>                    the decisions that imply an item, newest first, and what superseded them\n  pullboard next [--wait <minutes>]     offer an eligible review when reviews pile up, otherwise claim work\n  pullboard next --build                claim a build explicitly, recording a skipped review offer\n  pullboard next --verify               reserve the next submitted item you can check;\n  pullboard next --verify <id>          reserve that submitted item instead\n                                        in the main checkout, verifying needs --as coordinator\n  pullboard check [id] [--yes]          show and run your item's check; --yes confirms a check set by someone else\n                                        the command and its author print first; the project gate is pullboard gate\n  pullboard check accept <id>           the person accepts an item's check that already passes on main, as it reads now;\n                                        with checks.provesNothing \"hold\", claim and submit refuse that item until then\n  pullboard claim <id>                  take or renew a lease; the first claim freezes the criterion\n  pullboard release <id> [--note \"why\"]  hand it back; a review release needs a one-line reason\n  pullboard submit <id>                 needs a clean tree, item check and affected tests green at HEAD (alias: done)\n  pullboard verify <id> accept --note \"what you broke or which edge you tried, and what happened\"\n  pullboard verify <id> reject --reason TEST_FAILURE --note \"what failed\" [--cause <key>]\n                                        a cause is test:<file>::<title>, refusal:<CODE>, row:<id> or doctrine:<id>\n                                        a verdict takes --implies <ids>; a later verdict on the item supersedes it\n                                        any --note can be --note-file <file>, which keeps quotes, $ and backticks intact\n  pullboard shout <lane|agent|person|all> <text>  pullboard inbox\n  pullboard shout [<to>] <text> --decision       ask for a decision; defaults to your coordinator or the person\n  pullboard shout <to> <text> --evidence attempt|receipt --outcome <word> --item <id> --commit <rev>\n  pullboard answer <shout-id> <text> [--as person] [--implies <ids>] [--supersedes <answer-id>]\n                                        answer your decision; person mode is main-checkout only\n                                        --supersedes tells the items an earlier answer implied; only the person\n                                        supersedes the person's answer\n  pullboard pass <shout-id> <note>                coordinator passes a decision to the person\n  pullboard decisions [--as person]               shouts waiting for you; main checkout defaults to coordinator\n  pullboard watch [--to <agent|lane|all>] [--kinds <kinds>] [--item <id>] [--since <sequence>] [--json]\n                [--work <lane>] [--review-wait <minutes>]\n                                        follow the board's live events, one line each as it happens, with or without the view\n                                        --work also says when an item there becomes claimable, a review waits longer than\n                                        --review-wait minutes (default 20), or main moves; Ctrl-C stops it\n  pullboard export                              print the whole board as versioned JSON\n  pullboard digest [--out <file>] [--watch]     a short Markdown briefing of this board for a person or a chat assistant;\n                                        secrets redacted; --out replaces a file, --watch rewrites it after every move\n  pullboard import <file>                       restore a versioned export into an empty board\n\nCoordinator\n  pullboard sweep --run \"<checker>\" --check \"<checker on {file}>\" [--route light] [--max 20] [--dry-run]\n                                        file one item per file a linter, type checker or test reporter flags\n  pullboard land [--max N] [--dry-run] [--adopt]  gate and push a durable batch of verified items\n  pullboard land --waive <test> --until <date> --reason \"why\"  the person records an expiring test waiver\n  pullboard merged <id> <commit>        record where verified work landed\n  pullboard withdraw <id> <reason>      drop an item nobody should build\n  pullboard refreeze <id>               adopt a corrected criterion or changed spec rows\n  pullboard reopen <id> --note \"why\" [--cause <key>]   return a submission for criterion correction without a verdict\n  pullboard hold <lane> --reason \"...\"   pause a lane: next there claims nothing and names the reason\n  pullboard hold <id> \"reason\"          hold one item so next skips it\n  pullboard hold <lane|id> --off        lift a lane or item hold\n\nReceipts\n  pullboard stats [--since <date>]      proof numbers from the event log; --json for sites and tools\n                                        stage averages/medians count ends inside the inclusive UTC window;\n                                        build: first claim to final submit (including rework);\n                                        review wait: final submit to the closing review reservation;\n                                        released/expired reservations remain wait, not review;\n                                        review: closing reservation to verdict; merge wait: accept to first merge\n                                        unfinished stages are omitted; missing legacy reservations are unmeasured\n                                        JSON flow.asOf records one observation clock; oldest.since records its origin;\n                                        ageMinutes = (asOf - since) / 60000 for every queue age\n                                        queues include all current work, even added before --since;\n                                        open age restarts on add, reopen, reject, release or claim lapse;\n                                        claimed age starts at claim (not renewal), submitted at final submit,\n                                        accepted-not-merged at accept; oldest ties use the lower item id\n                                        daily additions and first merges use UTC dates; repeated merge receipts count once\n                                        active agents moved in the last 60 minutes (inclusive), by role and lane;\n                                        role is latest role-bearing move, falling back to earlier history or unknown:\n                                        claim/submit/build release = builder; reserve/verdict/review release = verifier;\n                                        the coordinator is coordinator; shouts and joins never imply a role\n                                        bottleneck: largest summed stage share over fully measured first-merge cycles;\n                                        ties: build, review wait, review, merge wait; print fully measured/total cycles;\n                                        fewer than half fully measured means low confidence; no measured cycles means no action\n                                        one action, first matching rule:\n                                        review wait + fewer than 1 verifier per 4 active builders: add a verifier\n                                        review wait otherwise: review the oldest submission first (#N)\n                                        build + more than 30% sent back: tighten criteria or briefs: N of M submissions were sent back\n                                        build otherwise: add a builder in the lane with most open items (lane-name tie)\n                                        review: reviews are slow (median X min): check how long the frozen checks take\n                                        merge wait: land the accepted items: #A, #B\n                                        when that queue is empty, the action says none waiting or waits for open work\n  pullboard ledger                      markdown: what was built, by whom, verified by whom\n  pullboard log [id]                    every move, in order\n  pullboard rigor                       failure causes that repeated: on 2 items, or 1 item at 2 commits;\n                                        each with its items and whether it reads as work, product or both\n  pullboard rigor draft <key> \"<rule>\" --check \"<command>\" --red <commit> --green <commit> [--section <letter>]\n                                        --red is a noticed failure commit; prove its check red, then green at --green\n                                        draft Doctrine (work), spec (product) or both; only the person approves\n                                        test: causes need literal node --test <file> and the named test actually failing, then passing\n\nSpec\n  pullboard spec --json                 parsed SPEC.md and doctrine rows as JSON\n  pullboard forget <path>               remove a repo from this machine's project list\n  pullboard spec check                  lint SPEC.md and the doctrine (house rules for agentic development)\n  pullboard spec view [--out file]      the spec, open questions, sign-offs and doctrine as one page\n  pullboard spec show <id> | unmet [--must] | signoff <ids> [--by <principal>]\n                                        signoff: --note \"what was checked\" stays with the receipt\n  pullboard spec draft <text> [--section <letter>] [--aim] [--gate \"<gate>\"]  any agent appends a draft row; never approves it\n                [--doctrine --source \"<shout id or chat, date>\"]  the coordinator proposes a sourced doctrine ruling\n                                        --section chooses the section prefix; defaults to G, or DR with --doctrine\n                                        Defaults to must and gate review.\n  pullboard blueprint add <name or file> [--blueprint <name or file>]...  add a blueprint's rules and questions as drafts, and its starter items\n                                        bundled: web-app; nothing is approved, and a repeat adds nothing\n                                        several land in order: one product, one architecture, any practice; a shared rule is drafted once\n  pullboard blueprint fit <name or file> <row id or #item> keep|adapt|drop|answer [--text \"...\"] [--reason \"why\"]  propose this repo's fit; nothing applies yet\n  pullboard spec fit [approve <batch>] | fit edit <row id or #item> keep|adapt|drop|answer [--text \"...\"] [--reason \"why\"]  the person's fit batch\n  pullboard blueprint save [file] [--name <name>] [--title \"<title>\"]  write approved rules and answered questions as a blueprint\n                                        never items, notes, paths, emails or names; file defaults to <project>.blueprint.json\n  pullboard spec signers add [--key <path>] [--by <principal>]  opt into SSH-signed sign-offs\n                                        principal defaults to Git user.email; --by overrides it\n  pullboard spec approve <ids> | decline <ids> --reason \"why\"  the person's exact-row decision\n                                        approve <id> --text \"new wording\" approves an exact rewrite\n  pullboard spec answer <id> \"<choice or text>\"  the person's answer to a pending question\n                                        a listed choice, or their own words added as the last choice\n  pullboard spec apply                  coordinator applies recorded row decisions to the files\n  pullboard doctrine check              each doctrine rule's check: its count, its committed count, whether it holds\n                                        a rule row adds | gate: check <command> | count: N, and | files: <paths> to narrow it\n                                        the command prints one line per problem and exits 0 or 1; anything else cannot count\n                                        submit refuses a touched rule whose count rises; runs: nightly skips submit, mode: watch only counts\n\nRole guides\n  pullboard prompt decompose|plan|signoff|review|verify   how to do each role; Claude Code gets them as skills\n\nGate and hooks\n  pullboard gate [--landing]            run the configured gate; prioritize a trunk landing in the machine queue\n  pullboard hook pre-commit|pre-merge-commit|commit-msg|pre-push   git runs these\n\nLifecycle, read from src/machine.js\n  pullboard lifecycle         the states, moves, guards and refusals as a markdown page, with a diagram\n  agent         claim, release, submit, reserve, accept, reject, escalate, refreeze (when a live claim has a pending coordinator correction)\n  coordinator   claim, release, submit, reserve, accept, reject, reopen, escalate, refreeze, withdraw\n  clock         lapse (when its lease runs out)\n\nReject reasons: TEST_FAILURE, BEHAVIOR_MISMATCH, INSUFFICIENT_EVIDENCE, STALE_HEAD, OTHER.\n--json prints one versioned document for every command, and one per line for watch; refusals include their code and next step.",
+    "all": "pullboard 0.9.0: the local-first work board for teams of coding agents.\nNothing ships until a second agent verifies it.\n\nSet up\n  pullboard tour                        see it work: a reject and its rework, scripted, in thirty seconds\n  pullboard init [--model <name>] [--blueprint <name or file>]... [--no-permissions]  config, SPEC.md, agent instructions, git hooks, board and project agent rules; optional coordinator model\n  pullboard worktree <lane> --model <name> [--route light] [--family <name>]   make and join a worktree for a new agent\n                                        pullboard.json worktrees: inside or beside; init defaults to inside\n  pullboard join <lane> --model <name> [--route light] [--family <name>]       register this worktree as an agent\n                                        A model is required (or set PULLBOARD_MODEL); family is a separate declaration\n  pullboard join coordinator --model <name>                                 declare the main checkout's coordinator model\n                                        pullboard.json agents.names: suffix (default) or prefix\n  pullboard whoami | lanes | status     who you are, the lanes, the board at a glance\n  pullboard lane add <name> --owns <path>[,<path>]   add a lane that owns those folders to pullboard.json\n                                        refuses a lane name or a path that is already owned, naming the owner\n  pullboard takeover                   rebind this checkout when the same agent starts a new session\n  pullboard resources                  local resource holders and their FIFO queues\n  pullboard settings [gateSlots <n> | browserSlots <n>]  view or set machine capacity (gate default 2; browser default 1)\n                                        browser-free check slots are opt-in: gate.browserFreeChecks in ~/.pullboard/settings.json (default false)\n                                        a test file takes a browser slot only if it launches Chrome: gate.browserByLaunch (default false)\n                                        reviews-first queue order is opt-in: gate.queue.reviewsFirst (default false), gate.queue.agingMinutes (default 30)\n                                        release priority is opt-in: gate.queue.currentReleaseFirst (default false), within each board's otherwise-tied positions\n                                        memory hold is opt-in: gate.memoryFloorMB in ~/.pullboard/settings.json holds the queue under that many MB free or critical pressure (default off)\n                                        short slots for runs that name their test files are opt-in: pullboard settings gate.shortSlots <n> (default 0)\n  pullboard runner add <ssh-host> --slots <n> --browser <n> [--node <remote-path>] [--root <remote-path>]\n                                        register SSH test capacity; no runner sign-in; root defaults to ~/.pullboard-runner\n  pullboard view [--project] [--port N] [--no-open]  every project on this machine in your browser; default http://127.0.0.1:4890\n                                        items, shouts, doctrine, agents and activity; --port 0 chooses a free port\n                                        --project limits this view to the registered project for this repository\n                                        add items, shout and hold lanes from it\n  pullboard view --export <dir>         a read-only snapshot with event replay, for any static host\n  pullboard serve [--port N]           local API v1: boards, state, moves, requests and live events,\n                                        behind the session secret in its printed address\n  pullboard mcp                        MCP tools over stdio for this worktree's agent, started by its MCP client:\n                                        board status, show, shout and capture an idea; a person's move is refused\n  pullboard relay [status|on|off|pair|join <code>] [--url <address>]  link, inspect or unlink this board's sealed relay\n                                        on signs in through GitHub; the address defaults to https://app.pullboard.dev\n                                        pair prints a one-use machine code; join stores it in another clone\n  pullboard relay on --all [--url <address>]  link every registered project after one sign-in; pair the phone once\n                                        keep this command open until pairing finishes; later projects link on registration\n  pullboard relay devices               list paired device ids and their public-key fingerprints\n  pullboard relay revoke <device>       stop future key delivery; already received keys remain known\n                                        approve on another paired phone, or sign in again with GitHub\n  pullboard relay tokens                list this board's agent token ids, agents and expiry, never credentials\n  pullboard relay revoke <token-id>     revoke one token from that list; other agents keep working\n  pullboard relay recover --skip <sequence>  person-only recovery of one blocked next relay position\n  pullboard resume                      where you are: your claim, branch, uncommitted work, what came back,\n                                        unread shouts, what to do next; run it to start any session\n  pullboard hooks                       reinstall the git hooks (e.g. after a fresh clone)\n\nWork\n  pullboard add <lane> <title> [--criterion \"...\"] [--specs G1.2,K3] [--after 3,4] [--parent <id>]\n                [--brief \"...\" | --brief-file <file>] [--route light|mid]\n                                        --after: claiming waits until those items are verified\n                                        --brief: what a cold agent needs; --route light: any model can build it\n                [--check \"<command>\"] [--wait]   the command that proves it; --wait waits for its main baseline\n                                        with --criterion and a brief, --check is needed below strong\n  pullboard edit <id> [--brief \"...\" | --brief-file <file>] [--route light|mid|strong] [--criterion \"...\"] [--check \"...\"]\n                [--wait]                wait for a new check's baseline; otherwise it runs in the background\n                [--reason \"what the old bar got wrong\"]   needed to change the criterion or check of an item\n                                        that was ever claimed; show and stats list each correction\n  pullboard escalate <id> --note \"what was tried and how it failed\"   hand it one tier up\n  pullboard run --agent \"<command>\" [--attempts 3] [--minutes 15] [--items N] [--wait M]\n                                        build routed items unattended in this worktree: the agent command reads\n                                        the context pack at $PULLBOARD_PACK (and $PULLBOARD_CHECK, $PULLBOARD_ITEM,\n                                        $PULLBOARD_ATTEMPT, $PULLBOARD_TIER); green work is submitted, red escalated\n                [--agent-light \"...\"] [--agent-mid \"...\"] [--agent-strong \"...\"]   a command per tier\n  pullboard list [lane] [--all] [--route light|mid|strong]   open and active items; --all adds closed ones\n  pullboard roadmap                     ordered milestones and each item's live status\n  pullboard milestone add <name> [--note ...] [--items 1,2,3]   create a milestone and optionally add items\n  pullboard milestone items <name> --add|--remove ids          append or remove item references\n  pullboard milestone order <name> <ids>                       rank these items within their milestone (agents)\n  pullboard milestone move <name> --before <other>             reorder a milestone\n  pullboard milestone edit <name> [--name <new>] [--note <text>]\n                                        rename or update a milestone note\n  pullboard milestone remove <name>                            remove a milestone without changing its items\n  pullboard doctor                     check board integrity without changing it\n  pullboard health                     every stuck item: why, since when, the next step and who takes it\n                                        reads the board and changes nothing; exits 1 when something is stuck\n                                        pullboard.json health.stuck (default 1h), health.holds (1d), health.release (1d)\n  pullboard skills --update            refresh unchanged Claude Code skills from shipped versions\n  pullboard show <id> [--history]       an item, the criterion frozen at claim, its verdicts: the latest in full,\n                                        earlier ones as one line; --history prints every note in full\n  pullboard fact <id> <kind> <text> [--supersedes <fact-id>] [--ref path:lines@full-sha] [--implies <ids>]\n                                        append an observation or a holder/coordinator judgement to its thread\n                                        --implies 12,13: each named item gets a fact citing this decision,\n                                        and is told again when the decision is superseded\n                                        the person adds --cause <key> --never-again --as person: rigor lists it at once\n  pullboard why <id>                    the decisions that imply an item, newest first, and what superseded them\n  pullboard next [--wait <minutes>]     offer an eligible review when reviews pile up, otherwise claim work\n  pullboard next --build                claim a build explicitly, recording a skipped review offer\n  pullboard next --verify               reserve the next submitted item you can check;\n  pullboard next --verify <id>          reserve that submitted item instead\n                                        in the main checkout, verifying needs --as coordinator\n  pullboard check [id] [--yes]          show and run your item's check; --yes confirms a check set by someone else\n                                        the command and its author print first; the project gate is pullboard gate\n  pullboard check accept <id>           the person accepts an item's check that already passes on main, as it reads now;\n                                        with checks.provesNothing \"hold\", claim and submit refuse that item until then\n  pullboard claim <id>                  take or renew a lease; the first claim freezes the criterion\n  pullboard release <id> [--note \"why\"]  hand it back; a review release needs a one-line reason\n  pullboard submit <id>                 needs a clean tree, item check and affected tests green at HEAD (alias: done)\n  pullboard verify <id> accept --note \"what you broke or which edge you tried, and what happened\"\n  pullboard verify <id> reject --reason TEST_FAILURE --note \"what failed\" [--cause <key>]\n                                        a cause is test:<file>::<title>, refusal:<CODE>, row:<id> or doctrine:<id>\n                                        a verdict takes --implies <ids>; a later verdict on the item supersedes it\n                                        any --note can be --note-file <file>, which keeps quotes, $ and backticks intact\n  pullboard shout <lane|agent|person|all> <text>  pullboard inbox\n  pullboard shout [<to>] <text> --decision       ask for a decision; defaults to your coordinator or the person\n  pullboard shout <to> <text> --evidence attempt|receipt --outcome <word> --item <id> --commit <rev>\n  pullboard answer <shout-id> <text> [--as person] [--implies <ids>] [--supersedes <answer-id>]\n                                        answer your decision; person mode is main-checkout only\n                                        --supersedes tells the items an earlier answer implied; only the person\n                                        supersedes the person's answer\n  pullboard pass <shout-id> <note>                coordinator passes a decision to the person\n  pullboard decisions [--as person]               shouts waiting for you; main checkout defaults to coordinator\n  pullboard watch [--to <agent|lane|all>] [--kinds <kinds>] [--item <id>] [--since <sequence>] [--json]\n                [--work <lane>] [--review-wait <minutes>]\n                                        follow the board's live events, one line each as it happens, with or without the view\n                                        --work also says when an item there becomes claimable, a review waits longer than\n                                        --review-wait minutes (default 20), or main moves; Ctrl-C stops it\n  pullboard export                              print the whole board as versioned JSON\n  pullboard digest [--out <file>] [--watch]     a short Markdown briefing of this board for a person or a chat assistant;\n                                        secrets redacted; --out replaces a file, --watch rewrites it after every move\n  pullboard import <file>                       restore a versioned export into an empty board\n\nCoordinator\n  pullboard sweep --run \"<checker>\" --check \"<checker on {file}>\" [--route light] [--max 20] [--dry-run]\n                                        file one item per file a linter, type checker or test reporter flags\n  pullboard land [--max N] [--dry-run] [--adopt]  gate and push a durable batch of verified items\n  pullboard land --waive <test> --until <date> --reason \"why\"  the person records an expiring test waiver\n  pullboard merged <id> <commit>        record where verified work landed\n  pullboard withdraw <id> <reason>      drop an item nobody should build\n  pullboard refreeze <id>               adopt a corrected criterion or changed spec rows\n  pullboard reopen <id> --note \"why\" [--cause <key>]   return a submission for criterion correction without a verdict\n  pullboard hold <lane> --reason \"...\"   pause a lane: next there claims nothing and names the reason\n  pullboard hold <id> \"reason\"          hold one item so next skips it\n  pullboard hold <lane|id> --off        lift a lane or item hold\n\nReceipts\n  pullboard stats [--since <date>]      proof numbers from the event log; --json for sites and tools\n                                        stage averages/medians count ends inside the inclusive UTC window;\n                                        build: first claim to final submit (including rework);\n                                        review wait: final submit to the closing review reservation;\n                                        released/expired reservations remain wait, not review;\n                                        review: closing reservation to verdict; merge wait: accept to first merge\n                                        unfinished stages are omitted; missing legacy reservations are unmeasured\n                                        JSON flow.asOf records one observation clock; oldest.since records its origin;\n                                        ageMinutes = (asOf - since) / 60000 for every queue age\n                                        queues include all current work, even added before --since;\n                                        open age restarts on add, reopen, reject, release or claim lapse;\n                                        claimed age starts at claim (not renewal), submitted at final submit,\n                                        accepted-not-merged at accept; oldest ties use the lower item id\n                                        daily additions and first merges use UTC dates; repeated merge receipts count once\n                                        active agents moved in the last 60 minutes (inclusive), by role and lane;\n                                        role is latest role-bearing move, falling back to earlier history or unknown:\n                                        claim/submit/build release = builder; reserve/verdict/review release = verifier;\n                                        the coordinator is coordinator; shouts and joins never imply a role\n                                        bottleneck: largest summed stage share over fully measured first-merge cycles;\n                                        ties: build, review wait, review, merge wait; print fully measured/total cycles;\n                                        fewer than half fully measured means low confidence; no measured cycles means no action\n                                        one action, first matching rule:\n                                        review wait + fewer than 1 verifier per 4 active builders: add a verifier\n                                        review wait otherwise: review the oldest submission first (#N)\n                                        build + more than 30% sent back: tighten criteria or briefs: N of M submissions were sent back\n                                        build otherwise: add a builder in the lane with most open items (lane-name tie)\n                                        review: reviews are slow (median X min): check how long the frozen checks take\n                                        merge wait: land the accepted items: #A, #B\n                                        when that queue is empty, the action says none waiting or waits for open work\n  pullboard ledger                      markdown: what was built, by whom, verified by whom\n  pullboard log [id]                    every move, in order\n  pullboard rigor                       failure causes that repeated: on 2 items, or 1 item at 2 commits;\n                                        each with its items and whether it reads as work, product or both\n  pullboard rigor draft <key> \"<rule>\" --check \"<command>\" --red <commit> --green <commit> [--section <letter>]\n                                        --red is a noticed failure commit; prove its check red, then green at --green\n                                        draft Doctrine (work), spec (product) or both; only the person approves\n                                        test: causes need literal node --test <file> and the named test actually failing, then passing\n\nSpec\n  pullboard spec --json                 parsed SPEC.md and doctrine rows as JSON\n  pullboard forget <path>               remove a repo from this machine's project list\n  pullboard spec check                  lint SPEC.md and the doctrine (house rules for agentic development)\n  pullboard spec view [--out file]      the spec, open questions, sign-offs and doctrine as one page\n  pullboard spec show <id> | unmet [--must] | signoff <ids> [--by <principal>]\n                                        signoff: --note \"what was checked\" stays with the receipt\n  pullboard spec draft <text> [--section <letter>] [--aim] [--gate \"<gate>\"]  any agent appends a draft row; never approves it\n                [--doctrine --source \"<shout id or chat, date>\"]  the coordinator proposes a sourced doctrine ruling\n                                        --section chooses the section prefix; defaults to G, or DR with --doctrine\n                                        Defaults to must and gate review.\n  pullboard blueprint add <name or file> [--blueprint <name or file>]...  add a blueprint's rules and questions as drafts, and its starter items\n                                        bundled: web-app; nothing is approved, and a repeat adds nothing\n                                        several land in order: one product, one architecture, any practice; a shared rule is drafted once\n  pullboard blueprint fit <name or file> <row id or #item> keep|adapt|drop|answer [--text \"...\"] [--reason \"why\"]  propose this repo's fit; nothing applies yet\n  pullboard spec fit [approve <batch>] | fit edit <row id or #item> keep|adapt|drop|answer [--text \"...\"] [--reason \"why\"]  the person's fit batch\n  pullboard blueprint save [file] [--name <name>] [--title \"<title>\"]  write approved rules and answered questions as a blueprint\n                                        never items, notes, paths, emails or names; file defaults to <project>.blueprint.json\n  pullboard blueprint starters <name or file>  list a blueprint's starter items and whether each is filed\n                                        a filed starter shows its item id and status; add links each starter it files with a note fact\n  pullboard spec signers add [--key <path>] [--by <principal>]  opt into SSH-signed sign-offs\n                                        principal defaults to Git user.email; --by overrides it\n  pullboard spec approve <ids> | decline <ids> --reason \"why\"  the person's exact-row decision\n                                        approve <id> --text \"new wording\" approves an exact rewrite\n  pullboard spec answer <id> \"<choice or text>\"  the person's answer to a pending question\n                                        a listed choice, or their own words added as the last choice\n  pullboard spec apply                  coordinator applies recorded row decisions to the files\n  pullboard doctrine check              each doctrine rule's check: its count, its committed count, whether it holds\n                                        a rule row adds | gate: check <command> | count: N, and | files: <paths> to narrow it\n                                        the command prints one line per problem and exits 0 or 1; anything else cannot count\n                                        submit refuses a touched rule whose count rises; runs: nightly skips submit, mode: watch only counts\n\nRole guides\n  pullboard prompt decompose|plan|signoff|review|verify   how to do each role; Claude Code gets them as skills\n\nGate and hooks\n  pullboard gate [--landing]            run the configured gate; prioritize a trunk landing in the machine queue\n  pullboard hook pre-commit|pre-merge-commit|commit-msg|pre-push   git runs these\n\nLifecycle, read from src/machine.js\n  pullboard lifecycle         the states, moves, guards and refusals as a markdown page, with a diagram\n  agent         claim, release, submit, reserve, accept, reject, escalate, refreeze (when a live claim has a pending coordinator correction)\n  coordinator   claim, release, submit, reserve, accept, reject, reopen, escalate, refreeze, withdraw\n  clock         lapse (when its lease runs out)\n\nReject reasons: TEST_FAILURE, BEHAVIOR_MISMATCH, INSUFFICIENT_EVIDENCE, STALE_HEAD, OTHER.\n--json prints one versioned document for every command, and one per line for watch; refusals include their code and next step.",
     "groups": [
       [
         "Start",
@@ -39,257 +39,6 @@
       ]
     ],
     "commands": {
-      "tour": {
-        "usages": [
-          "pullboard tour"
-        ],
-        "flags": [
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard tour",
-        "notes": []
-      },
-      "init": {
-        "usages": [
-          "pullboard init [--model <name>] [--blueprint <name or file>]... [--no-permissions]"
-        ],
-        "flags": [
-          "--model <name> \u2014 identifies the agent model; required unless PULLBOARD_MODEL is set",
-          "--blueprint <name or file> \u2014 start from a bundled blueprint or a JSON file; repeat it for one product, one architecture and any practice blueprints",
-          "--no-permissions",
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard init --blueprint web-app",
-        "notes": []
-      },
-      "worktree": {
-        "usages": [
-          "pullboard worktree <lane> --model <name> [--route light] [--family <name>]"
-        ],
-        "flags": [
-          "--model <name> \u2014 identifies the agent model; required unless PULLBOARD_MODEL is set",
-          "--route light \u2014 sets which work the model can take",
-          "--family <name> \u2014 records the family name",
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard worktree web --model \"my-model\"",
-        "notes": []
-      },
-      "join": {
-        "usages": [
-          "pullboard join <lane> --model <name> [--route light] [--family <name>]"
-        ],
-        "flags": [
-          "--model <name> \u2014 identifies the agent model; required unless PULLBOARD_MODEL is set",
-          "--route light \u2014 sets which work the model can take",
-          "--family <name> \u2014 records the family name",
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard join web --model \"my-model\"",
-        "notes": []
-      },
-      "takeover": {
-        "usages": [
-          "pullboard takeover"
-        ],
-        "flags": [
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard takeover",
-        "notes": []
-      },
-      "whoami": {
-        "usages": [
-          "pullboard whoami"
-        ],
-        "flags": [
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard whoami",
-        "notes": []
-      },
-      "lanes": {
-        "usages": [
-          "pullboard lanes"
-        ],
-        "flags": [
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard lanes",
-        "notes": []
-      },
-      "lane": {
-        "usages": [
-          "pullboard lane add <name> --owns <path>[,<path>]"
-        ],
-        "flags": [
-          "--owns <path>",
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard lane add web --owns apps/web/",
-        "notes": []
-      },
-      "lane add": {
-        "usages": [
-          "pullboard lane add <name> --owns <path>[,<path>]"
-        ],
-        "flags": [
-          "--owns <path>",
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard lane add web --owns apps/web/",
-        "notes": []
-      },
-      "status": {
-        "usages": [
-          "pullboard status"
-        ],
-        "flags": [
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard status",
-        "notes": []
-      },
-      "resources": {
-        "usages": [
-          "pullboard resources"
-        ],
-        "flags": [
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard resources",
-        "notes": []
-      },
-      "settings": {
-        "usages": [
-          "pullboard settings [gateSlots <n> | browserSlots <n>]"
-        ],
-        "flags": [
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard settings [gateSlots value",
-        "notes": []
-      },
-      "view": {
-        "usages": [
-          "pullboard view [--project] [--port N] [--no-open]",
-          "pullboard view --export <dir>"
-        ],
-        "flags": [
-          "--project limits",
-          "--port N",
-          "--no-open",
-          "--export <dir>",
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard view",
-        "notes": []
-      },
-      "view export": {
-        "usages": [
-          "pullboard view --export <dir>"
-        ],
-        "flags": [
-          "--project limits",
-          "--port N",
-          "--no-open",
-          "--export <dir>",
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard view --export ./site",
-        "notes": []
-      },
-      "serve": {
-        "usages": [
-          "pullboard serve [--port N]"
-        ],
-        "flags": [
-          "--port N",
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard serve",
-        "notes": []
-      },
-      "mcp": {
-        "usages": [
-          "pullboard mcp"
-        ],
-        "flags": [
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard mcp",
-        "notes": []
-      },
-      "relay": {
-        "usages": [
-          "pullboard relay [status|on|off|pair|join <code>] [--url <address>]",
-          "pullboard relay on --all [--url <address>]",
-          "pullboard relay devices",
-          "pullboard relay revoke <device>",
-          "pullboard relay tokens",
-          "pullboard relay revoke <token-id>",
-          "pullboard relay recover --skip <sequence>"
-        ],
-        "flags": [
-          "--url <address>",
-          "--all",
-          "--skip <sequence>",
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard relay on --all",
-        "notes": []
-      },
-      "relay recover": {
-        "usages": [
-          "pullboard relay recover --skip <sequence>"
-        ],
-        "flags": [
-          "--skip <sequence>",
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard relay recover --skip 12",
-        "notes": []
-      },
-      "resume": {
-        "usages": [
-          "pullboard resume"
-        ],
-        "flags": [
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard resume",
-        "notes": []
-      },
-      "hooks": {
-        "usages": [
-          "pullboard hooks"
-        ],
-        "flags": [
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard hooks",
-        "notes": []
-      },
       "add": {
         "usages": [
           "pullboard add <lane> <title> [--criterion \"...\"] [--specs G1.2,K3] [--after 3,4] [--parent <id>]"
@@ -310,282 +59,6 @@
         "example": "pullboard lane add web --owns src/web\npullboard spec draft \"A person can upload a page\"\npullboard add web \"Upload page\" --specs G1",
         "notes": []
       },
-      "edit": {
-        "usages": [
-          "pullboard edit <id> [--brief \"...\" | --brief-file <file>] [--route light|mid|strong] [--criterion \"...\"] [--check \"...\"]"
-        ],
-        "flags": [
-          "--brief \"...\" \u2014 what a cold agent needs",
-          "--brief-file <file>",
-          "--route light|mid|strong \u2014 sets which work the model can take",
-          "--criterion \"...\"",
-          "--check \"...\" \u2014 the command that proves it",
-          "--wait",
-          "--reason \"what the old bar got wrong\"",
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard edit 12 --brief \"Add the upload page\"",
-        "notes": []
-      },
-      "escalate": {
-        "usages": [
-          "pullboard escalate <id> --note \"...\" [--note-file <file>]"
-        ],
-        "flags": [
-          "--note \"what was tried and how it failed\" \u2014 what was checked stays with the receipt",
-          "--note-file <file> \u2014 keeps quotes, $ and backticks intact",
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard escalate 12 --note \"needs a manual step\"",
-        "notes": []
-      },
-      "run": {
-        "usages": [
-          "pullboard run --agent \"<command>\" [--attempts 3] [--minutes 15] [--items N] [--wait M]"
-        ],
-        "flags": [
-          "--agent \"<command>\"",
-          "--attempts",
-          "--minutes",
-          "--items N",
-          "--wait M",
-          "--agent-light \"...\"",
-          "--agent-mid \"...\"",
-          "--agent-strong \"...\"",
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard run --agent \"node agent.js\"",
-        "notes": []
-      },
-      "list": {
-        "usages": [
-          "pullboard list [lane] [--all] [--route light|mid|strong]"
-        ],
-        "flags": [
-          "--all adds",
-          "--route light|mid|strong \u2014 sets which work the model can take",
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard list web",
-        "notes": []
-      },
-      "doctor": {
-        "usages": [
-          "pullboard doctor"
-        ],
-        "flags": [
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard doctor",
-        "notes": []
-      },
-      "health": {
-        "usages": [
-          "pullboard health"
-        ],
-        "flags": [
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard health",
-        "notes": []
-      },
-      "skills": {
-        "usages": [
-          "pullboard skills --update"
-        ],
-        "flags": [
-          "--update            refresh",
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard skills --update",
-        "notes": []
-      },
-      "show": {
-        "usages": [
-          "pullboard show <id> [--history]"
-        ],
-        "flags": [
-          "--history prints",
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard show 12",
-        "notes": []
-      },
-      "next": {
-        "usages": [
-          "pullboard next [--wait <minutes>]",
-          "pullboard next --build",
-          "pullboard next --verify",
-          "pullboard next --verify <id>"
-        ],
-        "flags": [
-          "--wait <minutes>",
-          "--build                claim",
-          "--verify               reserve",
-          "--as coordinator",
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard next",
-        "notes": []
-      },
-      "land": {
-        "usages": [
-          "pullboard land [--max N] [--dry-run] [--adopt]",
-          "pullboard land --waive <test> --until <date> --reason \"why\""
-        ],
-        "flags": [
-          "--max N",
-          "--dry-run",
-          "--adopt",
-          "--waive <test>",
-          "--until <date>",
-          "--reason \"why\"",
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard land --max 4",
-        "notes": []
-      },
-      "check": {
-        "usages": [
-          "pullboard check [id] [--yes]"
-        ],
-        "flags": [
-          "--yes confirms",
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard check",
-        "notes": []
-      },
-      "check accept": {
-        "usages": [
-          "pullboard check accept <id>"
-        ],
-        "flags": [
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard check accept 12",
-        "notes": []
-      },
-      "claim": {
-        "usages": [
-          "pullboard claim <id>"
-        ],
-        "flags": [
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard claim 12",
-        "notes": []
-      },
-      "release": {
-        "usages": [
-          "pullboard release <id> [--note \"why\"]"
-        ],
-        "flags": [
-          "--note \"why\" \u2014 what was checked stays with the receipt",
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard release 12",
-        "notes": []
-      },
-      "submit": {
-        "usages": [
-          "pullboard submit <id>"
-        ],
-        "flags": [
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard submit 12",
-        "notes": []
-      },
-      "done": {
-        "usages": [
-          "pullboard done <id>"
-        ],
-        "flags": [
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard done 12",
-        "notes": []
-      },
-      "verify": {
-        "usages": [
-          "pullboard verify <id> accept --note \"what you broke or which edge you tried, and what happened\"",
-          "pullboard verify <id> reject --reason TEST_FAILURE --note \"what failed\" [--cause <key>]"
-        ],
-        "flags": [
-          "--note \"what you broke or which edge you tried, and what happened\" \u2014 what was checked stays with the receipt",
-          "--reason TEST_FAILURE",
-          "--cause <key>",
-          "--implies <ids> \u2014 each named item gets a fact citing this decision",
-          "--note-file <file> \u2014 keeps quotes, $ and backticks intact",
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard verify 12 accept --note \"removed the fix; the test failed\"",
-        "notes": []
-      },
-      "fact": {
-        "usages": [
-          "pullboard fact <id> <kind> <text> [--supersedes <fact-id>] [--ref path:lines@full-sha] [--implies <ids>]"
-        ],
-        "flags": [
-          "--supersedes <fact-id>",
-          "--ref path",
-          "--implies <ids> \u2014 each named item gets a fact citing this decision",
-          "--cause <key>",
-          "--never-again",
-          "--as person",
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard fact 12 measurement \"The check passes in 8 seconds\"",
-        "notes": []
-      },
-      "why": {
-        "usages": [
-          "pullboard why <id>"
-        ],
-        "flags": [
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard why 12",
-        "notes": []
-      },
-      "shout": {
-        "usages": [
-          "pullboard shout <lane|agent|person|all> <text>",
-          "pullboard shout [<to>] <text> --decision",
-          "pullboard shout <to> <text> --evidence attempt|receipt --outcome <word> --item <id> --commit <rev>"
-        ],
-        "flags": [
-          "--decision       ask",
-          "--evidence attempt|receipt",
-          "--outcome <word>",
-          "--item <id>",
-          "--commit <rev>",
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard shout <lane",
-        "notes": []
-      },
       "answer": {
         "usages": [
           "pullboard answer <shout-id> <text> [--as person] [--implies <ids>] [--supersedes <answer-id>]"
@@ -598,550 +71,6 @@
           "--help"
         ],
         "example": "pullboard answer 12 \"done\"",
-        "notes": []
-      },
-      "pass": {
-        "usages": [
-          "pullboard pass <shout-id> <note>"
-        ],
-        "flags": [
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard pass 12 \"please decide\"",
-        "notes": []
-      },
-      "decisions": {
-        "usages": [
-          "pullboard decisions [--as person]"
-        ],
-        "flags": [
-          "--as person",
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard decisions",
-        "notes": []
-      },
-      "inbox": {
-        "usages": [
-          "pullboard inbox"
-        ],
-        "flags": [
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard inbox",
-        "notes": []
-      },
-      "watch": {
-        "usages": [
-          "pullboard watch [--to <agent|lane|all>] [--kinds <kinds>] [--item <id>] [--since <sequence>] [--json]"
-        ],
-        "flags": [
-          "--to <agent|lane|all>",
-          "--kinds <kinds>",
-          "--item <id>",
-          "--since <sequence>",
-          "--json \u2014 prints one versioned document",
-          "--work <lane>",
-          "--review-wait <minutes>",
-          "--help"
-        ],
-        "example": "pullboard watch --to web",
-        "notes": [
-          "Claude Code: run pullboard watch --to <your id> under the Monitor tool, and each event line wakes the seat.",
-          "Any other harness: run it as a long-running command and treat each stdout line as an event."
-        ]
-      },
-      "export": {
-        "usages": [
-          "pullboard export"
-        ],
-        "flags": [
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard export",
-        "notes": []
-      },
-      "digest": {
-        "usages": [
-          "pullboard digest [--out <file>] [--watch]"
-        ],
-        "flags": [
-          "--out replaces",
-          "--watch rewrites",
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard digest --out briefing.md",
-        "notes": []
-      },
-      "import": {
-        "usages": [
-          "pullboard import <file>"
-        ],
-        "flags": [
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard import board.json",
-        "notes": []
-      },
-      "sweep": {
-        "usages": [
-          "pullboard sweep --run \"<checker>\" --check \"<checker on {file}>\" [--route light] [--max 20] [--dry-run]"
-        ],
-        "flags": [
-          "--run \"<checker>\"",
-          "--check \"<checker on {file}>\" \u2014 the command that proves it",
-          "--route light \u2014 sets which work the model can take",
-          "--max",
-          "--dry-run",
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard sweep --run \"value\" --check \"value\"",
-        "notes": []
-      },
-      "merged": {
-        "usages": [
-          "pullboard merged <id> <commit>"
-        ],
-        "flags": [
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard merged 12 0123456",
-        "notes": []
-      },
-      "withdraw": {
-        "usages": [
-          "pullboard withdraw <id> <reason>"
-        ],
-        "flags": [
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard withdraw 12 value",
-        "notes": []
-      },
-      "refreeze": {
-        "usages": [
-          "pullboard refreeze <id>"
-        ],
-        "flags": [
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard refreeze 12",
-        "notes": []
-      },
-      "reopen": {
-        "usages": [
-          "pullboard reopen <id> --note \"why\" [--cause <key>]"
-        ],
-        "flags": [
-          "--note \"why\" \u2014 what was checked stays with the receipt",
-          "--cause <key>",
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard reopen 12 --note \"correct the frozen criterion\"",
-        "notes": []
-      },
-      "hold": {
-        "usages": [
-          "pullboard hold <lane> --reason \"...\"",
-          "pullboard hold <id> \"reason\"",
-          "pullboard hold <lane|id> --off"
-        ],
-        "flags": [
-          "--reason \"...\"",
-          "--off        lift",
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard hold web --reason \"...\"",
-        "notes": []
-      },
-      "stats": {
-        "usages": [
-          "pullboard stats [--since <date>]"
-        ],
-        "flags": [
-          "--since <date>",
-          "--json for \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard stats --since 2026-10-08",
-        "notes": []
-      },
-      "ledger": {
-        "usages": [
-          "pullboard ledger"
-        ],
-        "flags": [
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard ledger",
-        "notes": []
-      },
-      "log": {
-        "usages": [
-          "pullboard log [id]"
-        ],
-        "flags": [
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard log 12",
-        "notes": []
-      },
-      "rigor": {
-        "usages": [
-          "pullboard rigor"
-        ],
-        "flags": [
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard rigor",
-        "notes": []
-      },
-      "rigor draft": {
-        "usages": [
-          "pullboard rigor draft <key> \"<rule>\" --check \"<command>\" --red <commit> --green <commit> [--section <letter>]"
-        ],
-        "flags": [
-          "--check \"<command>\" \u2014 the command that proves it",
-          "--red <commit>",
-          "--green <commit>",
-          "--section <letter>",
-          "--test <file>",
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard rigor draft \"refusal:MERGE_LOST\" \"Merges keep every hunk\" --check \"node bin/checks/merges.js\" --red 0123456 --green 89abcde",
-        "notes": []
-      },
-      "spec": {
-        "usages": [
-          "pullboard spec --json"
-        ],
-        "flags": [
-          "--json                 parsed \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard spec --json",
-        "notes": []
-      },
-      "spec check": {
-        "usages": [
-          "pullboard spec check"
-        ],
-        "flags": [
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard spec check",
-        "notes": []
-      },
-      "spec view": {
-        "usages": [
-          "pullboard spec view [--out file]"
-        ],
-        "flags": [
-          "--out file",
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard spec view",
-        "notes": []
-      },
-      "spec show": {
-        "usages": [
-          "pullboard spec show <id>"
-        ],
-        "flags": [
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard spec show G1",
-        "notes": []
-      },
-      "spec unmet": {
-        "usages": [
-          "pullboard spec unmet [--must]"
-        ],
-        "flags": [
-          "--must",
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard spec unmet",
-        "notes": []
-      },
-      "spec signoff": {
-        "usages": [
-          "pullboard spec signoff <ids> [--by <principal>] [--note \"...\"] [--note-file <file>]"
-        ],
-        "flags": [
-          "--by <principal>",
-          "--note \"what was checked\" \u2014 what was checked stays with the receipt",
-          "--note-file <file> \u2014 keeps quotes, $ and backticks intact",
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard spec signoff G1",
-        "notes": []
-      },
-      "spec draft": {
-        "usages": [
-          "pullboard spec draft <text> [--section <letter>] [--aim] [--gate \"<gate>\"]"
-        ],
-        "flags": [
-          "--section <letter>",
-          "--aim",
-          "--gate \"<gate>\"",
-          "--doctrine \u2014 proposes a doctrine ruling; only the person can approve it",
-          "--source \"<shout id or chat, date>\" \u2014 where the person gave the ruling; required with --doctrine",
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard spec draft \"Describe the first requirement\"",
-        "notes": []
-      },
-      "spec signers": {
-        "usages": [
-          "pullboard spec signers add [--key <path>] [--by <principal>]"
-        ],
-        "flags": [
-          "--key <path>",
-          "--by <principal>",
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard spec signers add",
-        "notes": []
-      },
-      "spec signers add": {
-        "usages": [
-          "pullboard spec signers add [--key <path>] [--by <principal>]"
-        ],
-        "flags": [
-          "--key <path>",
-          "--by <principal>",
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard spec signers add",
-        "notes": []
-      },
-      "doctrine": {
-        "usages": [
-          "pullboard doctrine check"
-        ],
-        "flags": [
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard doctrine check",
-        "notes": []
-      },
-      "doctrine check": {
-        "usages": [
-          "pullboard doctrine check"
-        ],
-        "flags": [
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard doctrine check",
-        "notes": []
-      },
-      "forget": {
-        "usages": [
-          "pullboard forget <path>"
-        ],
-        "flags": [
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard forget src/cli.js",
-        "notes": []
-      },
-      "prompt": {
-        "usages": [
-          "pullboard prompt"
-        ],
-        "flags": [
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard prompt",
-        "notes": []
-      },
-      "gate": {
-        "usages": [
-          "pullboard gate [--landing]"
-        ],
-        "flags": [
-          "--landing \u2014 prioritizes a trunk landing in the machine gate queue",
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard gate",
-        "notes": []
-      },
-      "hook": {
-        "usages": [
-          "pullboard hook pre-commit|pre-merge-commit|commit-msg|pre-push"
-        ],
-        "flags": [
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard hook pre-commit",
-        "notes": []
-      },
-      "hook pre-commit": {
-        "usages": [
-          "pullboard hook pre-commit"
-        ],
-        "flags": [
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard hook pre-commit",
-        "notes": []
-      },
-      "hook pre-merge-commit": {
-        "usages": [
-          "pullboard hook pre-merge-commit"
-        ],
-        "flags": [
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard hook pre-merge-commit",
-        "notes": []
-      },
-      "hook commit-msg": {
-        "usages": [
-          "pullboard hook commit-msg <file>"
-        ],
-        "flags": [
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard hook commit-msg board.json",
-        "notes": []
-      },
-      "hook pre-push": {
-        "usages": [
-          "pullboard hook pre-push"
-        ],
-        "flags": [
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard hook pre-push",
-        "notes": []
-      },
-      "version": {
-        "usages": [
-          "pullboard version"
-        ],
-        "flags": [
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard --version",
-        "notes": []
-      },
-      "lifecycle": {
-        "usages": [
-          "pullboard lifecycle"
-        ],
-        "flags": [
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard lifecycle",
-        "notes": []
-      },
-      "help": {
-        "usages": [
-          "pullboard help"
-        ],
-        "flags": [
-          "--json \u2014 prints one versioned document",
-          "--help",
-          "--all"
-        ],
-        "example": "pullboard help claim",
-        "notes": []
-      },
-      "roadmap": {
-        "usages": [
-          "pullboard roadmap"
-        ],
-        "flags": [
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard roadmap",
-        "notes": []
-      },
-      "milestone": {
-        "usages": [
-          "pullboard milestone"
-        ],
-        "flags": [
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard milestone add \"0.7.0\" --items 12,13",
-        "notes": []
-      },
-      "milestone order": {
-        "usages": [
-          "pullboard milestone order <name> <ids>"
-        ],
-        "flags": [
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard milestone order \"0.7.0\" 13,12",
-        "notes": []
-      },
-      "runner": {
-        "usages": [
-          "pullboard runner"
-        ],
-        "flags": [
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard runner add studio --slots 2 --browser 1",
-        "notes": []
-      },
-      "runner add": {
-        "usages": [
-          "pullboard runner add <ssh-host> --slots <n> --browser <n> [--node <remote-path>] [--root <remote-path>]"
-        ],
-        "flags": [
-          "--slots <n>",
-          "--browser <n>",
-          "--node <remote-path>",
-          "--root <remote-path>",
-          "--json \u2014 prints one versioned document",
-          "--help"
-        ],
-        "example": "pullboard runner add studio --slots 2 --browser 1",
         "notes": []
       },
       "blueprint": {
@@ -1192,6 +121,815 @@
         "example": "pullboard blueprint save",
         "notes": []
       },
+      "blueprint starters": {
+        "usages": [
+          "pullboard blueprint starters <name or file>"
+        ],
+        "flags": [
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard blueprint starters web-app",
+        "notes": []
+      },
+      "check": {
+        "usages": [
+          "pullboard check [id] [--yes]"
+        ],
+        "flags": [
+          "--yes confirms",
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard check",
+        "notes": []
+      },
+      "check accept": {
+        "usages": [
+          "pullboard check accept <id>"
+        ],
+        "flags": [
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard check accept 12",
+        "notes": []
+      },
+      "claim": {
+        "usages": [
+          "pullboard claim <id>"
+        ],
+        "flags": [
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard claim 12",
+        "notes": []
+      },
+      "decisions": {
+        "usages": [
+          "pullboard decisions [--as person]"
+        ],
+        "flags": [
+          "--as person",
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard decisions",
+        "notes": []
+      },
+      "digest": {
+        "usages": [
+          "pullboard digest [--out <file>] [--watch]"
+        ],
+        "flags": [
+          "--out replaces",
+          "--watch rewrites",
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard digest --out briefing.md",
+        "notes": []
+      },
+      "doctor": {
+        "usages": [
+          "pullboard doctor"
+        ],
+        "flags": [
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard doctor",
+        "notes": []
+      },
+      "doctrine": {
+        "usages": [
+          "pullboard doctrine check"
+        ],
+        "flags": [
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard doctrine check",
+        "notes": []
+      },
+      "doctrine check": {
+        "usages": [
+          "pullboard doctrine check"
+        ],
+        "flags": [
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard doctrine check",
+        "notes": []
+      },
+      "done": {
+        "usages": [
+          "pullboard done <id>"
+        ],
+        "flags": [
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard done 12",
+        "notes": []
+      },
+      "edit": {
+        "usages": [
+          "pullboard edit <id> [--brief \"...\" | --brief-file <file>] [--route light|mid|strong] [--criterion \"...\"] [--check \"...\"]"
+        ],
+        "flags": [
+          "--brief \"...\" \u2014 what a cold agent needs",
+          "--brief-file <file>",
+          "--route light|mid|strong \u2014 sets which work the model can take",
+          "--criterion \"...\"",
+          "--check \"...\" \u2014 the command that proves it",
+          "--wait",
+          "--reason \"what the old bar got wrong\"",
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard edit 12 --brief \"Add the upload page\"",
+        "notes": []
+      },
+      "escalate": {
+        "usages": [
+          "pullboard escalate <id> --note \"...\" [--note-file <file>]"
+        ],
+        "flags": [
+          "--note \"what was tried and how it failed\" \u2014 what was checked stays with the receipt",
+          "--note-file <file> \u2014 keeps quotes, $ and backticks intact",
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard escalate 12 --note \"needs a manual step\"",
+        "notes": []
+      },
+      "export": {
+        "usages": [
+          "pullboard export"
+        ],
+        "flags": [
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard export",
+        "notes": []
+      },
+      "fact": {
+        "usages": [
+          "pullboard fact <id> <kind> <text> [--supersedes <fact-id>] [--ref path:lines@full-sha] [--implies <ids>]"
+        ],
+        "flags": [
+          "--supersedes <fact-id>",
+          "--ref path",
+          "--implies <ids> \u2014 each named item gets a fact citing this decision",
+          "--cause <key>",
+          "--never-again",
+          "--as person",
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard fact 12 measurement \"The check passes in 8 seconds\"",
+        "notes": []
+      },
+      "forget": {
+        "usages": [
+          "pullboard forget <path>"
+        ],
+        "flags": [
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard forget src/cli.js",
+        "notes": []
+      },
+      "gate": {
+        "usages": [
+          "pullboard gate [--landing]"
+        ],
+        "flags": [
+          "--landing \u2014 prioritizes a trunk landing in the machine gate queue",
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard gate",
+        "notes": []
+      },
+      "health": {
+        "usages": [
+          "pullboard health"
+        ],
+        "flags": [
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard health",
+        "notes": []
+      },
+      "help": {
+        "usages": [
+          "pullboard help"
+        ],
+        "flags": [
+          "--json \u2014 prints one versioned document",
+          "--help",
+          "--all"
+        ],
+        "example": "pullboard help claim",
+        "notes": []
+      },
+      "hold": {
+        "usages": [
+          "pullboard hold <lane> --reason \"...\"",
+          "pullboard hold <id> \"reason\"",
+          "pullboard hold <lane|id> --off"
+        ],
+        "flags": [
+          "--reason \"...\"",
+          "--off        lift",
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard hold web --reason \"...\"",
+        "notes": []
+      },
+      "hook": {
+        "usages": [
+          "pullboard hook pre-commit|pre-merge-commit|commit-msg|pre-push"
+        ],
+        "flags": [
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard hook pre-commit",
+        "notes": []
+      },
+      "hook commit-msg": {
+        "usages": [
+          "pullboard hook commit-msg <file>"
+        ],
+        "flags": [
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard hook commit-msg board.json",
+        "notes": []
+      },
+      "hook pre-commit": {
+        "usages": [
+          "pullboard hook pre-commit"
+        ],
+        "flags": [
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard hook pre-commit",
+        "notes": []
+      },
+      "hook pre-merge-commit": {
+        "usages": [
+          "pullboard hook pre-merge-commit"
+        ],
+        "flags": [
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard hook pre-merge-commit",
+        "notes": []
+      },
+      "hook pre-push": {
+        "usages": [
+          "pullboard hook pre-push"
+        ],
+        "flags": [
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard hook pre-push",
+        "notes": []
+      },
+      "hooks": {
+        "usages": [
+          "pullboard hooks"
+        ],
+        "flags": [
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard hooks",
+        "notes": []
+      },
+      "import": {
+        "usages": [
+          "pullboard import <file>"
+        ],
+        "flags": [
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard import board.json",
+        "notes": []
+      },
+      "inbox": {
+        "usages": [
+          "pullboard inbox"
+        ],
+        "flags": [
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard inbox",
+        "notes": []
+      },
+      "init": {
+        "usages": [
+          "pullboard init [--model <name>] [--blueprint <name or file>]... [--no-permissions]"
+        ],
+        "flags": [
+          "--model <name> \u2014 identifies the agent model; required unless PULLBOARD_MODEL is set",
+          "--blueprint <name or file> \u2014 start from a bundled blueprint or a JSON file; repeat it for one product, one architecture and any practice blueprints",
+          "--no-permissions",
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard init --blueprint web-app",
+        "notes": []
+      },
+      "join": {
+        "usages": [
+          "pullboard join <lane> --model <name> [--route light] [--family <name>]"
+        ],
+        "flags": [
+          "--model <name> \u2014 identifies the agent model; required unless PULLBOARD_MODEL is set",
+          "--route light \u2014 sets which work the model can take",
+          "--family <name> \u2014 records the family name",
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard join web --model \"my-model\"",
+        "notes": []
+      },
+      "land": {
+        "usages": [
+          "pullboard land [--max N] [--dry-run] [--adopt]",
+          "pullboard land --waive <test> --until <date> --reason \"why\""
+        ],
+        "flags": [
+          "--max N",
+          "--dry-run",
+          "--adopt",
+          "--waive <test>",
+          "--until <date>",
+          "--reason \"why\"",
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard land --max 4",
+        "notes": []
+      },
+      "lane": {
+        "usages": [
+          "pullboard lane add <name> --owns <path>[,<path>]"
+        ],
+        "flags": [
+          "--owns <path>",
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard lane add web --owns apps/web/",
+        "notes": []
+      },
+      "lane add": {
+        "usages": [
+          "pullboard lane add <name> --owns <path>[,<path>]"
+        ],
+        "flags": [
+          "--owns <path>",
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard lane add web --owns apps/web/",
+        "notes": []
+      },
+      "lanes": {
+        "usages": [
+          "pullboard lanes"
+        ],
+        "flags": [
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard lanes",
+        "notes": []
+      },
+      "ledger": {
+        "usages": [
+          "pullboard ledger"
+        ],
+        "flags": [
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard ledger",
+        "notes": []
+      },
+      "lifecycle": {
+        "usages": [
+          "pullboard lifecycle"
+        ],
+        "flags": [
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard lifecycle",
+        "notes": []
+      },
+      "list": {
+        "usages": [
+          "pullboard list [lane] [--all] [--route light|mid|strong]"
+        ],
+        "flags": [
+          "--all adds",
+          "--route light|mid|strong \u2014 sets which work the model can take",
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard list web",
+        "notes": []
+      },
+      "log": {
+        "usages": [
+          "pullboard log [id]"
+        ],
+        "flags": [
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard log 12",
+        "notes": []
+      },
+      "mcp": {
+        "usages": [
+          "pullboard mcp"
+        ],
+        "flags": [
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard mcp",
+        "notes": []
+      },
+      "merged": {
+        "usages": [
+          "pullboard merged <id> <commit>"
+        ],
+        "flags": [
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard merged 12 0123456",
+        "notes": []
+      },
+      "milestone": {
+        "usages": [
+          "pullboard milestone"
+        ],
+        "flags": [
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard milestone add \"0.7.0\" --items 12,13",
+        "notes": []
+      },
+      "milestone order": {
+        "usages": [
+          "pullboard milestone order <name> <ids>"
+        ],
+        "flags": [
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard milestone order \"0.7.0\" 13,12",
+        "notes": []
+      },
+      "next": {
+        "usages": [
+          "pullboard next [--wait <minutes>]",
+          "pullboard next --build",
+          "pullboard next --verify",
+          "pullboard next --verify <id>"
+        ],
+        "flags": [
+          "--wait <minutes>",
+          "--build                claim",
+          "--verify               reserve",
+          "--as coordinator",
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard next",
+        "notes": []
+      },
+      "pass": {
+        "usages": [
+          "pullboard pass <shout-id> <note>"
+        ],
+        "flags": [
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard pass 12 \"please decide\"",
+        "notes": []
+      },
+      "prompt": {
+        "usages": [
+          "pullboard prompt"
+        ],
+        "flags": [
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard prompt",
+        "notes": []
+      },
+      "refreeze": {
+        "usages": [
+          "pullboard refreeze <id>"
+        ],
+        "flags": [
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard refreeze 12",
+        "notes": []
+      },
+      "relay": {
+        "usages": [
+          "pullboard relay [status|on|off|pair|join <code>] [--url <address>]",
+          "pullboard relay on --all [--url <address>]",
+          "pullboard relay devices",
+          "pullboard relay revoke <device>",
+          "pullboard relay tokens",
+          "pullboard relay revoke <token-id>",
+          "pullboard relay recover --skip <sequence>"
+        ],
+        "flags": [
+          "--url <address>",
+          "--all",
+          "--skip <sequence>",
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard relay on --all",
+        "notes": []
+      },
+      "relay recover": {
+        "usages": [
+          "pullboard relay recover --skip <sequence>"
+        ],
+        "flags": [
+          "--skip <sequence>",
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard relay recover --skip 12",
+        "notes": []
+      },
+      "release": {
+        "usages": [
+          "pullboard release <id> [--note \"why\"]"
+        ],
+        "flags": [
+          "--note \"why\" \u2014 what was checked stays with the receipt",
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard release 12",
+        "notes": []
+      },
+      "reopen": {
+        "usages": [
+          "pullboard reopen <id> --note \"why\" [--cause <key>]"
+        ],
+        "flags": [
+          "--note \"why\" \u2014 what was checked stays with the receipt",
+          "--cause <key>",
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard reopen 12 --note \"correct the frozen criterion\"",
+        "notes": []
+      },
+      "resources": {
+        "usages": [
+          "pullboard resources"
+        ],
+        "flags": [
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard resources",
+        "notes": []
+      },
+      "resume": {
+        "usages": [
+          "pullboard resume"
+        ],
+        "flags": [
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard resume",
+        "notes": []
+      },
+      "rigor": {
+        "usages": [
+          "pullboard rigor"
+        ],
+        "flags": [
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard rigor",
+        "notes": []
+      },
+      "rigor draft": {
+        "usages": [
+          "pullboard rigor draft <key> \"<rule>\" --check \"<command>\" --red <commit> --green <commit> [--section <letter>]"
+        ],
+        "flags": [
+          "--check \"<command>\" \u2014 the command that proves it",
+          "--red <commit>",
+          "--green <commit>",
+          "--section <letter>",
+          "--test <file>",
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard rigor draft \"refusal:MERGE_LOST\" \"Merges keep every hunk\" --check \"node bin/checks/merges.js\" --red 0123456 --green 89abcde",
+        "notes": []
+      },
+      "roadmap": {
+        "usages": [
+          "pullboard roadmap"
+        ],
+        "flags": [
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard roadmap",
+        "notes": []
+      },
+      "run": {
+        "usages": [
+          "pullboard run --agent \"<command>\" [--attempts 3] [--minutes 15] [--items N] [--wait M]"
+        ],
+        "flags": [
+          "--agent \"<command>\"",
+          "--attempts",
+          "--minutes",
+          "--items N",
+          "--wait M",
+          "--agent-light \"...\"",
+          "--agent-mid \"...\"",
+          "--agent-strong \"...\"",
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard run --agent \"node agent.js\"",
+        "notes": []
+      },
+      "runner": {
+        "usages": [
+          "pullboard runner"
+        ],
+        "flags": [
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard runner add studio --slots 2 --browser 1",
+        "notes": []
+      },
+      "runner add": {
+        "usages": [
+          "pullboard runner add <ssh-host> --slots <n> --browser <n> [--node <remote-path>] [--root <remote-path>]"
+        ],
+        "flags": [
+          "--slots <n>",
+          "--browser <n>",
+          "--node <remote-path>",
+          "--root <remote-path>",
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard runner add studio --slots 2 --browser 1",
+        "notes": []
+      },
+      "serve": {
+        "usages": [
+          "pullboard serve [--port N]"
+        ],
+        "flags": [
+          "--port N",
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard serve",
+        "notes": []
+      },
+      "settings": {
+        "usages": [
+          "pullboard settings [gateSlots <n> | browserSlots <n>]"
+        ],
+        "flags": [
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard settings [gateSlots value",
+        "notes": []
+      },
+      "shout": {
+        "usages": [
+          "pullboard shout <lane|agent|person|all> <text>",
+          "pullboard shout [<to>] <text> --decision",
+          "pullboard shout <to> <text> --evidence attempt|receipt --outcome <word> --item <id> --commit <rev>"
+        ],
+        "flags": [
+          "--decision       ask",
+          "--evidence attempt|receipt",
+          "--outcome <word>",
+          "--item <id>",
+          "--commit <rev>",
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard shout <lane",
+        "notes": []
+      },
+      "show": {
+        "usages": [
+          "pullboard show <id> [--history]"
+        ],
+        "flags": [
+          "--history prints",
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard show 12",
+        "notes": []
+      },
+      "skills": {
+        "usages": [
+          "pullboard skills --update"
+        ],
+        "flags": [
+          "--update            refresh",
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard skills --update",
+        "notes": []
+      },
+      "spec": {
+        "usages": [
+          "pullboard spec --json"
+        ],
+        "flags": [
+          "--json                 parsed \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard spec --json",
+        "notes": []
+      },
+      "spec check": {
+        "usages": [
+          "pullboard spec check"
+        ],
+        "flags": [
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard spec check",
+        "notes": []
+      },
+      "spec draft": {
+        "usages": [
+          "pullboard spec draft <text> [--section <letter>] [--aim] [--gate \"<gate>\"]"
+        ],
+        "flags": [
+          "--section <letter>",
+          "--aim",
+          "--gate \"<gate>\"",
+          "--doctrine \u2014 proposes a doctrine ruling; only the person can approve it",
+          "--source \"<shout id or chat, date>\" \u2014 where the person gave the ruling; required with --doctrine",
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard spec draft \"Describe the first requirement\"",
+        "notes": []
+      },
       "spec fit": {
         "usages": [
           "pullboard spec fit [approve <batch>] | fit edit <row id or #item> keep|adapt|drop|answer [--text \"...\"] [--reason \"why\"]"
@@ -1201,6 +939,279 @@
           "--help"
         ],
         "example": "pullboard spec fit",
+        "notes": []
+      },
+      "spec show": {
+        "usages": [
+          "pullboard spec show <id>"
+        ],
+        "flags": [
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard spec show G1",
+        "notes": []
+      },
+      "spec signers": {
+        "usages": [
+          "pullboard spec signers add [--key <path>] [--by <principal>]"
+        ],
+        "flags": [
+          "--key <path>",
+          "--by <principal>",
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard spec signers add",
+        "notes": []
+      },
+      "spec signers add": {
+        "usages": [
+          "pullboard spec signers add [--key <path>] [--by <principal>]"
+        ],
+        "flags": [
+          "--key <path>",
+          "--by <principal>",
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard spec signers add",
+        "notes": []
+      },
+      "spec signoff": {
+        "usages": [
+          "pullboard spec signoff <ids> [--by <principal>] [--note \"...\"] [--note-file <file>]"
+        ],
+        "flags": [
+          "--by <principal>",
+          "--note \"what was checked\" \u2014 what was checked stays with the receipt",
+          "--note-file <file> \u2014 keeps quotes, $ and backticks intact",
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard spec signoff G1",
+        "notes": []
+      },
+      "spec unmet": {
+        "usages": [
+          "pullboard spec unmet [--must]"
+        ],
+        "flags": [
+          "--must",
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard spec unmet",
+        "notes": []
+      },
+      "spec view": {
+        "usages": [
+          "pullboard spec view [--out file]"
+        ],
+        "flags": [
+          "--out file",
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard spec view",
+        "notes": []
+      },
+      "stats": {
+        "usages": [
+          "pullboard stats [--since <date>]"
+        ],
+        "flags": [
+          "--since <date>",
+          "--json for \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard stats --since 2026-10-08",
+        "notes": []
+      },
+      "status": {
+        "usages": [
+          "pullboard status"
+        ],
+        "flags": [
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard status",
+        "notes": []
+      },
+      "submit": {
+        "usages": [
+          "pullboard submit <id>"
+        ],
+        "flags": [
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard submit 12",
+        "notes": []
+      },
+      "sweep": {
+        "usages": [
+          "pullboard sweep --run \"<checker>\" --check \"<checker on {file}>\" [--route light] [--max 20] [--dry-run]"
+        ],
+        "flags": [
+          "--run \"<checker>\"",
+          "--check \"<checker on {file}>\" \u2014 the command that proves it",
+          "--route light \u2014 sets which work the model can take",
+          "--max",
+          "--dry-run",
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard sweep --run \"value\" --check \"value\"",
+        "notes": []
+      },
+      "takeover": {
+        "usages": [
+          "pullboard takeover"
+        ],
+        "flags": [
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard takeover",
+        "notes": []
+      },
+      "tour": {
+        "usages": [
+          "pullboard tour"
+        ],
+        "flags": [
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard tour",
+        "notes": []
+      },
+      "verify": {
+        "usages": [
+          "pullboard verify <id> accept --note \"what you broke or which edge you tried, and what happened\"",
+          "pullboard verify <id> reject --reason TEST_FAILURE --note \"what failed\" [--cause <key>]"
+        ],
+        "flags": [
+          "--note \"what you broke or which edge you tried, and what happened\" \u2014 what was checked stays with the receipt",
+          "--reason TEST_FAILURE",
+          "--cause <key>",
+          "--implies <ids> \u2014 each named item gets a fact citing this decision",
+          "--note-file <file> \u2014 keeps quotes, $ and backticks intact",
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard verify 12 accept --note \"removed the fix; the test failed\"",
+        "notes": []
+      },
+      "version": {
+        "usages": [
+          "pullboard version"
+        ],
+        "flags": [
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard --version",
+        "notes": []
+      },
+      "view": {
+        "usages": [
+          "pullboard view [--project] [--port N] [--no-open]",
+          "pullboard view --export <dir>"
+        ],
+        "flags": [
+          "--project limits",
+          "--port N",
+          "--no-open",
+          "--export <dir>",
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard view",
+        "notes": []
+      },
+      "view export": {
+        "usages": [
+          "pullboard view --export <dir>"
+        ],
+        "flags": [
+          "--project limits",
+          "--port N",
+          "--no-open",
+          "--export <dir>",
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard view --export ./site",
+        "notes": []
+      },
+      "watch": {
+        "usages": [
+          "pullboard watch [--to <agent|lane|all>] [--kinds <kinds>] [--item <id>] [--since <sequence>] [--json]"
+        ],
+        "flags": [
+          "--to <agent|lane|all>",
+          "--kinds <kinds>",
+          "--item <id>",
+          "--since <sequence>",
+          "--json \u2014 prints one versioned document",
+          "--work <lane>",
+          "--review-wait <minutes>",
+          "--help"
+        ],
+        "example": "pullboard watch --to web",
+        "notes": [
+          "Claude Code: run pullboard watch --to <your id> under the Monitor tool, and each event line wakes the seat.",
+          "Any other harness: run it as a long-running command and treat each stdout line as an event."
+        ]
+      },
+      "whoami": {
+        "usages": [
+          "pullboard whoami"
+        ],
+        "flags": [
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard whoami",
+        "notes": []
+      },
+      "why": {
+        "usages": [
+          "pullboard why <id>"
+        ],
+        "flags": [
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard why 12",
+        "notes": []
+      },
+      "withdraw": {
+        "usages": [
+          "pullboard withdraw <id> <reason>"
+        ],
+        "flags": [
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard withdraw 12 value",
+        "notes": []
+      },
+      "worktree": {
+        "usages": [
+          "pullboard worktree <lane> --model <name> [--route light] [--family <name>]"
+        ],
+        "flags": [
+          "--model <name> \u2014 identifies the agent model; required unless PULLBOARD_MODEL is set",
+          "--route light \u2014 sets which work the model can take",
+          "--family <name> \u2014 records the family name",
+          "--json \u2014 prints one versioned document",
+          "--help"
+        ],
+        "example": "pullboard worktree web --model \"my-model\"",
         "notes": []
       }
     }

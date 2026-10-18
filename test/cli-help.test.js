@@ -142,6 +142,12 @@ test('help names come from the command declarations [C7,N37]', async (t) => {
   assert.equal(HELP.firstRun, before.help.firstRun, 'first-run help preserves its pre-refactor bytes');
   const beforeAll = before.help.all.replace(/^pullboard [0-9]+\.[0-9]+\.[0-9]+:/u, `pullboard ${VERSION}:`);
   assert.equal(HELP.all, beforeAll, 'full help preserves its pre-refactor bytes apart from a release version bump');
+  assert.deepEqual(Object.keys(HELP.commands).sort(), Object.keys(before.help.commands).sort(),
+    'the existing command-help names stay exact; undocumented subcommand help belongs to a separate change');
+  const undocumented = run('help', 'milestone', 'items');
+  assert.equal(undocumented.status, 2, 'the existing undocumented help stays refused');
+  assert.equal(undocumented.stdout, '');
+  assert.equal(undocumented.stderr, 'pullboard: no command "milestone items"; closest match is "milestone order". Run pullboard help --all for the full list.\n');
   for (const [name, entry] of Object.entries(before.help.commands)) {
     assert.deepEqual(HELP.commands[name], entry, `${name} preserves every existing usage, flag, example and note`);
   }
