@@ -2059,6 +2059,9 @@ function setupCommands(io, { first, second, rest = [], values }) {
         ...(landed.length ? { blueprint: blueprintResult(landed[0]), blueprints: landed.map(blueprintResult) } : {}) };
       io.result?.(result);
       const staging = notes.at(-1)?.startsWith('git add -f -- ') ? notes.at(-1) : null;
+      io.say(agentSessionDigest()
+        ? 'Next: run pullboard resume now to continue setup in this session; the new skills load next session, and setup does not need them.\nSetup details:'
+        : 'Next: ask your agent to set up Pullboard here; in Claude Code, start a new session first so it loads the Pullboard skills.\nSetup details:');
       (staging ? notes.slice(0, -1) : notes).forEach((note) => io.say(note));
       for (const added of landed) {
         if (added.marked) io.say(alreadyAddedLine(added.blueprint));
@@ -2071,9 +2074,6 @@ function setupCommands(io, { first, second, rest = [], values }) {
       io.result?.({ ...result, view });
       const viewLine = backgroundViewLine(view);
       if (viewLine) io.say(viewLine);
-      io.say(agentSessionDigest()
-        ? 'Next: run pullboard resume now to continue setup in this session; the new skills load next session, and setup does not need them.'
-        : 'Next: ask your agent to set up Pullboard here; in Claude Code, start a new session first so it loads the Pullboard skills.');
       // The offer comes before the staging line, which stays init's last line [I1,I2].
       const code = await offerRelayAtInit(info.root, io);
       if (staging) io.say(`To commit Pullboard's files: ${staging}`);
