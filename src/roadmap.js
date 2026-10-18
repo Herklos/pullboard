@@ -39,7 +39,7 @@ export function milestoneRoadmap(root, board, options = {}) {
         : openBoard(join(info.commonDir, 'pullboard', 'board.sqlite'), undefined, { isMain: codeIsFromMain() });
       try {
         const item = getItem(other, Number(number));
-        return { id: reference, title: item.item_title, status: item.item_status };
+        return { id: reference, title: item.item_title, status: item.item_status, landed: Boolean(item.item_merged_commit) };
       } finally {
         if (other !== board) closeBoard(other);
       }
