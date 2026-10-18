@@ -12,7 +12,7 @@
  * included; the page passes in the item lookup, agent names and item addresses it already uses.
  *
  * @param {{id: number, status: string, lane?: string, blockedBy?: number[], claim?: {by?: string|null}|null, builtBy?: string|null, verdict?: {decision?: string, note?: string}|null}|null} item
- * @param {{holds?: {hold_lane: string, hold_reason?: string}[], items?: {id: number, title?: string, status: string}[], name?: (id: string) => string, address?: (id: number) => string}} context
+ * @param {{holds?: {hold_lane: string, hold_reason?: string}[], items?: {id: number, title?: string, status: string}[], name?: (id: string) => string, address?: (id: number) => string, board?: string|null}} context
  * @returns {{label: string, dot: string, detail: string}|null} The dot, its accessible label and the unfolded detail.
  */
 export function roadmapBlock(item, context = {}) {
@@ -39,6 +39,6 @@ export function roadmapBlock(item, context = {}) {
   return {
     label,
     dot: '<span class="block-dot" role="img" aria-label="' + escape(label) + '" title="' + escape(label) + '"></span>',
-    detail: '<dl class="kv">' + rows + '</dl><a class="ref" href="' + escape(address(item.id)) + '" data-go="item:' + item.id + '">Open #' + item.id + ' in Items</a>',
+    detail: '<dl class="kv">' + rows + '</dl><a class="ref" href="' + escape(address(item.id)) + '" data-go="item:' + item.id + '"' + (context.board ? ' data-board="' + escape(context.board) + '"' : '') + '>Open #' + item.id + ' in Items</a>',
   };
 }

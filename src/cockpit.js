@@ -1403,10 +1403,13 @@ function boardSummary(board, state) {
     pending: calls('pending'),
     drafts: calls('draft'),
     holds: calls('hold'),
+    laneHolds: state.holds,
     decisions: calls('decision'),
     // What each item's state reads from, so another repo's roadmap can show it as this board's
     // Items tab does, sent back included, and open it here.
-    items: state.items.map((item) => ({ id: item.id, title: item.title, status: item.status, stage: item.stage ?? pipelineStage(item), verdict: item.verdict && { decision: item.verdict.decision } })),
+    items: state.items.map((item) => ({ id: item.id, title: item.title, status: item.status, stage: item.stage ?? pipelineStage(item),
+      lane: item.lane, blockedBy: item.blockedBy, claim: item.claim,
+      verdict: item.verdict && { decision: item.verdict.decision, note: item.verdict.note } })),
   };
 }
 
@@ -2226,7 +2229,7 @@ function milestoneItem(entry, p) {
     titles: new Map((root === view.root ? p.items : root ? named[0].items : []).map((i) => [String(i.id), i.title])),
     state: read ? stateOf(read) : null,
     stale: item ? staleChip(item) : '',
-    block: item ? roadmapBlock(item, { holds: root === view.root ? p.holds : named[0].holds, items: root === view.root ? p.items : named[0].items, name: (id) => agentName(id), address: (id) => itemAddress(id, root) }) : null,
+    block: item ? roadmapBlock(item, { holds: root === view.root ? p.holds : named[0].laneHolds, items: root === view.root ? p.items : named[0].items, name: (id) => agentName(id), address: (id) => itemAddress(id, root), board: root === view.root ? null : root }) : null,
     stage: item ? pipelineStage(item) : entry.status,
     word: entry.status,
     open: item ? { root, id } : null,
