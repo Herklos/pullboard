@@ -1,7 +1,7 @@
-/** Real merge indexes prove exact foreign-object preservation without weakening lane ownership [L3]. */
+/** Real merge hooks prove main integration without weakening lane ownership [L3,H16,B26]. */
 import assert from 'node:assert/strict';
 import { runFixtureChild, runFixtureGit } from './fixture-child.js';
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -263,5 +263,81 @@ test('installed pre-commit matches an exact foreign path during a merge [L3]', (
   assert.equal(result.status, 0);
   result = nativeCommit(box, box.lane);
   assert.notEqual(result.status, 0, 'the owned child path cannot impersonate its foreign parent path');
+  assert.match(result.stderr, /outside the core lane: view\/file/u);
+});
+
+test("merging main brings in main's own changes outside the lane [H16,B26]", (t) => {
+  const box = nativeFixture(t);
+  writeFileSync(join(box.lane, 'core', 'file'), 'lane core\n');
+  let result = box.git(box.lane, 'add', '-A');
+  assert.equal(result.status, 0);
+  result = nativeCommit(box, box.lane, 'feat(core): update owned file [L3]');
+  assert.equal(result.status, 0, result.stderr);
+
+  const mainConfig = { ...box.config, lease: '3h' };
+  writeFileSync(join(box.main, 'pullboard.json'), JSON.stringify(mainConfig, null, 2));
+  result = box.git(box.main, 'add', 'pullboard.json');
+  assert.equal(result.status, 0);
+  result = nativeCommit(box, box.main, 'chore: update main policy');
+  assert.equal(result.status, 0, result.stderr);
+
+  result = box.git(box.lane, 'merge', '--no-edit', 'main');
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(box.git(box.lane, 'rev-parse', '--verify', 'HEAD^2').status, 0,
+    'the automatic merge completed and created a merge commit');
+  assert.deepEqual(JSON.parse(readFileSync(join(box.lane, 'pullboard.json'), 'utf8')), mainConfig,
+    'the exact policy change from main is present in the lane checkout');
+});
+
+test('an inherited main candidate cannot authorize an automatic merge from an unaccepted branch [H16,B26]', (t) => {
+  const box = nativeFixture(t);
+  writeFileSync(join(box.lane, 'core', 'file'), 'lane core\n');
+  let result = box.git(box.lane, 'add', '-A');
+  assert.equal(result.status, 0);
+  result = nativeCommit(box, box.lane, 'feat(core): update owned file [L3]');
+  assert.equal(result.status, 0, result.stderr);
+
+  result = box.git(box.main, 'switch', '-c', 'unaccepted');
+  assert.equal(result.status, 0, result.stderr);
+  writeFileSync(join(box.main, 'view', 'file'), 'unaccepted foreign\n');
+  result = box.git(box.main, 'add', 'view/file');
+  assert.equal(result.status, 0);
+  result = nativeCommit(box, box.main, 'chore: change a foreign file');
+  assert.equal(result.status, 0, result.stderr);
+
+  result = box.git(box.main, 'switch', 'main');
+  assert.equal(result.status, 0, result.stderr);
+  const mainConfig = { ...box.config, lease: '3h' };
+  writeFileSync(join(box.main, 'pullboard.json'), JSON.stringify(mainConfig, null, 2));
+  result = box.git(box.main, 'add', 'pullboard.json');
+  assert.equal(result.status, 0);
+  result = nativeCommit(box, box.main, 'chore: update main policy');
+  assert.equal(result.status, 0, result.stderr);
+  const mainHead = box.git(box.main, 'rev-parse', 'HEAD').stdout.trim();
+  box.env[`GITHEAD_${mainHead}`] = 'main';
+
+  result = box.git(box.lane, 'merge', '--no-edit', 'unaccepted');
+  assert.notEqual(result.status, 0, 'the lane hook refuses the real unaccepted merge head');
+  assert.match(result.stderr, /outside the core lane: view\/file/u);
+  assert.notEqual(box.git(box.lane, 'rev-parse', '--verify', 'HEAD^2').status, 0,
+    'the refused merge did not create a merge commit');
+});
+
+test('an inherited main candidate cannot authorize an ordinary foreign commit [H16,B26]', (t) => {
+  const box = nativeFixture(t);
+  const mainConfig = { ...box.config, lease: '3h' };
+  writeFileSync(join(box.main, 'pullboard.json'), JSON.stringify(mainConfig, null, 2));
+  let result = box.git(box.main, 'add', 'pullboard.json');
+  assert.equal(result.status, 0);
+  result = nativeCommit(box, box.main, 'chore: update main policy');
+  assert.equal(result.status, 0, result.stderr);
+  const mainHead = box.git(box.main, 'rev-parse', 'HEAD').stdout.trim();
+  box.env[`GITHEAD_${mainHead}`] = 'main';
+
+  writeFileSync(join(box.lane, 'view', 'file'), 'sneaked foreign edit\n');
+  result = box.git(box.lane, 'add', 'view/file');
+  assert.equal(result.status, 0);
+  result = nativeCommit(box, box.lane, 'chore: stage a foreign edit');
+  assert.notEqual(result.status, 0, 'the ordinary pre-commit hook ignores GITHEAD candidates');
   assert.match(result.stderr, /outside the core lane: view\/file/u);
 });

@@ -251,10 +251,10 @@ export function blockedPaths(paths, protect) {
  * changes outside its folders. The main checkout is the coordinator's and may change anything; any
  * other worktree must have joined a lane.
  *
- * @param {{ root: string, isMain: boolean, config: any, agent: any, boardFile?: string }} context
+ * @param {{ root: string, isMain: boolean, config: any, agent: any, boardFile?: string, preMergeHook?: boolean }} context
  * @returns {string[]}
  */
-export function preCommitProblems({ root, isMain, config, agent, boardFile }) {
+export function preCommitProblems({ root, isMain, config, agent, boardFile, preMergeHook = false }) {
   if (!isMain) refuseGrafts(root);
   const { touched, written } = stagedPaths(root);
   const problems = blockedPaths(written, config.protect).map(
@@ -277,11 +277,11 @@ export function preCommitProblems({ root, isMain, config, agent, boardFile }) {
     problems.push('this worktree has not joined a lane: pullboard join <lane> --model "<model name>"');
     return problems;
   }
-  const mergeBase = mainMergeBase(root);
+  const mergeHeads = mainMergeHeads(root, preMergeHook);
   const ownershipConfig = committedLaneConfig(root);
-  const ownershipTouched = mergeBase
-    ? [...new Set([...touched, ...stagedPaths(root, mergeBase).touched])]
-      .filter((path) => !outOfLane(ownershipConfig, agent.agent_lane, [path]).length || !unchangedMergePath(root, path, mergeBase))
+  const ownershipTouched = mergeHeads
+    ? [...new Set([...touched, ...mergeHeads.flatMap((mergeHead) => stagedPaths(root, mergeHead).touched)])]
+      .filter((path) => !outOfLane(ownershipConfig, agent.agent_lane, [path]).length || !unchangedMergePath(root, path, mergeHeads))
     : touched;
   const foreign = outOfLane(ownershipConfig, agent.agent_lane, ownershipTouched);
   problems.push(
@@ -430,24 +430,37 @@ export function unwiredHookProblems(root) {
 }
 
 /**
- * The commit being merged, only when it is already part of the primary checkout's history.
+ * Validate incoming commit candidates against primary main, using Git's pre-MERGE_HEAD inputs only
+ * for the merge hook; GITHEAD is ordinary environment data, not proof of who invoked this hook.
  *
  * @param {string} root
- * @returns {string | null}
+ * @param {boolean} preMergeHook Whether the CLI was invoked for pre-merge-commit.
+ * @returns {string[] | null}
  */
-function mainMergeBase(root) {
+function mainMergeHeads(root, preMergeHook) {
   const gitPath = tryGit(root, ['rev-parse', '--git-path', 'MERGE_HEAD']);
   if (gitPath.status !== 0) return null;
-  let merge;
-  try { merge = readFileSync(resolve(root, gitPath.stdout.trim()), 'utf8').split(/\r?\n/u, 1)[0]; } catch { return null; }
-  if (!/^[0-9a-f]{40}$/i.test(merge ?? '')) return null;
-  if (tryGit(root, ['cat-file', '-e', `${merge}^{commit}`]).status !== 0) return null;
-  if (tryGit(root, ['merge-base', '--is-ancestor', merge, 'HEAD']).status === 0) return null;
+  let merges;
+  const mergeFile = resolve(root, gitPath.stdout.trim());
+  try {
+    if (existsSync(mergeFile)) merges = readFileSync(mergeFile, 'utf8').split(/\r?\n/u).filter(Boolean);
+    else if (preMergeHook) {
+      const names = Object.keys(process.env).filter((name) => name.startsWith('GITHEAD_'));
+      if (names.some((name) => !/^GITHEAD_(?:[0-9a-f]{40}|[0-9a-f]{64})$/iu.test(name))) return null;
+      merges = names.map((name) => name.slice('GITHEAD_'.length));
+    } else return null;
+  } catch { return null; }
+  if (!merges.length || merges.some((merge) => !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/iu.test(merge))) return null;
+  merges = [...new Set(merges)];
+  for (const merge of merges) {
+    if (tryGit(root, ['cat-file', '-e', `${merge}^{commit}`]).status !== 0) return null;
+    if (tryGit(root, ['merge-base', '--is-ancestor', merge, 'HEAD']).status !== 1) return null;
+  }
   let main;
   try { main = mainCheckout(root)?.commit; } catch { return null; }
   if (!main) return null;
-  return tryGit(root, ['merge-base', '--is-ancestor', merge, main]).status === 0
-    ? merge
+  return merges.every((merge) => tryGit(root, ['merge-base', '--is-ancestor', merge, main]).status === 0)
+    ? merges
     : null;
 }
 
@@ -473,9 +486,9 @@ function committedObject(root, commit, path) {
 }
 
 /** Main integration may preserve either parent's exact foreign object; a new resolution remains lane-owned. */
-function unchangedMergePath(root, path, mergeBase) {
+function unchangedMergePath(root, path, mergeHeads) {
   const staged = stagedObject(root, path);
-  return staged !== null && (staged === committedObject(root, mergeBase, path) || staged === committedObject(root, 'HEAD', path));
+  return staged !== null && (mergeHeads.some((mergeHead) => staged === committedObject(root, mergeHead, path)) || staged === committedObject(root, 'HEAD', path));
 }
 
 /**

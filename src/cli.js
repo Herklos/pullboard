@@ -4294,7 +4294,7 @@ async function hookCommand(io, { first, second }) {
     const landing = hookRead(ctx, (board) => store.landingBatches(board).some((batch) => batch.root === info.root && !['landed', 'blocked'].includes(batch.state)));
     if (landing) io.caller('coordinator', info.root);
     else if (agent) io.caller('seat', info.root);
-    problems = preCommitProblems({ root: info.root, isMain: info.isMain || landing, config: ctx.config, agent, boardFile: ctx.file });
+    problems = preCommitProblems({ root: info.root, isMain: info.isMain || landing, config: ctx.config, agent, boardFile: ctx.file, preMergeHook: first === 'pre-merge-commit' });
   } else if (first === 'commit-msg') {
     const message = readFileSync(second ?? '', 'utf8');
     const spec = loadSpec(info.root, ctx.config);
