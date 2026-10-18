@@ -922,7 +922,7 @@ test('the roadmap shows landed, accepted and past target [N26]', { timeout: 90_0
   const shipped=box.git(alpha.repo,'rev-parse','HEAD');
   const rawRoadmap=JSON.parse(box.run(alpha.repo,'roadmap','--json'));
   assert.equal(rawRoadmap.milestones.find(m=>m.name==='State summary').total,6,'649: the milestone total leaves the withdrawn member out, like the summary');
-  assert.deepEqual(rawRoadmap.milestones.find(m=>m.name==='State summary').summary,{total:6,left:5,landed:1,landing:1,review:1,building:1,waiting:1,held:1,needsYou:[9],pace:{last6h:4,last2h:4},estimate:{low:2.5,high:7.5}},'real roadmap JSON owns every header field');
+  assert.deepEqual(rawRoadmap.milestones.find(m=>m.name==='State summary').summary,{total:6,left:5,landed:1,landing:1,review:1,building:1,waiting:1,held:1,needsYou:[9],pace:{last6h:4,last2h:4,last24h:4},estimate:{low:2.5,high:7.5},window:'6h',reason:null},'real roadmap JSON owns every header field');
   const view=await startView(box),profile=mkdtempSync(join(tmpdir(),'pullboard-roadmap-truth-'));let chrome;
   const milestone=name=>`document.querySelector('[data-key="m:${name}"]')`;
   try {
@@ -968,6 +968,17 @@ test('the roadmap shows landed, accepted and past target [N26]', { timeout: 90_0
     await chrome.stable("(()=>{const m=data.project.milestones.find(m=>m.name==='State summary');m.summary={...m.summary,estimate:{low:2.5,high:2.5}};render();return true;})()");
     const single=await chrome.stable(`${milestone('State summary')}.querySelector('.roadmap-estimate')?.textContent||''`);
     assert.match(single,/^About 2\.5 h at today/u,`equal bounds read as one number: ${single}`);
+    // A slow day reads the 24 h window, and too few landings say so in words, each beside the landed line (#853).
+    const timeLine=async()=>JSON.parse(await chrome.stable(`JSON.stringify({estimate:${milestone('State summary')}.querySelector('.roadmap-estimate')?.textContent||'',pace:${milestone('State summary')}.querySelector('.roadmap-pace')?.textContent||''})`));
+    await chrome.stable("(()=>{const m=data.project.milestones.find(m=>m.name==='State summary');m.summary={...m.summary,estimate:{low:6,high:6},window:'24h',reason:null};render();return true;})()");
+    const daily=await timeLine();
+    assert.match(daily.estimate,/^About 6 h at the last day’s pace$/u,`the 24 h window names the last day's pace: ${JSON.stringify(daily)}`);
+    assert.match(daily.pace,/landed in the last 6 h/u,'the landed line stays beside the 24 h estimate');
+    await chrome.stable("(()=>{const m=data.project.milestones.find(m=>m.name==='State summary');m.summary={...m.summary,estimate:null,window:null,reason:'few-landings'};render();return true;})()");
+    const early=await timeLine();
+    assert.equal(early.estimate,'Too few landings yet to estimate',`few landings say so instead of going blank: ${JSON.stringify(early)}`);
+    assert.match(early.pace,/landed in the last 6 h/u,'the landed line stays beside the too-early words');
+    await chrome.stable("(()=>{const m=data.project.milestones.find(m=>m.name==='State summary');m.summary={...m.summary,estimate:{low:2.5,high:2.5},window:'6h',reason:null};render();return true;})()");
     assert.equal(await chrome.stable(`${milestone('State summary')}.querySelector('[data-summary-state=waiting]').textContent.trim()`),'1 waiting','the legend says waiting');
     // The API owns counts: changing held item summaries cannot change the supplied milestone summary.
     await chrome.stable("window.__originalItems=data.project.items;window.__originalRoadmapItems=data.project.milestones.find(m=>m.name==='State summary').items;data.project.items=data.project.items.map(item=>({...item,status:'open',stage:'open',merged:null,claim:null}));data.project.milestones.find(m=>m.name==='State summary').items=window.__originalRoadmapItems.map(item=>({...item,status:'open',state:'open'}));render();true");
