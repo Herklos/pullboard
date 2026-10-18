@@ -1116,9 +1116,9 @@ async function readRoadmap(chrome) {
         const bar = card.querySelector('.milestone-progress');
         return {
           name: card.querySelector('h2').innerText,
-          count: card.querySelector('.milestone-count')?.innerText ?? null,
+          count: card.querySelector('.roadmap-left [aria-label]')?.getAttribute('aria-label') ?? card.querySelector('.milestone-count')?.innerText ?? null,
           filled: bar ? Math.round(1000 * bar.querySelector('rect').getBoundingClientRect().width / bar.getBoundingClientRect().width) / 1000 : null,
-          progress: bar ? [Number(bar.getAttribute('aria-valuenow')), Number(bar.getAttribute('aria-valuemax'))] : null,
+          progress: bar?.matches('.roadmap-summary-bar') ? [Number(bar.querySelector('[data-summary-segment=landed]').dataset.count), Number(bar.dataset.total)] : bar ? [Number(bar.getAttribute('aria-valuenow')), Number(bar.getAttribute('aria-valuemax'))] : null,
           empty: card.querySelector('.milestone-empty')?.innerText ?? null,
           note: card.querySelector('.milestone-note')?.innerText ?? null,
           rows: [...card.querySelectorAll('.milestone-item')].map((row) => {
