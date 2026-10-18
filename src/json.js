@@ -87,6 +87,7 @@ export const JSON_SHAPES = {
     'spec check': shape({ rows: 'array' }),
     'spec view': shape({ path: 'string' }),
     'spec show': shape({ row: 'object', standing: 'object' }),
+    'blueprint starters': shape({ blueprint: 'object', starters: 'array' }),
     'spec draft': shape({ id: 'string', row: 'object' }),
     'blueprint add': shape({ blueprint: 'object', section: 'string', rows: 'array', items: 'array', gate: 'string|null', proposedLanes: 'array' }),
     'blueprint fit': shape({ proposals: 'array' }),
