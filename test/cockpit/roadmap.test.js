@@ -188,7 +188,7 @@ test('the roadmap reads every item as the Items tab does, opens each one, anothe
       assert.ok(seen.document <= seen.client && seen.body <= seen.client, `${width}: no sideways scroll: ${JSON.stringify(seen)}`);
       assert.deepEqual(seen.cards.map((card) => card.name), ['Launch', 'Next', 'Later'], `${width}: a card for each milestone, in order`);
       assert.deepEqual(seen.cards.map((card) => card.note), ['Ships when the review lands; your call on the name.', 'Queued behind Launch.', 'Ideas not filed yet.'], `${width}: each card's note`);
-      assert.deepEqual(seen.cards.map((card) => [card.count, card.progress, card.filled]), [['1/5 landed', [1, 5], 0.2], ['0/2 landed', [0, 2], 0], ['0/0 landed', [0, 0], 0]], `${width}: counts and bars say how many retained items landed`);
+      assert.deepEqual(seen.cards.map((card) => [card.count, card.progress, card.filled]), [['1/5 landed', [1, 5], 0.2], ['0/2 landed', [0, 2], 0], [null, null, null]], `${width}: counts and bars say how many retained items landed`);
       assert.deepEqual([seen.cards[2].empty, seen.cards[2].rows.length], ['No items yet.', 0], `${width}: an empty milestone says so with zero summary counts`);
       const rows = seen.cards.flatMap((card) => card.rows);
       assert.deepEqual(rows.map(({ id, label, tone }) => ({ id, label, tone })), words, `${width}: each roadmap chip distinguishes landed and accepted with the Items tab's colour`);
@@ -419,7 +419,7 @@ test('the roadmap leads with the next release and folds shipped ones [N26]', { t
         assert.deepEqual(r.parts.map((part) => [part.key, part.open, part.summary]), [
           ['m:0.3', true, '0.3 | 1/2 landed'],
           ['m:0.4', true, '0.4 | 0/1 landed'],
-          ['m:Later', true, 'Later | 0/0 landed'],
+          ['m:Later', true, 'Later'],
           ['shipped', false, 'Shipped | 2 releases'],
         ], `${at}: every upcoming milestone opens in order, with Shipped folded last`);
         assert.deepEqual(r.parts[0].rows, ['#3', '#4'], `${at}: the next release shows its items`);
@@ -909,6 +909,7 @@ test('the roadmap shows landed, accepted and past target [N26]', { timeout: 90_0
   // A release that finished, every item landed or withdrawn, without milestone ship (the person, 18 Oct).
   build(box,alpha,12,'item-12.txt');accept(box,alpha,12);land(12);box.run(alpha.repo,'withdraw','13','Not needed after all');
   box.run(alpha.repo,'milestone','add','Finished unshipped','--items','12,13');
+  box.run(alpha.repo,'milestone','add','Empty plan','--note','Nothing filed yet.');
   build(box,alpha,7,'item-7.txt');box.run(alpha.web,'claim','8');box.run(alpha.repo,'hold','ops','--reason','Waiting for the person');
   box.run(alpha.repo,'shout','person','#9 Approve the release','--decision');
   box.run(alpha.repo,'milestone','add','Past target','--items','1,2,3');
@@ -925,7 +926,7 @@ test('the roadmap shows landed, accepted and past target [N26]', { timeout: 90_0
   const view=await startView(box),profile=mkdtempSync(join(tmpdir(),'pullboard-roadmap-truth-'));let chrome;
   const milestone=name=>`document.querySelector('[data-key="m:${name}"]')`;
   try {
-    chrome=await openSnapshotChrome(executable,view.link.href,profile);await chrome.waitFor('data?.project?.milestones?.length===5');
+    chrome=await openSnapshotChrome(executable,view.link.href,profile);await chrome.waitFor('data?.project?.milestones?.length===6');
     const apiSummary=JSON.parse(await chrome.stable("JSON.stringify(data.project.milestones.find(m=>m.name==='State summary').summary)"));
     assert.deepEqual(apiSummary,rawRoadmap.milestones.find(m=>m.name==='State summary').summary,'the live API carries the real CLI summary unchanged');
     await press(chrome,"document.querySelector('[data-tab=roadmap]')");
@@ -946,6 +947,9 @@ test('the roadmap shows landed, accepted and past target [N26]', { timeout: 90_0
     assert.equal(finished.releases[0],'Past target','the Releases list starts with the first release with work left');
     assert.ok(!finished.releases.includes('Finished unshipped'),'a finished release is not listed as coming');
     assert.match(finished.status,/^Past target/u,'the page opens on the first release with work left');
+    // An empty plan has nothing left either: no header, its No items yet reading as before the header (tests-28, 18 Oct).
+    const empty=JSON.parse(await chrome.stable(`JSON.stringify({summary:Boolean(${milestone('Empty plan')}?.querySelector('.roadmap-summary,.roadmap-left')),zero:/0 (left|remaining)|0 of 0|About 0/u.test(${milestone('Empty plan')}?.textContent||''),empty:${milestone('Empty plan')}?.querySelector('.milestone-empty')?.textContent||''})`));
+    assert.deepEqual(empty,{summary:false,zero:false,empty:'No items yet.'},`an empty plan shows no header: ${JSON.stringify(empty)}`);
     for(const width of [375,1280]) {
       await chrome.send('Emulation.setDeviceMetricsOverride',{width,height:950,deviceScaleFactor:1,mobile:false});
       for(const scheme of ['light','dark']) {
@@ -956,6 +960,8 @@ test('the roadmap shows landed, accepted and past target [N26]', { timeout: 90_0
         assert.equal(read.segments.reduce((sum,row)=>sum+row[1],0),6,'the six supplied states sum to total');
         assert.ok(read.segments.every(row=>row[2]>0&&Math.abs(row[2]-read.bar/6)<1),`${width}/${scheme}: every supplied state occupies its share`);
         assert.ok(read.width<=read.viewport,`${width}/${scheme}: the header stays inside the viewport`);
+        const emptyPlan=JSON.parse(await chrome.stable(`JSON.stringify({summary:Boolean(${milestone('Empty plan')}?.querySelector('.roadmap-summary,.roadmap-left')),empty:${milestone('Empty plan')}?.querySelector('.milestone-empty')?.textContent||''})`));
+        assert.deepEqual(emptyPlan,{summary:false,empty:'No items yet.'},`${width}/${scheme}: an empty plan shows no header, only No items yet`);
       }
     }
     // Equal bounds read as one number, and the legend says waiting.

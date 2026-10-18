@@ -7,9 +7,9 @@ export function roadmapSummary(milestone, context = {}) {
   /** Accept only nonnegative integer counts from the backend contract. */
   const number = value => Number.isInteger(value) && value >= 0;
   if (!summary || !number(summary.total) || !number(summary.left) || states.some(([key]) => !number(summary[key]))) return null;
-  // A finished milestone, items and none left, has no header: it never reads "0 remaining" or "About 0 to 0 h".
-  // An empty plan keeps its own reading.
-  if (summary.left === 0 && summary.total > 0) return null;
+  // Only a milestone with work left has a header: a finished one or an empty plan never reads "0 remaining" or
+  // "About 0 to 0 h"; an empty plan keeps its No items yet reading, as before this header.
+  if (summary.left === 0) return null;
   const count = '<span class="roadmap-left"><b>'+escape(summary.left)+' remaining</b><span aria-label="'+escape(summary.landed)+'/'+escape(summary.total)+' landed">'+escape(summary.landed)+' of '+escape(summary.total)+' landed</span></span>';
   const description = states.map(([key,label]) => summary[key]+' '+label).join(', ');
   let offset = 0;
