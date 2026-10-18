@@ -873,7 +873,7 @@ test('the roadmap panel counts the next release by stage [N26]', {
 test('the roadmap shows landed, accepted and past target [N26]', { timeout: 90_000 }, async () => {
   const executable = chromeExecutable(); assert.ok(executable, 'Chrome is required for the roadmap header check.');
   const box=machine(), alpha=project(box,'roadmap-truth',SPEC,{lanes:{web:{owns:['web/'],specs:['G']},ops:{owns:['ops/'],specs:['G']}}});
-  const names=['Landed A','Accepted A','Waiting A','Shipped B','Landed C','Accepted C','In review C','Building C','Approve the release','Held C'];
+  const names=['Landed A','Accepted A','Waiting A','Shipped B','Landed C','Accepted C','In review C','Building C','Approve the release','Held C','Withdrawn C'];
   names.forEach((name,index)=>box.run(alpha.repo,'add',index===9?'ops':'web',name,'--specs','G1','--criterion','The page renders.'));
   /** Land through real Git and the ordinary board receipt; acceptance alone stays unlanded. */
   function land(id) {
@@ -881,21 +881,24 @@ test('the roadmap shows landed, accepted and past target [N26]', { timeout: 90_0
     box.run(alpha.repo,'merged',String(id),box.git(alpha.repo,'rev-parse','HEAD'));
   }
   for(const id of [1,2,4,5,6]) {build(box,alpha,id,`item-${id}.txt`);accept(box,alpha,id);if([1,4,5].includes(id))land(id);}
+  box.run(alpha.repo,'withdraw','11','--reason','Removed from this release');
   build(box,alpha,7,'item-7.txt');box.run(alpha.web,'claim','8');box.run(alpha.repo,'hold','ops','--reason','Waiting for the person');
   box.run(alpha.repo,'shout','person','#9 Approve the release','--decision');
   box.run(alpha.repo,'milestone','add','Past target','--items','1,2,3');
   box.run(alpha.repo,'milestone','edit','Past target','--target',new Date(Date.now()-86_400_000).toISOString());
   box.run(alpha.repo,'milestone','add','Shipped release','--items','4');
-  box.run(alpha.repo,'milestone','add','State summary','--items','5,6,7,8,9,10');
+  box.run(alpha.repo,'milestone','add','State summary','--items','5,6,7,8,9,10,11');
   box.run(alpha.repo,'milestone','ship','Shipped release','--next','State summary');
   box.run(alpha.repo,'milestone','add','Empty shipped');
   box.run(alpha.repo,'milestone','ship','Empty shipped','--next','State summary');
   const shipped=box.git(alpha.repo,'rev-parse','HEAD');
+  const rawRoadmap=JSON.parse(box.run(alpha.repo,'roadmap','--json'));
+  assert.equal(rawRoadmap.milestones.find(m=>m.name==='State summary').total,7,'692 total retains the withdrawn member; the summary excludes it');
   const view=await startView(box),profile=mkdtempSync(join(tmpdir(),'pullboard-roadmap-truth-'));let chrome;
   const milestone=name=>`document.querySelector('[data-key="m:${name}"]')`;
   try {
     chrome=await openSnapshotChrome(executable,view.link.href,profile);await chrome.waitFor('data?.project?.milestones?.length===4');
-    // Temporary #820 contract fixture for the permitted parallel build. Its shape is provisional until the backend lands; this is not real CLI summary proof.
+    // Temporary #820 contract fixture for the permitted parallel build. Its shape was confirmed by Core336 in shout15071; this is not real CLI summary proof.
     await chrome.stable(`(()=>{const m=data.project.milestones.find(m=>m.name==='State summary');m.summary={total:6,left:5,landed:1,landing:1,review:1,building:1,waiting:1,held:1,needsYou:[9],pace:{last6h:3,last2h:3},estimate:{low:3.5,high:10}};return true})()`);
     await press(chrome,"document.querySelector('[data-tab=roadmap]')");
     await chrome.waitFor(`${milestone('Past target')}?.querySelector('.milestone-head')`);
@@ -912,8 +915,8 @@ test('the roadmap shows landed, accepted and past target [N26]', { timeout: 90_0
       await chrome.send('Emulation.setDeviceMetricsOverride',{width,height:950,deviceScaleFactor:1,mobile:false});
       for(const scheme of ['light','dark']) {
         await chrome.send('Emulation.setEmulatedMedia',{features:[{name:'prefers-color-scheme',value:scheme}]});
-        const read=JSON.parse(await chrome.stable(`JSON.stringify((()=>{const m=${milestone('State summary')},bar=m.querySelector('.roadmap-summary-bar');return {text:m.textContent,legend:[...m.querySelectorAll('[data-summary-state]')].map(x=>[x.dataset.summaryState,x.querySelector('b').textContent]),segments:[...m.querySelectorAll('[data-summary-segment]')].map(x=>[x.dataset.summarySegment,Number(x.dataset.count),x.getBoundingClientRect().width]),bar:bar?.getBoundingClientRect().width,width:document.documentElement.scrollWidth,viewport:innerWidth};})())`));
-        assert.match(read.text,/5 left.*1 of 6 landed/u);assert.match(read.text,/About 3\.5 to 10 h/u);assert.match(read.text,/3 landed in the last 6 h, 3 in the last 2 h/u);assert.match(read.text,/Needs you:.*#9 Approve the release/u);
+        const read=JSON.parse(await chrome.stable(`JSON.stringify((()=>{const m=${milestone('State summary')},bar=m.querySelector('.roadmap-summary-bar');return {text:m.textContent,releaseCount:document.querySelector('[data-roadmap-jump=\"m:State summary\"] b').textContent,legend:[...m.querySelectorAll('[data-summary-state]')].map(x=>[x.dataset.summaryState,x.querySelector('b').textContent]),segments:[...m.querySelectorAll('[data-summary-segment]')].map(x=>[x.dataset.summarySegment,Number(x.dataset.count),x.getBoundingClientRect().width]),bar:bar?.getBoundingClientRect().width,width:document.documentElement.scrollWidth,viewport:innerWidth};})())`));
+        assert.match(read.text,/5 left.*1 of 6 landed/u);assert.equal(read.releaseCount,'1/6','the header and Releases list share the summary total');assert.match(read.text,/About 3\.5 to 10 h/u);assert.match(read.text,/3 landed in the last 6 h, 3 in the last 2 h/u);assert.match(read.text,/Needs you:.*#9 Approve the release/u);
         assert.deepEqual(read.legend,[['landed','1'],['landing','1'],['review','1'],['building','1'],['waiting','1'],['held','1']]);
         assert.equal(read.segments.reduce((sum,row)=>sum+row[1],0),6,'the six supplied states sum to total');
         assert.ok(read.segments.every(row=>row[2]>0&&Math.abs(row[2]-read.bar/6)<1),`${width}/${scheme}: every supplied state occupies its share`);
