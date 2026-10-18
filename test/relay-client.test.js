@@ -26,6 +26,7 @@ import { ENGINE_VERSION } from '../src/machine.js';
 import { presentationShout } from '../src/relay-presentation.js';
 import { fetchFresh } from './http-fixture.js';
 import { relayResetSample } from './relay-reset-fixture.js';
+import { request as relayRequest } from '../src/relay.js';
 import { AGENT_SHELL_MARKERS, SSH_SHELL_MARKERS } from '../src/person.js';
 
 const SIGN_INS = new Map();
@@ -1364,4 +1365,6 @@ test('relay read recovery stays bounded and preserves refusals, invalid bodies a
   const cancelled = await relayResetSample('abort-reset');
   assert.equal(cancelled.code, 'OAUTH_CANCELLED');
   assert.equal(cancelled.readAttempts, 1, 'cancellation wins at the reset boundary');
+  await assert.rejects(relayRequest({ url: 'http://127.0.0.1:1' }, '/fixture', { signal: {} }, { ignoreRelayEnvironmentToken: true }),
+    error => error.code === 'RELAY_UNAVAILABLE', 'invalid signal setup keeps its existing transport refusal');
 });
