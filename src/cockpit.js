@@ -2114,18 +2114,19 @@ function renderSide() {
   /** Escape plain text while preserving safe item and code-preview links.
    * @param {string} text
    * @param {Map<string, string>} titles
-   * @param {boolean} allowLinks
+   * @param {boolean|'in-place'} allowLinks
    * @returns {string}
    */
   function linked(text, titles, allowLinks = true, root = view.root) { return String(text ?? '').split(/(#\\d+|(?<![^\\s([{"'\`])[^\\s:@()[\\]{}"'\`]+:\\d+(?:-\\d+)?@[0-9a-f]{7,40}(?![^\\s)\\]}"'\`.,;:!?]))/).map((part, n, parts) => {
-    if (n % 2 && part[0] !== '#') return allowLinks ? codeRef(part, parts.slice(0, n).join('').split('\\n').pop().slice(-2000)) : codeChip(part);
+    if (n % 2 && part[0] !== '#') return allowLinks === true ? codeRef(part, parts.slice(0, n).join('').split('\\n').pop().slice(-2000)) : codeChip(part);
     const id = /^#\\d+$/.test(part) ? String(Number(part.slice(1))) : '';
+    if (id && allowLinks === 'in-place') return '<span class="ref"' + (titles.has(id) ? ' title="' + esc(titles.get(id)) + '"' : '') + '>' + esc(part) + '</span>';
     return id && allowLinks ? '<a class="ref" href="' + esc(itemAddress(id, root)) + '" data-go="item:' + id + '"' + (root === view.root ? '' : ' data-board="' + esc(root) + '"') + (titles.has(id) ? ' title="' + esc(titles.get(id)) + '"' : '') + '>' + esc(part) + '</a>' : esc(part);
   }).join(''); }
   /** Format inline code and recognized command tokens without interpreting markup.
    * @param {string} text
    * @param {Map<string, string>} titles
-   * @param {boolean} allowLinks
+   * @param {boolean|'in-place'} allowLinks
    * @returns {string}
    */
   function inline(text, titles, allowLinks = true, root = view.root) { return String(text ?? '').split(/(\`[^\`]*\`|(?:[^\\s:@()[\\]{}"'\`]+)?:\\d+(?:-\\d+)?@[0-9a-f]{0,40}|${COMMAND_SOURCE}|--[\\w-]+|(?:\\/|\\.\\.?\\/|[\\w.-]+\\/)\\w[\\w./-]*\\.[A-Za-z0-9]+|\\b[0-9a-fA-F]{7,40}\\b|#\\d+)/g).map((part, n, parts) => {
@@ -2142,7 +2143,7 @@ function renderSide() {
         const reason = !partial[1] ? 'missing the repository path' : 'missing a usable commit SHA';
         return '<span class="code no ref-missing" role="status">Code reference unavailable: ' + reason + '.</span>';
       }
-      if (allowLinks && validRef) return codeRef(part, textBefore.slice(-2000));
+      if (allowLinks === true && validRef) return codeRef(part, textBefore.slice(-2000));
       return codeChip(part);
     }
     if (/^(?:${COMMAND_SOURCE}|--[\\w-]+)$/.test(part)) return codeChip(part, 'cmd');
@@ -2304,26 +2305,20 @@ function jumpToRoadmap(key) {
 /**
  * One item's row on the Roadmap, laid out as the Items list lays one out: the dot of its state, its
  * id and title on one line that ends in an ellipsis when cut, and the Items tab's chip. The whole
- * title is the row's tooltip. An item that opens is a button; one that cannot says why instead.
+ * title is the row's tooltip. Every row expands in place; its compact detail alone links over to Items.
  */
 function milestoneRow(row, titles) {
-  const title = row.title ? inline(String(row.title).replace(/\\s+/g, ' '), row.titles || titles, true, row.root) : '<span class="muted">' + esc(row.why) + '</span>';
+  const title = row.title ? inline(String(row.title).replace(/\\s+/g, ' '), row.titles || titles, 'in-place', row.root) : '<span class="muted">' + esc(row.why) + '</span>';
   const label = '<span class="id">' + esc(row.label) + '</span>' + title;
-  const text = row.block ? '<span class="milestone-title">' + label + '</span>' + row.block.dot : label;
+  const text = row.block?.dot ? '<span class="milestone-title">' + label + '</span>' + row.block.dot : label;
   const inner = '<span class="dot' + (row.state ? ' ' + row.state : '') + '"></span><span class="t">' + text + '</span>' + (row.stale || '') + (row.state ? chip(row.state) : '<span class="chip">' + esc(row.word) + '</span>');
-  if (row.block && row.open) {
-    // A blocked row unfolds in place to say why (#605); its detail links over to Items.
-    const key = 'i:' + row.label, open = view.roadmapOpen.get(JSON.stringify([view.root, key])) === true;
-    const toggle = 'class="milestone-item blocked" data-roadmap-key="' + esc(key) + '" aria-expanded="' + open + '" title="' + esc(row.title) + '"';
-    return '<li>' + (title.includes('class="ref"') ? '<div ' + toggle + ' role="button" tabindex="0">' + inner + '</div>' : '<button ' + toggle + ' type="button">' + inner + '</button>')
-      + '<div class="milestone-why"' + (open ? '' : ' hidden') + '>' + row.block.detail + '</div></li>';
-  }
-  if (!row.open) return '<li><div class="milestone-item" title="' + esc(row.title ? row.title + ' (' + row.why + ')' : row.why) + '">' + inner + '</div></li>';
-  const attributes = 'class="milestone-item" data-go="item:' + row.open.id + '"' + (row.open.root === view.root ? '' : ' data-board="' + esc(row.open.root) + '"') + ' title="' + esc(row.title) + '"';
-  // A title with its own links needs a separate containing control, never a nested button.
-  return title.includes('class="ref"')
-    ? '<li><div ' + attributes + ' role="button" tabindex="0">' + inner + '</div></li>'
-    : '<li><button ' + attributes + ' type="button">' + inner + '</button></li>';
+  const key = 'i:' + row.label, open = view.roadmapOpen.get(JSON.stringify([view.root, key])) === true;
+  const board = row.open && row.open.root !== view.root ? ' data-board="' + esc(row.open.root) + '"' : '';
+  const toggle = 'class="milestone-item' + (row.block?.dot ? ' blocked' : '') + '" data-roadmap-key="' + esc(key) + '" aria-expanded="' + open + '"' + board + ' title="' + esc(row.title || row.why) + '"';
+  const detail = row.block ? row.block.detail : '<p>' + esc(row.why || row.word) + '</p>';
+  // Every row stays on the Roadmap; only its explicit Open in Items link navigates (#605).
+  return '<li><div ' + toggle + ' role="button" tabindex="0">' + inner + '</div>'
+    + '<div class="milestone-why"' + (open ? '' : ' hidden') + '>' + detail + '</div></li>';
 }
 
 /** Read the work still to ship before verified items, excluding withdrawn work from every count. */

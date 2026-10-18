@@ -7,7 +7,15 @@ import { test } from 'node:test';
 import { tapTarget, SPEC, machine, project, build, sendBack, fetchLive, startView, target, accept, chromeExecutable, openSnapshotChrome, closeSnapshotChrome, press, travel, pressedInto, settled, roadmapRow, showing, readRoadmap, openRoadmapParts, tabBar, proofShot, pickProject, chooseFilter } from './fixture.js';
 
 
-test('Roadmap and rule prose references stay inline and open the item on their own board [N26,N38]', { timeout: 90_000 }, async (t) => {
+/** Expand a real roadmap row, then use its explicit link to leave for Items. */
+async function openRoadmapItem(chrome, id) {
+  const row = roadmapRow(id);
+  if (await chrome.stable(row + ".getAttribute('aria-expanded')") !== 'true') await press(chrome, row);
+  await chrome.waitFor(row + ".getAttribute('aria-expanded') === 'true'");
+  await press(chrome, row + ".parentElement.querySelector('.milestone-why a[data-go]')");
+}
+
+test('Roadmap references stay inline and rows expand before opening Items [N26,N38]', { timeout: 90_000 }, async (t) => {
   const executable = chromeExecutable();
   if (!executable) return t.skip('Install Chrome or set PULLBOARD_CHROME for prose-reference checks.');
   const box = machine();
@@ -33,12 +41,12 @@ test('Roadmap and rule prose references stay inline and open the item on their o
       const contexts = [
         ['roadmap', '#roadmap .milestone h2 .ref', 'Local target'],
         ['roadmap', '#roadmap .milestone-note .ref', 'Local target'],
-        ['roadmap', '#roadmap .milestone-item[data-go="item:2"]:not([data-board]) .t .ref', 'Local target'],
-        ['roadmap', '#roadmap .milestone-item[data-board] .t .ref', 'Remote target'],
+        ['roadmap', '#roadmap .milestone-item[data-roadmap-key="i:#2"]:not([data-board]) .t .ref', 'Local target', true],
+        ['roadmap', '#roadmap .milestone-item[data-board] .t .ref', 'Remote target', true],
         ['spec', '#spec-list [data-row="spec:G3"] .ref', 'Local target'],
         ['doctrine', '#doctrine-list [data-row="doctrine:R1"] .ref', 'Local target'],
       ];
-      for (const [tab, selector, target] of contexts) {
+      for (const [tab, selector, target, expands] of contexts) {
         await pickProject(chrome, `document.querySelector('[data-root=${JSON.stringify(demo.repo)}]')`);
         await chrome.waitFor("data?.project?.root === view.root && !document.body.classList.contains('switching') && document.querySelector('#proj-name').textContent === 'a-inline-prose'");
         await chrome.click(`document.querySelector('[data-tab="${tab}"]')`);
@@ -57,6 +65,20 @@ test('Roadmap and rule prose references stay inline and open the item on their o
         assert.ok(Math.abs(metrics.height - metrics.line) < 1, `${width}: ${selector} keeps the text line height`);
         assert.equal(metrics.nested, false, `${width}: ${selector} never nests buttons`);
         if (metrics.rowHeight !== undefined) assert.ok(metrics.rowHeight >= tapTarget(width), `${width}: the containing Roadmap control keeps its target`);
+        if (expands) {
+          const ref = `document.querySelector(${JSON.stringify(selector)})`;
+          const row = ref + ".closest('.milestone-item')";
+          if (await chrome.stable(row + ".getAttribute('aria-expanded')") === 'true') await chrome.click(ref);
+          const address = await chrome.stable('location.href');
+          await chrome.click(ref);
+          await chrome.waitFor(row + ".getAttribute('aria-expanded') === 'true'");
+          assert.equal(await chrome.stable('location.href'), address, 'inline title text expands without leaving Roadmap');
+          assert.equal(await chrome.stable('view.tab'), 'roadmap');
+          await chrome.click(row + ".parentElement.querySelector('.milestone-why a[data-go]')");
+          await chrome.waitFor("document.querySelector('[data-tab=items].on') && document.querySelector('#detail h2 > span')?.textContent === '#2'");
+          assert.equal(await chrome.stable('view.root'), target === 'Remote target' ? other.repo : demo.repo);
+          continue;
+        }
         await chrome.click(`document.querySelector(${JSON.stringify(selector)})`);
         await chrome.waitFor("!document.body.classList.contains('switching') && document.querySelector('[data-tab=items].on') && document.querySelector('#detail h2 > span')?.textContent === '#1'");
         assert.ok((await chrome.stable("document.querySelector('#detail h2').textContent")).includes(target), 'the reference opens its target title');
@@ -72,7 +94,12 @@ test('Roadmap and rule prose references stay inline and open the item on their o
       assert.equal(await chrome.stable("document.querySelectorAll('#answering-q .ref').length"), 1, 'the answering question keeps its inline item reference');
       await chrome.click("document.querySelector('#answering-q .ref')");
       await chrome.waitFor("document.querySelector('#detail h2')?.textContent.includes('Local target') && document.querySelector('[data-tab=items].on')");
-      await chrome.click("document.querySelector('[data-tab=roadmap]')"); await chrome.stable("document.querySelector('#roadmap .milestone-item[role=button]:not([data-board])').dispatchEvent(new KeyboardEvent('keydown', {key:'Enter',bubbles:true}))");
+      await chrome.click("document.querySelector('[data-tab=roadmap]')");
+      const keyboardRow = "document.querySelector('#roadmap .milestone-item[role=button]:not([data-board])')";
+      if (await chrome.stable(keyboardRow + ".getAttribute('aria-expanded')") === 'true') await chrome.click(keyboardRow);
+      await chrome.stable(keyboardRow + ".dispatchEvent(new KeyboardEvent('keydown', {key:'Enter',bubbles:true}))");
+      await chrome.waitFor(keyboardRow + ".getAttribute('aria-expanded') === 'true' && view.tab === 'roadmap'");
+      await openRoadmapItem(chrome, '#2');
       await chrome.waitFor("document.querySelector('#detail h2')?.textContent.includes('Local title links to #1') && document.querySelector('[data-tab=items].on')");
     }
   } finally {
@@ -175,7 +202,7 @@ test('the roadmap reads every item as the Items tab does, opens each one, anothe
       await proofShot(chrome, 'roadmap', width);
 
       // An item opens on the Items tab; Back shows the Roadmap at its address again, Forward the item.
-      await press(chrome, roadmapRow('#3'));
+      await openRoadmapItem(chrome, '#3');
       await pressedInto(chrome, `${showing('items', '/roadmap-demo/items/3')} && document.querySelector('#detail h2')?.innerText.includes('Session timeout banner')`);
       assert.equal(await chrome.stable('location.search'), view.link.search, `${width}: the address keeps the rest of itself`);
       await travel(chrome, -1);
@@ -187,7 +214,7 @@ test('the roadmap reads every item as the Items tab does, opens each one, anothe
     }
 
     // Another repo's item opens on its own board, and Back and Forward move between the two boards.
-    await press(chrome, roadmapRow('beacon#1'));
+    await openRoadmapItem(chrome, 'beacon#1');
     await chrome.waitFor(`document.querySelector('#proj-name').textContent === 'beacon' && ${showing('items', '/beacon/items/1')} && document.querySelector('#detail h2')?.innerText.includes('Billing webhook retries')`);
     const there = JSON.parse(await chrome.stable(`JSON.stringify((() => { const chip = document.querySelector('#detail .meta .chip'); return {
       id: document.querySelector('#detail h2 span').innerText, label: chip.innerText, chip: getComputedStyle(chip).color + ' on ' + getComputedStyle(chip).backgroundColor,
@@ -204,7 +231,7 @@ test('the roadmap reads every item as the Items tab does, opens each one, anothe
     // Each of this board's rows opens its item on the Items tab, which gives it the same word and
     // colours, its list dot included; a withdrawn item is left out of the list while browsing.
     for (const row of seen.cards.flatMap((card) => card.rows).filter((each) => each.id.startsWith('#'))) {
-      await press(chrome, roadmapRow(row.id));
+      await openRoadmapItem(chrome, row.id);
       await chrome.waitFor(`${showing('items', '/roadmap-demo/items/' + row.id.slice(1))} && document.querySelector('#detail h2 span')?.innerText === ${JSON.stringify(row.id)}`);
       const here = JSON.parse(await chrome.stable(`JSON.stringify((() => {
         const chip = document.querySelector('#detail .meta .chip'), dot = document.querySelector('#chain [data-item="${row.id.slice(1)}"] .dot');
@@ -418,7 +445,8 @@ test('the roadmap leads with the next release and folds shipped ones [N26]', { t
     await click('#roadmap .shipped-one[data-key="m:0.2"] > .milestone-head');
     r = await read();
     assert.deepEqual(r.parts.find((part) => part.key === 'shipped').shipped.find((one) => one.key === 'm:0.2').rows, ['#2'], 'a shipped release opens to its verified items');
-    await click('#roadmap .shipped-one[data-key="m:0.2"] .milestone-item[data-go="item:2"]');
+    await click('#roadmap .shipped-one[data-key="m:0.2"] .milestone-item');
+    await click('#roadmap .shipped-one[data-key="m:0.2"] .milestone-why a[data-go="item:2"]');
     await chrome.waitFor("view.tab === 'items' && document.querySelector('#detail h2')?.textContent.includes('Second page')");
 
     // The parts stay as the person left them when the board redraws: close the next release, then change the board.

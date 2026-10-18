@@ -6,7 +6,7 @@
  */
 
 /**
- * Why a roadmap item cannot move on its own, or null when nothing blocks it.
+ * A compact detail for every roadmap item, with an optional mark when it cannot move on its own.
  *
  * The page embeds this function's source, so it reads nothing outside itself, its own escaping
  * included; the page passes in the item lookup, agent names and item addresses it already uses.
@@ -16,14 +16,14 @@
  * @returns {{label: string, dot: string, detail: string}|null} The dot, its accessible label and the unfolded detail.
  */
 export function roadmapBlock(item, context = {}) {
-  if (!item || item.status !== 'open') return null;
+  if (!item) return null;
   const escape = (text) => String(text).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
   const statusOf = (id) => (context.items || []).find((other) => other.id === id)?.status || 'not on this board';
   const waits = (item.blockedBy || []).map((id) => ({ id, status: statusOf(id) }));
   const hold = (context.holds || []).find((h) => h.hold_lane === item.lane) || null;
-  if (!waits.length && !hold) return null;
+  const blocked = item.status === 'open' && Boolean(waits.length || hold);
   const parts = waits.map((w) => '#' + w.id + ' (' + w.status + ')');
-  const label = 'Blocked: ' + [parts.length ? 'waits on ' + parts.join(', ') : '', hold ? 'lane ' + item.lane + ' held' : ''].filter(Boolean).join('; ');
+  const label = !blocked ? '' : 'Blocked: ' + [parts.length ? 'waits on ' + parts.join(', ') : '', hold ? 'lane ' + item.lane + ' held' : ''].filter(Boolean).join('; ');
   const name = context.name || ((id) => id);
   // Only a live claim holds an item; a sent-back item's past builder holds nothing (#605 review).
   const holder = item.claim?.by || null;
@@ -38,7 +38,7 @@ export function roadmapBlock(item, context = {}) {
   ].join('');
   return {
     label,
-    dot: '<span class="block-dot" role="img" aria-label="' + escape(label) + '" title="' + escape(label) + '"></span>',
+    dot: !blocked ? '' : '<span class="block-dot" role="img" aria-label="' + escape(label) + '" title="' + escape(label) + '"></span>',
     detail: '<dl class="kv">' + rows + '</dl><a class="ref" href="' + escape(address(item.id)) + '" data-go="item:' + item.id + '"' + (context.board ? ' data-board="' + escape(context.board) + '"' : '') + '>Open #' + item.id + ' in Items</a>',
   };
 }
