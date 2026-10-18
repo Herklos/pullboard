@@ -1,7 +1,18 @@
 /** A checkout belongs to one local agent session; bindings never enter the shared board [B3,B7]. */
 import { createHash } from 'node:crypto';
-import { existsSync, readdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import {
+  existsSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  writeFileSync,
+} from 'node:fs';
+import {
+  dirname,
+  join,
+  resolve,
+} from 'node:path';
 import { takeResource } from './resources.js';
 import { Refused } from './refused.js';
 

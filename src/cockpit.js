@@ -22,6 +22,7 @@ import {
 } from './view/hosted.js';
 import { staleChip } from './view/stale.js';
 import { roadmapBlock } from './view/roadmap-block.js';
+import { applyStateDelta } from './api-http.js';
 
 /** The CLI's default phrases, ordered by depth for the existing prose inventory guard. */
 export const PULLBOARD_COMMANDS = Object.freeze(commandPhrases().sort((left, right) => right.split(' ').length - left.split(' ').length));
@@ -1533,10 +1534,9 @@ async function boardState(root, mark, fresh = null) {
       return kept.row;
     }
     try {
-      const query = board.root === root && cursor !== null ? '?seen=' + encodeURIComponent(cursor) : '';
-      const reply = await api('/api/v1/boards/' + encodeURIComponent(board.id) + '/state' + query);
-      states.set(board.root, reply.state);
-      return boardSummary(board, reply.state);
+      const state = await boardRead(board, board.root === root ? cursor : null);
+      states.set(board.root, state);
+      return boardSummary(board, state);
     } catch (error) {
       return { ...board, ok: false, error: String(error.message || error) };
     }
@@ -1548,6 +1548,32 @@ async function boardState(root, mark, fresh = null) {
     projects, groups, project: states.get(root) || null,
     group: group ? { name: group.name, repos: group.repos.filter((repo) => repo.ok).map((repo) => ({ root: repo.root, name: repo.name, board: states.get(repo.root) })) } : null,
   };
+}
+
+// What each local board last sent this page, {state, sequence, version}: the base its next read asks to extend.
+const sentStates = new Map();
+// #552's delta applier, embedded as the server's own source, so the page applies a delta and recomputes nothing.
+const applyStateDelta = (${applyStateDelta.toString()});
+
+/**
+ * Read one board's summary state. A local board the page read before asks only what changed since the state it holds
+ * (#552) and applies that delta as sent; it loads a fresh snapshot only when the answer resets, as when the server no
+ * longer keeps that base or the format changed (#555). Relay boards and snapshots have no deltas.
+ */
+async function boardRead(board, seen) {
+  const path = '/api/v1/boards/' + encodeURIComponent(board.id) + '/state', mark = seen === null ? '' : 'seen=' + encodeURIComponent(seen);
+  const local = !snapshot && localBoardIds.has(board.id), held = local ? sentStates.get(board.id) : null;
+  if (held && Number.isSafeInteger(held.sequence)) {
+    const reply = await api(path + '?since=' + held.sequence + (mark && '&' + mark) + (held.version === undefined ? '' : '&eventLogVersion=' + encodeURIComponent(held.version)));
+    if (reply.delta) {
+      const state = applyStateDelta(held.state, reply.delta);
+      sentStates.set(board.id, { state, sequence: reply.sequence, version: reply.eventLogVersion });
+      return state;
+    }
+  }
+  const reply = await api(path + (mark && '?' + mark));
+  if (local) sentStates.set(board.id, { state: reply.state, sequence: reply.state.sequence, version: reply.eventLogVersion });
+  return reply.state;
 }
 
 /** Whether a board state already carries every item's detail, as exports and event replays do. */
@@ -1922,8 +1948,8 @@ async function listen(entry) {
 
 /**
  * The one catch-up function: bring the page up to date after the events that arrived, one read at a time, by reading
- * the state of each board they changed again. A hidden page catches up when it is shown. #555 switches this read to
- * #552's since=N delta.
+ * what changed in each board they named since the state it holds (#555, through boardRead). A hidden page catches up
+ * when it is shown.
  */
 function catchUp() {
   if (document.hidden) { catchWhenShown = true; return; }
@@ -2813,12 +2839,13 @@ function render() {
     const text = row ? declined ? '<s>' + linked(row.standardText || row.text, titles) + '</s>' : linked(row.text, titles) : '';
     const source = kind === 'doctrine' && row ? '<span class="chip" title="' + esc(ruleSourceTitle(row)) + '">' + esc(ruleSource(row)) + '</span>' : '';
     const reason = (declined || kind === 'spec' && row?.status === 'wont') && row?.reason ? '<dt>reason</dt><dd>' + linked(row.reason, titles) + '</dd>' : '';
-    const home = kind === 'doctrine' && row && row.origin === 'standard' ? 'Standard rules come with Pullboard as defaults to review; override or decline one in DOCTRINE.md.' : 'Rows change in ' + (kind === 'spec' ? 'SPEC.md' : 'DOCTRINE.md') + ', and only you approve them.';
+    // Only a standard rule gets a note; who approves rows is said once elsewhere, not in every detail (#822).
+    const home = kind === 'doctrine' && row && row.origin === 'standard' ? 'Standard rules come with Pullboard as defaults to review; override or decline one in DOCTRINE.md.' : '';
     const rowStatus = row?.stage || row?.status;
     const rowDecisionActions = !snapshot && (!readOnly || requests) && row && undecided(row) && (kind === 'spec' || row.origin !== 'standard')
       ? '<div class="spec-decision-actions detail-decision-actions"><button class="approve-row" data-row-decision="approve" data-row-kind="' + kind + '" data-row-id="' + esc(row.id) + '" title="Approve (A, from the list)" type="button">Approve <kbd>A</kbd></button><button class="decline-row" data-row-decision="decline" data-row-kind="' + kind + '" data-row-id="' + esc(row.id) + '" title="Decline (D, from the list)" type="button">Decline <kbd>D</kbd></button></div>'
       : '';
-    $(kind + '-detail').innerHTML = row ? '<div class="stack tight"><h2><span>' + esc(row.id) + '</span>' + text + '</h2><div class="meta"><span class="chip ' + tone(row.status) + '">' + esc(rowStatus) + '</span>' + (row.tier ? '<span class="chip">' + esc(row.tier) + '</span>' : '') + source + '</div>' + rowDecisionActions + (kind === 'spec' && view.specFeedback?.kind === kind && view.specFeedback.root === view.root && view.specFeedback.from === 'detail' && view.specFeedback.id === row.id ? specFeedback(view.specFeedback) : '') + '<dl class="kv"><dt>section</dt><dd>' + esc(row.section) + '</dd>' + reason + (row.gate ? '<dt>gate</dt><dd>' + esc(row.gate) + '</dd>' : '') + (row.serves && row.serves.length ? '<dt>serves</dt><dd>' + esc(row.serves.join(', ')) + '</dd>' : '') + '</dl><div><h3>Items that cite it</h3>' + (citing.length ? '<div class="links">' + citing.map((i) => '<div class="links-item" data-item="' + i.id + '"><span>#' + i.id + ' ' + rich(i.title, titles) + '</span></div>').join('') + '</div>' : '<div class="muted">None yet.</div>') + '</div><div class="muted">' + home + '</div></div>' : '<div class="empty">' + (view.tab === kind && view.addressDetail !== null ? 'No ' + (kind === 'spec' ? 'Spec' : 'Doctrine') + ' row ' + esc(view.addressDetail) + ' exists here.' : 'Pick a row to see it, and the items that cite it.') + '</div>';
+    $(kind + '-detail').innerHTML = row ? '<div class="stack tight"><h2><span>' + esc(row.id) + '</span>' + text + '</h2><div class="meta"><span class="chip ' + tone(row.status) + '">' + esc(rowStatus) + '</span>' + (row.tier ? '<span class="chip">' + esc(row.tier) + '</span>' : '') + source + '</div>' + rowDecisionActions + (kind === 'spec' && view.specFeedback?.kind === kind && view.specFeedback.root === view.root && view.specFeedback.from === 'detail' && view.specFeedback.id === row.id ? specFeedback(view.specFeedback) : '') + '<dl class="kv"><dt>section</dt><dd>' + esc(row.section) + '</dd>' + reason + (row.gate ? '<dt>gate</dt><dd>' + esc(row.gate) + '</dd>' : '') + (row.serves && row.serves.length ? '<dt>serves</dt><dd>' + esc(row.serves.join(', ')) + '</dd>' : '') + '</dl><div><h3>Items that cite it</h3>' + (citing.length ? '<div class="links">' + citing.map((i) => '<div class="links-item" data-item="' + i.id + '"><span>#' + i.id + ' ' + rich(i.title, titles) + '</span></div>').join('') + '</div>' : '<div class="muted">None yet.</div>') + '</div>' + (home ? '<div class="muted">' + home + '</div>' : '') + '</div>' : '<div class="empty">' + (view.tab === kind && view.addressDetail !== null ? 'No ' + (kind === 'spec' ? 'Spec' : 'Doctrine') + ' row ' + esc(view.addressDetail) + ' exists here.' : 'Pick a row to see it, and the items that cite it.') + '</div>';
   }
 
   if (keep('pb.flow') !== 'hidden') $('flow').innerHTML = flowSvg(p);

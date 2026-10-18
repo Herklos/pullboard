@@ -6,10 +6,32 @@
  * the file read-only and never migrates, syncs or resolves another registered board.
  */
 import { randomUUID } from 'node:crypto';
-import { closeSync, existsSync, fsyncSync, openSync, readSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import {
+  closeSync,
+  existsSync,
+  fsyncSync,
+  openSync,
+  readSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from 'node:path';
 import { setTimeout as pause } from 'node:timers/promises';
-import { milestones, openBoardReadOnly } from './board.js';
+import {
+  milestones,
+  openBoardReadOnly,
+} from './board.js';
 import { healthReport } from './health.js';
 import { secretsIn } from './hooks.js';
 import { Refused } from './refused.js';

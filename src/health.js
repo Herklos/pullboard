@@ -7,9 +7,21 @@
  * every checkout alone: merge-tree writes a tree object and never an index or a working tree.
  */
 import { existsSync } from 'node:fs';
-import { COORDINATOR, durationMs } from './config.js';
-import { mainCheckout, tryGit } from './git.js';
-import { boardBusyError, openBoardReadOnly, PERSON, roadmap, unverifiedSubmissions } from './board.js';
+import {
+  COORDINATOR,
+  durationMs,
+} from './config.js';
+import {
+  mainCheckout,
+  tryGit,
+} from './git.js';
+import {
+  boardBusyError,
+  openBoardReadOnly,
+  PERSON,
+  roadmap,
+  unverifiedSubmissions,
+} from './board.js';
 import { localReleaseRank } from './release-queue.js';
 import { trunkRef } from './trusted-policy.js';
 

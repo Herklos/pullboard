@@ -6,7 +6,10 @@
  * approves or applies a row.
  */
 import { Refused } from './refused.js';
-import { causeProblem, rigorReport } from './rigor.js';
+import {
+  causeProblem,
+  rigorReport,
+} from './rigor.js';
 import { draftRow } from './spec-draft.js';
 import { proveCauseCheck } from './rigor-proof.js';
 

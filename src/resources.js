@@ -1,15 +1,39 @@
 /** Machine and repository queues persist leases; landings first, then arrival order, or by class (landing, review, submit, other) aging up over time where the machine opts in [Q1,Q2,Q3]. */
-import { mkdirSync, realpathSync } from 'node:fs';
-import { execFile, execFileSync } from 'node:child_process';
-import { readFile, readlink } from 'node:fs/promises';
-import { basename, dirname, join, resolve } from 'node:path';
+import {
+  mkdirSync,
+  realpathSync,
+} from 'node:fs';
+import {
+  execFile,
+  execFileSync,
+} from 'node:child_process';
+import {
+  readFile,
+  readlink,
+} from 'node:fs/promises';
+import {
+  basename,
+  dirname,
+  join,
+  resolve,
+} from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { repoInfo } from './git.js';
-import { machineHome, withMachineHomeWrite } from './machine-home.js';
+import {
+  machineHome,
+  withMachineHomeWrite,
+} from './machine-home.js';
 import { Refused } from './refused.js';
 import { gateQueueSettings } from './queue-settings.js';
-import { ARRIVAL_ORDER, classedMarker, classOrderInEffect, orderedWaiters, queueClass, releaseOrderInEffect } from './queue-order.js';
+import {
+  ARRIVAL_ORDER,
+  classedMarker,
+  classOrderInEffect,
+  orderedWaiters,
+  queueClass,
+  releaseOrderInEffect,
+} from './queue-order.js';
 export { QUEUE_CLASSES, QUEUE_AGE_MS, queueClass } from './queue-order.js';
 
 const LEASE_MS = 20_000;
