@@ -22,8 +22,14 @@ function project(t) {
   return { root, env, git, run };
 }
 
-test('init ends with a working staging line for exactly its own writes [I1,I2,D1,D2]', (t) => {
+test('init ends with one confirmation command for its own writes [I1,I2,D1,D2]', (t) => {
   const box = project(t);
+  box.git('config', 'user.name', 'Newcomer Fixture');
+  box.git('config', 'user.email', 'newcomer@example.invalid');
+  const bin = join(box.root, 'fixture-bin');
+  mkdirSync(bin);
+  symlinkSync(BIN, join(bin, 'pullboard'));
+  box.env.PATH = bin + ':' + process.env.PATH;
   writeFileSync(join(box.root, '.env.local'), 'LOCAL=1\n');
   writeFileSync(join(box.root, 'notes.txt'), 'keep this out of the initial commit\n');
   writeFileSync(join(box.root, '.gitignore'), '.claude/\n');
@@ -39,28 +45,23 @@ test('init ends with a working staging line for exactly its own writes [I1,I2,D1
   const label = "To commit Pullboard's files: ";
   assert.ok(stagingLine.startsWith(label), `expected the final line to start with ${label}`);
   const command = stagingLine.slice(label.length);
-  assert.match(command, /^git add -f -- /);
+  assert.equal(command, 'pullboard init --yes');
   const staged = spawnSync('sh', ['-c', command], { cwd: box.root, env: box.env, encoding: 'utf8' });
   assert.equal(staged.status, 0, staged.stderr);
-  assert.deepEqual(box.git('diff', '--cached', '--name-only').split('\n'), [
-    '.claude/settings.json',
-    '.claude/skills/pullboard-decompose/SKILL.md',
-    '.claude/skills/pullboard-plan/SKILL.md',
-    '.claude/skills/pullboard-signoff/SKILL.md',
-    '.claude/skills/pullboard-spec-review/SKILL.md',
-    '.claude/skills/pullboard-verify/SKILL.md',
-    '.codex/rules/pullboard.rules',
-    '.githooks/commit-msg', '.githooks/pre-merge-commit', '.githooks/pre-push',
-    '.gitignore',
-    'AGENTS.md', 'DOCTRINE.md', 'SPEC.md', 'pullboard.json',
-  ]);
+  const committed = box.git('ls-tree', '-r', '--name-only', 'HEAD').split('\n');
+  for (const file of ['pullboard.json', 'SPEC.md', 'DOCTRINE.md', '.githooks/commit-msg']) assert.ok(committed.includes(file), file);
+  for (const file of ['.env.local', 'notes.txt', '.githooks/pre-commit', '.claude/skills/pullboard-run/SKILL.md', 'fixture-bin/pullboard']) {
+    assert.equal(committed.includes(file), false, `setup never commits the existing ${file}`);
+  }
+  assert.equal(box.git('diff', '--cached', '--name-only'), '', 'the setup-only commit leaves no extra staging behind');
   assert.equal(readFileSync(join(box.root, '.env.local'), 'utf8'), 'LOCAL=1\n');
   assert.equal(readFileSync(join(box.root, '.githooks', 'pre-commit'), 'utf8'), '#!/bin/sh\n# My hook\n');
-  box.git('reset', '-q');
+  const head = box.git('rev-parse', 'HEAD');
   const rerun = box.run('init');
   assert.equal(rerun.status, 0, rerun.stderr);
   const secondStage = rerun.stdout.trimEnd().split('\n').at(-1);
-  assert.doesNotMatch(secondStage, /^git add -f -- /, 'idempotent setup writes and stages nothing on its second run');
+  assert.doesNotMatch(secondStage, /pullboard init --yes/u, 'committed setup needs no second confirmation');
+  assert.equal(box.git('rev-parse', 'HEAD'), head);
   assert.equal(box.git('diff', '--cached', '--name-only'), '');
 });
 

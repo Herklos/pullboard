@@ -83,7 +83,7 @@ function headerProblems(header, rules) {
     const merge = /^merge\b/i.test(header) ? '. For a merge, keep the message git writes, which is exempt: git merge --no-edit' : '';
     return {
       problems: [
-        `write the header as type(scope): subject [ids], like "feat(store): save tasks to a file [G7]" (saw "${header.slice(0, 60)}"); types: ${rules.types.join(', ')}${merge}`,
+        `write the header as type(scope): subject [ids] (saw "${header.slice(0, 60)}"); types: ${rules.types.join(', ')}${merge}`,
       ],
       type: '',
     };
@@ -98,6 +98,15 @@ function headerProblems(header, rules) {
   }
   if (subject.endsWith('.')) problems.push('remove the period at the end of the subject');
   return { problems, type: match[1] };
+}
+
+/** Name usable approved citations, or the real draft-and-approval path when none are available. */
+function citationGuide(spec, type) {
+  const ids = [...new Set(spec.rows.filter(row => row.status === 'approved')
+    .map(row => row.id).filter(id => !idProblems(spec, [id]).length))].slice(0, 2);
+  return ids.length
+    ? `end the header with the spec rows this ${type} serves, like [${ids.join(',')}]; docs, test and chore commits may cite none`
+    : `no approved spec row is available to cite; fenced format examples are not spec rows; run pullboard spec draft "<text>" for this requirement, ask the person to approve the returned id, then cite it in this ${type || 'commit'} header`;
 }
 
 /**
@@ -116,12 +125,12 @@ export function commitMsgProblems(raw, { rules, spec, doctrine = null }) {
   const ids = citedIds(header);
   problems.push(
     ...idProblems(spec, ids, doctrine).map(
-      (problem) => `cite only rows that exist and are live, separated by commas like [G1,G2] (${problem})`,
+      (problem) => `cite only rows that exist and are live, separated by commas (${problem}); ${citationGuide(spec, type)}`,
     ),
   );
   if (type && rules.requireIds.includes(type) && !ids.length) {
     problems.push(
-      `end the header with the spec rows this ${type} serves, like [G1,G2]; docs, test and chore commits may cite none`,
+      citationGuide(spec, type),
     );
   }
   if (second !== undefined && second.trim()) problems.push('leave a blank line after the header');

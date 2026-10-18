@@ -251,7 +251,7 @@ test('[N26] each milestone sums its items by state with an estimate', async t =>
     text: `Choose for #${waiting}, #${waiting}, #${withdrawn}; foreign#${review} and https://example.invalid/#${landing} are outside`,
     evidence: { kind: 'attempt', outcome: 'Needs judgment', item: held, commit: box.commit } });
   const expected = { total: 6, left: 5, landed: 1, landing: 1, review: 1, building: 1, held: 1, waiting: 1,
-    needsYou: [held, waiting], pace: { last6h: 5, last2h: 3 }, estimate: { low: 3.5, high: 6 } };
+    needsYou: [held, waiting], pace: { last6h: 5, last2h: 3, last24h: 7 }, estimate: { low: 3.5, high: 6 }, window: '6h', reason: null };
   assert.deepEqual((await box.run()).milestones[0].summary, expected);
   assert.match(await box.run(false), /^  5 left of 6: 1 landed, 1 landing, 1 in review, 1 building, 1 waiting, 1 held; about 3.5 to 6 h at today's pace\.$/m);
   const direct = milestoneRoadmap(box.repo, box.board, { projects: () => [] })[0];
@@ -268,10 +268,10 @@ test('[N26] each milestone sums its items by state with an estimate', async t =>
   const later = (await box.run()).milestones[0].summary;
   assert.equal(later.building, 0, 'an expired claim becomes waiting');
   assert.equal(later.waiting, 2);
-  assert.deepEqual(later.pace, { last6h: 4, last2h: 0 });
+  assert.deepEqual(later.pace, { last6h: 4, last2h: 0, last24h: 7 });
   assert.deepEqual(later.estimate, { low: 7.5, high: 7.5 }, 'a zero short window uses the positive six-hour rate');
   box.at(now + 6 * HOUR);
-  assert.equal((await box.run()).milestones[0].summary.estimate, null, 'fewer than three recent landings has no estimate');
+  assert.deepEqual((await box.run()).milestones[0].summary.estimate, { low: 17, high: 17 }, 'sparse recent progress falls back to the full day');
   box.at(now);
   store.addMilestone(box.board, { agentId: 'coordinator', name: 'B', items: [] });
   store.shipMilestone(box.board, 'A', { agentId: 'coordinator', commit: box.commit });
@@ -326,4 +326,58 @@ test('[N26] an estimate with equal bounds prints one number', async t => {
   assert.deepEqual((await box.run()).milestones[0].summary.estimate, { low: 2.5, high: 7.5 },
     'JSON retains both different bounds');
   assert.match(await box.run(false), /; about 2\.5 to 7\.5 h at today's pace\./u);
+});
+
+
+test('[N26] a slow day estimates from the last 24 hours', async t => {
+  const box = fixture(t);
+  const now = box.clock.now().getTime();
+  for (const hours of [2.1, 2.5, 3, 3.5, 4, 4.5, 5, 7, 8, 9, 10, 11]) {
+    box.at(now - hours * HOUR);
+    box.item('landed');
+  }
+  box.at(now);
+  const items = Array.from({ length: 3 }, () => box.item('waiting'));
+  store.addMilestone(box.board, { agentId: 'coordinator', name: 'Slow', items });
+  // These are observations of the same real history; no moves are written while changing its query clock.
+  box.at(now + 7 * HOUR);
+  const slow = (await box.run()).milestones[0].summary;
+  assert.deepEqual(slow.estimate, { low: 6, high: 6 }, 'a slow day uses the positive full-day rate');
+  assert.equal(slow.window, '24h');
+  assert.equal(slow.reason, null);
+  assert.deepEqual(slow.pace, { last6h: 0, last2h: 0, last24h: 12 });
+  assert.match(await box.run(false), /; about 6 h at the last day's pace\./u);
+
+  box.at(now);
+  const recent = (await box.run()).milestones[0].summary;
+  assert.deepEqual(recent.estimate, { low: 2.5, high: 2.5 });
+  assert.equal(recent.window, '6h');
+  assert.deepEqual(recent.pace, { last6h: 7, last2h: 0, last24h: 12 });
+  assert.match(await box.run(false), /; about 2\.5 h at today's pace\./u);
+  box.at(now + 2.5 * HOUR);
+  assert.equal((await box.run()).milestones[0].summary.window, '6h', 'three recent landings still prefer the six-hour rate');
+  box.at(now + 3 * HOUR);
+  const justSlow = (await box.run()).milestones[0].summary;
+  assert.equal(justSlow.pace.last6h, 2);
+  assert.equal(justSlow.window, '24h', 'two recent landings use the full-day fallback');
+
+  box.at(now + 20.5 * HOUR);
+  const threshold = (await box.run()).milestones[0].summary;
+  assert.equal(threshold.pace.last24h, 3, 'the exact24h boundary is outside the window');
+  assert.deepEqual(threshold.estimate, { low: 24, high: 24 }, 'three full-day landings are enough');
+  assert.equal(threshold.window, '24h');
+  box.at(now + 21 * HOUR);
+  const sparse = (await box.run()).milestones[0].summary;
+  assert.equal(sparse.pace.last24h, 2);
+  assert.equal(sparse.estimate, null);
+  assert.equal(sparse.window, null);
+  assert.equal(sparse.reason, 'few-landings');
+  assert.match(await box.run(false), /; too few landings yet to estimate\./u);
+
+  store.addMilestone(box.board, { agentId: 'coordinator', name: 'Next', items: [] });
+  store.shipMilestone(box.board, 'Slow', { agentId: 'coordinator', commit: box.commit });
+  const shipped = (await box.run()).milestones[0].summary;
+  assert.deepEqual({ estimate: shipped.estimate, window: shipped.window, reason: shipped.reason },
+    { estimate: null, window: null, reason: null }, 'shipping is not mislabeled as sparse history');
+  assert.doesNotMatch((await box.run(false)).split('Next:')[0], /left of|too few landings|about .* h/u);
 });

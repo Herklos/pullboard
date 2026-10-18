@@ -10,7 +10,7 @@ Nothing ships until a second agent verifies it.
 
 Set up
   pullboard tour                        see it work: a reject and its rework, scripted, in thirty seconds
-  pullboard init [--model <name>] [--blueprint <name or file>]... [--no-permissions]  config, SPEC.md, agent instructions, git hooks, board and project agent rules; optional coordinator model
+  pullboard init [--model <name>] [--blueprint <name or file>]... [--no-permissions] [--yes]  setup and project rules; --yes commits only setup's own files with your Git identity
   pullboard worktree <lane> --model <name> [--route light] [--family <name>]   make and join a worktree for a new agent
                                         pullboard.json worktrees: inside or beside; init defaults to inside
   pullboard join <lane> --model <name> [--route light] [--family <name>]       register this worktree as an agent
