@@ -21,6 +21,10 @@ import {
   VERDICT_REVIEW_ENGINE,
   MILESTONE_RANK_ENGINE,
 } from './machine.js';
+import {
+  MILESTONE_SHIP_ENGINE,
+  canonicalMilestoneTarget,
+} from './milestones.js';
 import { Refused } from './refused.js';
 import {
   requestMoveProblem,
@@ -43,16 +47,17 @@ export const ENGINE_OPERATIONS = Object.freeze([
   'register', 'ensureCoordinator', 'addItem', 'editItem', 'completeCheckBaseline', 'escalate', 'recordAttempt',
   'claim', 'release', 'submit', 'reserveReview', 'reserveNextReview', 'verify', 'merged',
   'withdraw', 'refreeze', 'reopen', 'shout', 'passDecision', 'answerDecision', 'holdLane', 'releaseLane', 'holdItem', 'releaseItemHold',
-  'addMilestone', 'editMilestoneItems', 'orderMilestoneItems', 'moveMilestone', 'editMilestone', 'removeMilestone',
+  'addMilestone', 'editMilestoneItems', 'orderMilestoneItems', 'moveMilestone', 'editMilestone', 'removeMilestone', 'shipMilestone',
   'recordRowDecisions', 'applyRowDecisions', 'appendFact',
   'recordLandingBatch', 'recordLandingWaiver', 'recordLandingFlake', 'finishLandingBatch', 'acceptCheck',
   'recordHealthFindings',
 ]);
 
 /** Engine version at which each ordered operation first has stable replay semantics. */
-const OPERATION_ENGINE = Object.freeze({ orderMilestoneItems: MILESTONE_RANK_ENGINE, reopen: 8, recordLandingBatch: 8, recordLandingWaiver: 8, recordLandingFlake: 8, finishLandingBatch: 8, acceptCheck: CHECK_ACCEPT_ENGINE });
+const OPERATION_ENGINE = Object.freeze({ orderMilestoneItems: MILESTONE_RANK_ENGINE, reopen: 8, recordLandingBatch: 8, recordLandingWaiver: 8, recordLandingFlake: 8, finishLandingBatch: 8, acceptCheck: CHECK_ACCEPT_ENGINE,
+  shipMilestone: MILESTONE_SHIP_ENGINE });
 
-/** Dependency edits, causes, sealed reviews and submission proofs retain distinct recorded engine meanings. */
+/** Dependency edits, causes, sealed reviews, submission proofs, health observations and milestone targets retain distinct recorded engine meanings. */
 function minimumOperationEngine(operation, args, board) {
   if (operation === 'recordHealthFindings') return HEALTH_SENTINEL_ENGINE;
   const options = args[1];
@@ -71,6 +76,7 @@ function minimumOperationEngine(operation, args, board) {
   if (['verify', 'reopen', 'appendFact'].includes(operation) && (given('cause') || given('neverAgain') || given('asPerson'))) return CAUSE_ENGINE;
   if (carriesImplies(operation, args)) return IMPLIES_ENGINE;
   if (carriesBarReason(operation, args)) return BAR_ENGINE;
+  if (operation === 'editMilestone' && options && Object.hasOwn(options, 'target') && options.target !== undefined) return MILESTONE_SHIP_ENGINE;
   return operation === 'editItem' && options && Object.hasOwn(options, 'after') && options.after !== undefined
     ? 10 : OPERATION_ENGINE[operation] ?? 1;
 }
@@ -135,6 +141,8 @@ export function prepareEngineMove(board, operation, args, { id = randomUUID(), a
       options.freezeError = error ?? null;
     }
   }
+  // A target is fixed to one instant here, so replicas in other time zones read the same one.
+  if (operation === 'editMilestone' && values[1] && 'target' in values[1]) values[1].target = canonicalMilestoneTarget(values[1].target);
   const move = { version: 1, engine: ENGINE_VERSION, id, operation, args: values, ...(actor === undefined ? {} : { actor }) };
   // JSON is the wire format: optional undefined fields become absent on every replica alike.
   return JSON.parse(JSON.stringify(move));
