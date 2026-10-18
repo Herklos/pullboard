@@ -14,7 +14,7 @@ The default size follows the measured 605-item board shape and scales its status
 The generated board, home, machine state and browser profile are temporary after a successful run. Use `--keep` to retain the generated board for inspection; local view keys are kept in process memory and are not included in output. A failed run retains its private board, browser profile and failure summary for diagnosis.
 */
 /** Measure each frozen cockpit action on a generated board in an isolated machine and browser profile. */
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import { parseArgs } from 'node:util';
@@ -26,6 +26,7 @@ import * as resources from '../../../src/resources.js';
 import { findChromeExecutable, startChrome } from '../../chrome-fixture.js';
 import { press, stableChrome } from '../stable.js';
 import { generateStressBoard, removeStressBoard } from './generate.mjs';
+import { runFixtureChild, runFixtureGit } from '../../fixture-child.js';
 
 const ROOT = resolve(import.meta.dirname, '../../..');
 const BIN = join(ROOT, 'bin', 'pullboard.js');
@@ -41,6 +42,25 @@ const VIEWER_ACTIONS = [
   ['tab:roadmap', 'roadmap', '#roadmap-list > [data-key] > .milestone-head'],
   ['tab:items', 'items', '#chain .row'],
 ];
+
+/** Validate the number of real projects before allocating their private fixtures. */
+function projectCount(value) {
+  if (!Number.isSafeInteger(value) || value < 1) throw new RangeError('projects must be a positive integer');
+  return value;
+}
+
+/** Initialize lightweight additional boards in the stress fixture's isolated home through the CLI. */
+function registerHarnessProjects(board, projects) {
+  for (let index = 1; index < projects; index += 1) {
+    const root = join(board.workspace, 'projects', `project-${index + 1}`);
+    mkdirSync(root, { recursive: true });
+    const git = runFixtureGit(['init', '-q', '-b', 'main'], { cwd: root, env: board.env, encoding: 'utf8' });
+    if (git.status !== 0) throw new Error(git.failure ?? git.stderr);
+    const initialized = runFixtureChild(process.execPath, [BIN, 'init', '--model', 'Stress fixture'],
+      { cwd: root, env: board.env, encoding: 'utf8' });
+    if (initialized.status !== 0) throw new Error(initialized.failure ?? initialized.stderr);
+  }
+}
 
 /** Hold the real shared browser pool for fixture setup, Chrome actions and teardown. */
 export async function withPerfSlot(action) {
@@ -393,7 +413,8 @@ async function beginAction(chrome, name, eventType) {
 }
 
 /** Capture one run's first load, six tabs, two item opens, search and live idle interval. */
-async function measureRun(board, runIndex, executable, idleMs, liveEveryMs) {
+async function measureRun(board, runIndex, executable, idleMs, liveEveryMs, projects) {
+  const measuredRoot = realpathSync(board.root);
   const profile = join(board.workspace, `chrome-${runIndex + 1}`);
   mkdirSync(profile, { recursive: true, mode: 0o700 });
   let view = null;
@@ -418,7 +439,31 @@ async function measureRun(board, runIndex, executable, idleMs, liveEveryMs) {
     const browserVersion = await chrome.send('Browser.getVersion', {}, 'pin the isolated browser runtime', ACTION_TIMEOUT_MS);
     await chrome.navigate(view.link.href);
     actions.push(await waitPaintedAndStable(chrome, network, 'firstLoad', '#chain .row',
-      `document.readyState === 'complete' && !document.body.classList.contains('loading')`, true));
+      `document.readyState === 'complete' && !document.body.classList.contains('loading') && view.root === ${JSON.stringify(measuredRoot)}`, true));
+
+    const listed = JSON.parse(await chrome.stable(`JSON.stringify([...document.querySelectorAll('#proj-list .repo[data-root]')]
+      .map(node => ({ root: node.dataset.root, name: node.querySelector('.pname')?.textContent })))`));
+    if (listed.length !== projects || listed.some(project => typeof project.name !== 'string')) {
+      throw new Error(`the view listed ${listed.length} projects; expected ${projects} initialized boards`);
+    }
+    actions.projectNames = listed.map(project => project.name);
+    if (projects > 1) {
+      const other = listed.find(project => project.root !== measuredRoot);
+      if (!other) throw new Error('the project-switch sample needs another registered board');
+      if (await chrome.stable("getComputedStyle(document.querySelector('#side .side-body')).display === 'none'")) {
+        await press(chrome, "document.querySelector('#proj-switch')");
+      }
+      /** Find the listed project without interpolating fixture paths into a CSS selector. */
+      const row = root => `[...document.querySelectorAll('#proj-list .repo[data-root]')].find(node => node.dataset.root === ${JSON.stringify(root)})`;
+      await beginAction(chrome, 'switchProjectSetup', 'mousedown');
+      await press(chrome, row(other.root));
+      await waitPaintedAndStable(chrome, network, 'switchProjectSetup', '#status-board',
+        `view.root === ${JSON.stringify(other.root)} && data?.root === ${JSON.stringify(other.root)}`);
+      await beginAction(chrome, 'switchProject', 'mousedown');
+      await press(chrome, row(measuredRoot));
+      actions.push(await waitPaintedAndStable(chrome, network, 'switchProject', '#chain .row',
+        `view.root === ${JSON.stringify(measuredRoot)} && data?.root === ${JSON.stringify(measuredRoot)}`));
+    }
 
     for (const [name, tab, target] of VIEWER_ACTIONS) {
       await beginAction(chrome, name, 'mousedown');
@@ -583,17 +628,20 @@ function renderTable(actions) {
 
 /** Run the user-facing harness with an isolated generated board and headless real Chrome. */
 async function runPerfHarnessInSlot({ board, runs = 1, idleMs = 30_000, liveEveryMs = 5_000,
-  executable = findChromeExecutable() } = {}, lease) {
+  executable = findChromeExecutable(), projects = 1 } = {}, lease) {
   if (!board?.workspace || !board?.boardFile) throw new TypeError('board must come from generateStressBoard');
   if (!Number.isSafeInteger(runs) || runs < 1 || runs > 20) throw new RangeError('runs must be an integer from 1 through 20');
   if (!Number.isSafeInteger(idleMs) || idleMs < 0 || idleMs > 300_000) throw new RangeError('idleMs must be an integer from 0 through 300000');
   if (!Number.isSafeInteger(liveEveryMs) || liveEveryMs < 1_000 || liveEveryMs > 60_000) throw new RangeError('liveEveryMs must be an integer from 1000 through 60000');
   if (!executable) throw new Error('Chrome was not found; install Chrome or set PULLBOARD_CHROME.');
+  projectCount(projects);
+  registerHarnessProjects(board, projects);
   const capture = async (lease) => {
     const captured = [];
-    for (let index = 0; index < runs; index += 1) captured.push(await measureRun(board, index, executable, idleMs, liveEveryMs));
+    for (let index = 0; index < runs; index += 1) captured.push(await measureRun(board, index, executable, idleMs, liveEveryMs, projects));
     const actions = summarize(captured);
     const report = { version: 1, seed: board.seed, size: board.size, digest: board.digest,
+      projects: captured[0].projectNames.length, projectNames: captured[0].projectNames,
       gate: { browser: lease.browser === true, waitMs: lease.waitMs },
       boardShape: { statuses: board.statusTotals, lanes: board.laneTotals, agents: board.agentCount,
         itemEvents: board.itemEvents, shouts: board.shoutCount, milestones: board.milestoneCount,
@@ -616,20 +664,22 @@ export async function runPerfHarness(options = {}) {
 async function main(argv) {
   const parsed = parseArgs({ args: argv, options: {
     seed: { type: 'string', default: 'pullboard-perf-606' }, size: { type: 'string', default: '3000' },
+    projects: { type: 'string', default: '1' },
     runs: { type: 'string', default: '5' }, idle: { type: 'string', default: '30' }, 'live-every': { type: 'string', default: '5' },
     keep: { type: 'boolean', default: false }, help: { type: 'boolean', default: false },
   } });
   if (parsed.values.help) {
-    process.stdout.write('Usage: node test/cockpit/perf/run.mjs [--seed text] [--size 3000] [--runs 5] [--idle 30] [--live-every 5] [--keep]\n');
+    process.stdout.write('Usage: node test/cockpit/perf/run.mjs [--seed text] [--size 3000] [--projects 1] [--runs 5] [--idle 30] [--live-every 5] [--keep]\n');
     return;
   }
   let board = null;
   let completed = false;
+  const projects = projectCount(Number(parsed.values.projects));
   try {
     await withPerfSlot(async (run) => {
       board = generateStressBoard({ seed: parsed.values.seed, size: Number(parsed.values.size) });
       try {
-        const report = await run({ board, runs: Number(parsed.values.runs), idleMs: Number(parsed.values.idle) * 1_000,
+        const report = await run({ board, projects, runs: Number(parsed.values.runs), idleMs: Number(parsed.values.idle) * 1_000,
           liveEveryMs: Number(parsed.values['live-every']) * 1_000 });
         process.stdout.write(`${JSON.stringify(report, null, 2)}\n\n${report.table}\n`);
         if (parsed.values.keep) process.stdout.write(`Generated board kept at ${board.root}\n`);
