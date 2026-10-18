@@ -202,6 +202,8 @@ Spec
   pullboard spec fit [approve <batch>] | fit edit <row id or #item> keep|adapt|drop|answer [--text "..."] [--reason "why"]  the person's fit batch
   pullboard blueprint save [file] [--name <name>] [--title "<title>"]  write approved rules and answered questions as a blueprint
                                         never items, notes, paths, emails or names; file defaults to <project>.blueprint.json
+  pullboard blueprint starters <name or file>  list a blueprint's starter items and whether each is filed
+                                        a filed starter shows its item id and status; add links each starter it files with a note fact
   pullboard spec signers add [--key <path>] [--by <principal>]  opt into SSH-signed sign-offs
                                         principal defaults to Git user.email; --by overrides it
   pullboard spec approve <ids> | decline <ids> --reason "why"  the person's exact-row decision
@@ -231,7 +233,7 @@ const HELP_NAMES = [
   'serve', 'mcp', 'relay', 'relay recover', 'resume', 'hooks', 'add', 'edit', 'escalate', 'run', 'list', 'doctor', 'health', 'skills', 'show', 'next', 'land',
   'check', 'check accept', 'claim', 'release', 'submit', 'done', 'verify', 'fact', 'why', 'shout', 'answer', 'pass', 'decisions', 'inbox', 'watch', 'export', 'digest', 'import',
   'sweep', 'merged', 'withdraw', 'refreeze', 'reopen', 'hold', 'stats', 'ledger', 'log', 'rigor', 'rigor draft', 'spec', 'spec check', 'spec view',
-  'spec show', 'spec unmet', 'spec signoff', 'spec draft', 'spec signers', 'spec signers add', 'doctrine', 'doctrine check', 'forget', 'prompt', 'gate', 'hook',
+  'spec show', 'spec unmet', 'spec signoff', 'spec draft', 'blueprint starters', 'spec signers', 'spec signers add', 'doctrine', 'doctrine check', 'forget', 'prompt', 'gate', 'hook',
   'hook pre-commit', 'hook pre-merge-commit', 'hook commit-msg', 'hook pre-push', 'view export', 'version', 'lifecycle', 'help',
   'roadmap', 'milestone', 'milestone order', 'runner', 'runner add', 'blueprint', 'blueprint add', 'blueprint fit', 'blueprint save', 'spec fit',
 ];
@@ -271,7 +273,7 @@ const HELP_EXAMPLES = {
   'spec check': 'pullboard spec check',
   doctrine: 'pullboard doctrine check', 'doctrine check': 'pullboard doctrine check',
   'spec view': 'pullboard spec view', 'spec show': 'pullboard spec show G1',
-  'spec draft': 'pullboard spec draft "Describe the first requirement"',
+  'spec draft': 'pullboard spec draft "Describe the first requirement"', 'blueprint starters': 'pullboard blueprint starters web-app',
   'blueprint add': 'pullboard blueprint add web-app', 'blueprint save': 'pullboard blueprint save',
   'blueprint fit': 'pullboard blueprint fit web-app G1 keep --reason "the repository already meets this row"',
   'spec fit': 'pullboard spec fit',
