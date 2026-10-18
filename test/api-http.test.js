@@ -958,7 +958,7 @@ test('[A2, N26] local milestone item status refreshes after an item event', asyn
   const before = await box.call(box.path + '/state');
   assert.equal(builds, 1);
   assert.deepEqual(before.document.state.milestones[0].items[0], {
-    id: itemId, title: 'Roadmap item', status: 'open',
+    id: itemId, title: 'Roadmap item', status: 'open', state: 'open',
   });
 
   const unchanged = await box.call(box.path + '/state');
@@ -970,7 +970,7 @@ test('[A2, N26] local milestone item status refreshes after an item event', asyn
   const after = await box.call(box.path + '/state');
   assert.equal(builds, 2, 'a real item event rebuilds the cached local roadmap');
   assert.deepEqual(after.document.state.milestones[0].items[0], {
-    id: itemId, title: 'Roadmap item', status: 'claimed',
+    id: itemId, title: 'Roadmap item', status: 'claimed', state: 'claimed',
   });
 });
 
