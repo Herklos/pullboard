@@ -1,7 +1,10 @@
 /** Acceptance stays append-only; freshness is derived from the known Git trunk [E8,V8]. */
 import { spawnSync } from 'node:child_process';
 import * as store from './board.js';
-import { cleanGitEnvironment, mainCheckout } from './git.js';
+import {
+  cleanGitEnvironment,
+  mainCheckout,
+} from './git.js';
 import { trunkRef } from './trusted-policy.js';
 import { Refused } from './refused.js';
 import { trunkRevisionReader } from './trunk-revision.js';

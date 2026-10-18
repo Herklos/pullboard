@@ -1,11 +1,29 @@
 /** Detached baseline measurements and durable completion receipts use the ordered board engine [V2,H16]. */
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import {
+  join,
+  resolve,
+} from 'node:path';
 import * as store from './board.js';
 import { checkBaseline } from './check-baseline.js';
-import { codeIsFromMain, gitChildEnv, repoInfo } from './git.js';
-import { relayLinked, relayOperation } from './relay.js';
+import {
+  codeIsFromMain,
+  gitChildEnv,
+  repoInfo,
+} from './git.js';
+import {
+  relayLinked,
+  relayOperation,
+} from './relay.js';
 import { Refused } from './refused.js';
 
 const WORKER = resolve(import.meta.dirname, '../bin/check-baseline.js');

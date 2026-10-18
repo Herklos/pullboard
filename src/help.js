@@ -224,16 +224,6 @@ ${lifecycleHelp()}
 Reject reasons: TEST_FAILURE, BEHAVIOR_MISMATCH, INSUFFICIENT_EVIDENCE, STALE_HEAD, OTHER.
 --json prints one versioned document for every command, and one per line for watch; refusals include their code and next step.`;
 
-const HELP_NAMES = [
-  'tour', 'init', 'worktree', 'join', 'takeover', 'whoami', 'lanes', 'lane', 'lane add', 'status', 'resources', 'settings', 'view', 'view export',
-  'serve', 'mcp', 'relay', 'relay recover', 'resume', 'hooks', 'add', 'edit', 'escalate', 'run', 'list', 'doctor', 'health', 'skills', 'show', 'next', 'land',
-  'check', 'check accept', 'claim', 'release', 'submit', 'done', 'verify', 'fact', 'why', 'shout', 'answer', 'pass', 'decisions', 'inbox', 'watch', 'export', 'digest', 'import',
-  'sweep', 'merged', 'withdraw', 'refreeze', 'reopen', 'hold', 'stats', 'ledger', 'log', 'rigor', 'rigor draft', 'spec', 'spec check', 'spec view',
-  'spec show', 'spec unmet', 'spec signoff', 'spec draft', 'spec signers', 'spec signers add', 'doctrine', 'doctrine check', 'forget', 'prompt', 'gate', 'hook',
-  'hook pre-commit', 'hook pre-merge-commit', 'hook commit-msg', 'hook pre-push', 'view export', 'version', 'lifecycle', 'help',
-  'roadmap', 'milestone', 'milestone order', 'runner', 'runner add', 'blueprint', 'blueprint add', 'blueprint fit', 'blueprint save', 'spec fit',
-];
-
 const HELP_GROUPS = [
   ['Start', ['tour', 'init', 'worktree']],
   ['Work', ['add', 'list', 'claim']],
@@ -259,6 +249,7 @@ const HELP_EXAMPLES = {
   'lane add': 'pullboard lane add web --owns apps/web/', lane: 'pullboard lane add web --owns apps/web/',
   roadmap: 'pullboard roadmap', rigor: 'pullboard rigor', 'rigor draft': 'pullboard rigor draft "refusal:MERGE_LOST" "Merges keep every hunk" --check "node bin/checks/merges.js" --red 0123456 --green 89abcde', milestone: 'pullboard milestone add "0.7.0" --items 12,13',
   'milestone order': 'pullboard milestone order "0.7.0" 13,12',
+  'milestone items': 'pullboard milestone items "0.7.0" --add 12,13',
   runner: 'pullboard runner add studio --slots 2 --browser 1', 'runner add': 'pullboard runner add studio --slots 2 --browser 1',
   edit: 'pullboard edit 12 --brief "Add the upload page"', release: 'pullboard release 12',
   land: 'pullboard land --max 4',
@@ -278,6 +269,8 @@ const HELP_EXAMPLES = {
 };
 
 const HELP_ALIASES = {
+  help: { usage: 'pullboard help', source: null },
+  version: { usage: 'pullboard version', source: null },
   whoami: { usage: 'pullboard whoami', source: 'whoami' },
   lanes: { usage: 'pullboard lanes', source: 'whoami' },
   lane: { usage: 'pullboard lane add <name> --owns <path>[,<path>]', source: 'lane add' },
@@ -333,7 +326,7 @@ const HELP_NOTES = {
 };
 
 /** Build command-specific help rows from the preserved full list so its syntax stays authoritative. */
-function commandHelpRows(fullHelp) {
+function commandHelpRows(fullHelp, commandNames) {
   const lines = fullHelp.split('\n');
   const rows = [];
   for (let index = 0; index < lines.length; index += 1) {
@@ -342,10 +335,18 @@ function commandHelpRows(fullHelp) {
     for (let next = index + 1; next < lines.length && lines[next].startsWith(' ') && lines[next].trim() && !lines[next].startsWith('  pullboard '); next += 1) details.push(lines[next].trim());
     rows.push({ usage: lines[index].trim().slice('pullboard '.length).split(/\s{2,}/, 1)[0].trim(), details });
   }
-  return Object.fromEntries(HELP_NAMES.map((name) => {
+  const phrases = rows.flatMap((row) => usagePhrases(row.usage));
+  const names = [...new Set([
+    ...commandNames,
+    ...Object.keys(HELP_ALIASES),
+    ...phrases.flatMap((name) => [name.split(' ')[0], name]),
+  ])];
+  const expandedRows = rows.flatMap((row) => usageVariants(row.usage)
+    .map((usage) => ({ usage, details: [`pullboard ${usage}`, ...row.details.slice(1)] })));
+  return Object.fromEntries(names.map((name) => {
     const parts = name.split(' ');
     const alias = HELP_ALIASES[name];
-    const matches = alias?.source ? rows.filter((row) => row.usage === alias.source || row.usage.startsWith(`${alias.source} `)) : alias ? [] : rows.filter((row) => {
+    const matches = alias?.source ? rows.filter((row) => row.usage === alias.source || row.usage.startsWith(`${alias.source} `)) : alias ? [] : expandedRows.filter((row) => {
       const tokens = row.usage.split(/\s+/u);
       if (!parts.every((part, index) => tokens[index] === part)) return false;
       const next = tokens[parts.length];
@@ -381,14 +382,19 @@ function overviewHelp(groups, firstRun = false) {
   return lines.join('\n');
 }
 
-/** The one help declaration feeds the overview, command detail, JSON result and unchanged full list. */
-export const HELP = Object.freeze({
-  overview: overviewHelp(HELP_GROUPS),
-  firstRun: overviewHelp(HELP_GROUPS, true),
-  all: ALL_HELP,
-  groups: HELP_GROUPS,
-  commands: Object.freeze(commandHelpRows(ALL_HELP)),
-});
+/** Build help from the actual command declarations, preserving the printed overview and full list. */
+export function buildHelp(commandNames = []) {
+  return Object.freeze({
+    overview: overviewHelp(HELP_GROUPS),
+    firstRun: overviewHelp(HELP_GROUPS, true),
+    all: ALL_HELP,
+    groups: HELP_GROUPS,
+    commands: Object.freeze(commandHelpRows(ALL_HELP, commandNames)),
+  });
+}
+
+/** Browser consumers read pure help declarations without initializing the CLI or server. */
+export const HELP = buildHelp();
 
 /** Replace help placeholders with ordinary values so every command receives a usable example. */
 function exampleFor(name, usage) {
@@ -420,6 +426,23 @@ function expandWords(words) {
   let phrases = [''];
   for (const word of words) phrases = phrases.flatMap(prefix => word.split('|').map(choice => (prefix + ' ' + choice).trim()));
   return phrases.filter(Boolean);
+}
+
+/** Expand printed sibling commands into complete usages, retaining each branch's arguments and flags. */
+function usageVariants(usage) {
+  const branches = usage.split(/\s+\|\s+/u);
+  const shared = branches.length > 1 ? commandWords(branches[0]).slice(0, -1) : [];
+  return branches.flatMap((branch, index) => {
+    const command = [...(index ? shared : []), branch.replace(/^pullboard\s+/u, '')].join(' ');
+    const words = commandWords(command);
+    const tail = command.slice(words.join(' ').length);
+    return expandWords(words).flatMap((prefix) => {
+      const base = prefix + tail;
+      const optional = /^(.*?)\[([^\]]+)\](.*)$/u.exec(base);
+      if (!optional || !optional[2].includes('|') || optional[2].trim().startsWith('-')) return [base];
+      return [base, ...optional[2].split('|').map((choice) => `${optional[1]}${choice}${optional[3]}`)];
+    });
+  });
 }
 
 /** Read one printed usage, including sibling commands and optional literal subcommands. */

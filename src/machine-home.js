@@ -1,6 +1,9 @@
 /** Resolve the per-account directory for machine-wide Pullboard state. */
 import { userInfo } from 'node:os';
-import { join, resolve } from 'node:path';
+import {
+  join,
+  resolve,
+} from 'node:path';
 import { Refused } from './refused.js';
 
 /** Use the OS account home unless a caller explicitly selects a private machine pool. */

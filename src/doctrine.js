@@ -1,8 +1,15 @@
 /** The shared house rules (D1–D4): one packaged standard and a repo's explicit changes to it. */
 import { readFileSync } from 'node:fs';
-import { DOCTRINE_FILE, LEGACY_DOCTRINE_FILE, doctrineFile } from './config.js';
+import {
+  DOCTRINE_FILE,
+  LEGACY_DOCTRINE_FILE,
+  doctrineFile,
+} from './config.js';
 import { committedIds } from './history.js';
-import { loadSpec, parseSpec } from './spec.js';
+import {
+  loadSpec,
+  parseSpec,
+} from './spec.js';
 
 export const STANDARD_VERSION = 1;
 
