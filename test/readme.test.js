@@ -4,21 +4,48 @@
  * text, and the lifecycle is drawn from the declaration itself (M1), refusing what it cannot place.
  */
 import assert from 'node:assert/strict';
-import { readdirSync, readFileSync } from 'node:fs';
+import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 import { FIGURES, drawLifecycle } from '../docs/img/draw.mjs';
 import { HELP, commandPhrases } from '../src/help.js';
 import { MACHINE } from '../src/machine.js';
 import { agentsBlock } from '../src/templates.js';
+import { createE2eHelpers } from './e2e-helpers.js';
 
 const ROOT = resolve(import.meta.dirname, '..');
+const e2e = createE2eHelpers();
+after(e2e.cleanup);
 const README = readFileSync(join(ROOT, 'README.md'), 'utf8');
 const drawn = Object.keys(FIGURES).map((name) => `docs/img/${name}.svg`).sort();
 const SHOT_FIGURES = [
   { path: 'docs/shots/tour.svg', alt: 'The timed Pullboard tour shows a change submitted, rejected for a missed edge, fixed and accepted.' },
   { path: 'docs/shots/desktop.png', alt: "The desktop board shows open, claimed, submitted and accepted work, a Needs you row for a held lane, search in the top bar, the status bar, an accepted item's review history, and a stats line with merged work, sent-back share and the bottleneck recommendation." },
 ];
+
+test("Pullboard's doctrine carries its four checks [D1,D3]", () => {
+  const box = e2e.project();
+  const checkout = join(box.dir, 'doctrine-checkout');
+  box.git(box.dir, 'clone', '--shared', ROOT, checkout);
+  writeFileSync(join(checkout, 'DOCTRINE.md'), readFileSync(join(ROOT, 'DOCTRINE.md'), 'utf8'));
+  box.git(checkout, 'add', 'DOCTRINE.md');
+  const staged = box.tryGit(checkout, 'diff', '--cached', '--quiet');
+  assert.ok(staged.status === 0 || staged.status === 1, staged.stderr);
+  if (staged.status === 1) box.git(checkout, 'commit', '-q', '-m', 'docs: exercise doctrine checks [D1,D3]');
+
+  const spec = box.run(checkout, 'spec', 'check');
+  assert.equal(spec.code, 0, spec.out + spec.err);
+  const report = box.run(checkout, 'doctrine', 'check');
+  assert.equal(report.code, 0, report.err);
+  const lines = report.out.trim().split(/\r?\n/u);
+  assert.equal(lines.length, 4, 'doctrine check prints exactly four Rigor rules');
+  assert.deepEqual(lines.map((line) => line.slice(0, line.indexOf(' '))), ['C9', 'C8', 'T5', 'T6']);
+  for (const line of lines) {
+    const result = / · (\d+), was (\d+) · holding$/u.exec(line);
+    assert.ok(result, `${line} is holding at a committed count`);
+    assert.equal(result[1], result[2], `${line} matches the current main count`);
+  }
+});
 
 /** Average glyph width, in ems, generous enough for the widest system font each figure may get. */
 const EM = { sans: 0.56, mono: 0.62 };
