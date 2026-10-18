@@ -35,11 +35,22 @@
  * Rule and question keys ("W1", "Q1") are unique within the file; an item cites them by key and
  * waits on other items by their keys. On a board they get real ids from the section's prefix.
  */
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
-import { basename, join, resolve } from 'node:path';
+import {
+  existsSync,
+  readdirSync,
+  readFileSync,
+} from 'node:fs';
+import {
+  basename,
+  join,
+  resolve,
+} from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Refused } from './refused.js';
-import { insertSectionRows, nextRowId } from './spec.js';
+import {
+  insertSectionRows,
+  nextRowId,
+} from './spec.js';
 
 /** The blueprint file format this Pullboard reads and writes. */
 export const BLUEPRINT_FORMAT = 1;

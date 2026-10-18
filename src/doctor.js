@@ -1,16 +1,39 @@
 /** Read-only integrity checks for a pullboard board file (A6). */
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { DOCTRINE_FILE, LEGACY_DOCTRINE_FILE } from './config.js';
+import {
+  DOCTRINE_FILE,
+  LEGACY_DOCTRINE_FILE,
+} from './config.js';
 import { tryGit } from './git.js';
-import { checkAtCommit, submissionPaths, dependencySnapshots } from './trusted-policy.js';
-import { BLANKS, STATES, storeTriggers } from './machine.js';
+import {
+  checkAtCommit,
+  submissionPaths,
+  dependencySnapshots,
+} from './trusted-policy.js';
+import {
+  BLANKS,
+  STATES,
+  storeTriggers,
+} from './machine.js';
 
-import { boardBusyError, EVENT_LOG_VERSION, openBoardReadOnly, readEventLogVersion, SCHEMA_VERSION } from './board.js';
-import { staleFrozenItems, staleItemFinding } from './approved-rows.js';
+import {
+  boardBusyError,
+  EVENT_LOG_VERSION,
+  openBoardReadOnly,
+  readEventLogVersion,
+  SCHEMA_VERSION,
+} from './board.js';
+import {
+  staleFrozenItems,
+  staleItemFinding,
+} from './approved-rows.js';
 import { loadSpec } from './spec.js';
 import { loadDoctrine } from './doctrine.js';
-import { preMergeHookProblems, unwiredHookProblems } from './hooks.js';
+import {
+  preMergeHookProblems,
+  unwiredHookProblems,
+} from './hooks.js';
 const blankCharacters = new Set(BLANKS.map((point) => String.fromCodePoint(point)));
 
 /** Offer a working tracked or untracked rename without rewriting the repo's doctrine [D1,D2]. */

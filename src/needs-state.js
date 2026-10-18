@@ -3,7 +3,10 @@ import { join } from 'node:path';
 import * as store from './board.js';
 import { repoInfo } from './git.js';
 import { projectRowDecisions } from './row-decisions.js';
-import { pendingFit, projectFit } from './blueprint-fit.js';
+import {
+  pendingFit,
+  projectFit,
+} from './blueprint-fit.js';
 import { projectState } from './serve.js';
 
 /** Borrow an existing connection or open a read-only one; retain exact row-decision matching. */
