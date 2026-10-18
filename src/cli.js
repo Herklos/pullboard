@@ -278,9 +278,8 @@ import {
 } from './projects.js';
 import {
   milestoneRoadmap,
-  localMilestoneAliases,
+  withdrawWithMilestones,
 } from './roadmap.js';
-import { milestoneReferencesToRemove } from './milestones.js';
 import {
   rigorLines,
   rigorReport,
@@ -3729,18 +3728,8 @@ function workCommands(io, args) {
       io.say(`#${first} merged as ${commit.slice(0, 12)}`);
       return 0;
     }),
-    withdraw: () => act(async (ctx, board, me) => {
-      const id = idArg(first);
-      await ordered(ctx, board, 'withdraw', [id, { agentId: me.id, reason: [second, ...rest].filter(Boolean).join(' ') }]);
-      const removals = milestoneReferencesToRemove(board, [id, ...localMilestoneAliases(ctx.info.root, board, id)]);
-      const left = removals.map(({ name }) => name);
-      for (const { name, remove } of removals) {
-        await ordered(ctx, board, 'editMilestoneItems', [name, { agentId: me.id, remove }]);
-      }
-      io.result?.({ id: idArg(first), reason: [second, ...rest].filter(Boolean).join(' '), milestones: left });
-      io.say(`withdrew #${first}${left.length ? `; removed it from milestone ${left.join(', ')}` : ''}`);
-      return 0;
-    }),
+    withdraw: () => act((ctx, board, me) => withdrawWithMilestones(ctx, board, me, idArg(first),
+      [second, ...rest].filter(Boolean).join(' '), ordered)),
     refreeze: () => act(async (ctx, board, me) => {
       const result = await ordered(ctx, board, 'refreeze', [idArg(first), { agentId: me.id, freeze: freezer(ctx, { captureVerifyPolicy: true, board }) }]);
       io.result?.({ id: idArg(first), ...result });

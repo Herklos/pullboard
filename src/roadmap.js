@@ -21,6 +21,7 @@ import {
   repoInfo,
 } from './git.js';
 import { listApiProjects } from './projects.js';
+import { milestoneReferencesToRemove } from './milestones.js';
 
 /** Parse a registered-project reference and resolve only an unambiguous project name or basename. */
 export function resolveMilestoneProjectReference(reference, projects) {
@@ -45,6 +46,19 @@ export function localMilestoneAliases(root, board, id) {
     }
   }
   return [...aliases];
+}
+
+/** Withdraw through ordered moves, then remove every local milestone alias and report the result. */
+export async function withdrawWithMilestones(ctx, board, me, id, reason, ordered) {
+  await ordered(ctx, board, 'withdraw', [id, { agentId: me.id, reason }]);
+  const removals = milestoneReferencesToRemove(board, [id, ...localMilestoneAliases(ctx.info.root, board, id)]);
+  const left = removals.map(({ name }) => name);
+  for (const { name, remove } of removals) {
+    await ordered(ctx, board, 'editMilestoneItems', [name, { agentId: me.id, remove }]);
+  }
+  ctx.io.result?.({ id, reason, milestones: left });
+  ctx.io.say(`withdrew #${id}${left.length ? `; removed it from milestone ${left.join(', ')}` : ''}`);
+  return 0;
 }
 
 /** Resolve a repo-qualified milestone item against registered boards, optionally within an API scope.
