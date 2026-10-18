@@ -2313,8 +2313,10 @@ function readMilestone(milestone, p) {
   const verified = visible.filter((row) => row.state === 'verified');
   const rows = visible.filter((row) => row.state !== 'verified').concat(verified);
   // Current API milestones own their landed count and explicit shipment. Old exports retain their old count.
-  const done = milestone.summary?.landed ?? milestone.landed ?? verified.length;
-  const total = milestone.summary?.total ?? milestone.total ?? rows.length;
+  /** Reject malformed snapshot counts before they reach numeric HTML attributes. */
+  const numeric = value => Number.isInteger(value) && value >= 0 ? value : null;
+  const done = numeric(milestone.summary?.landed) ?? numeric(milestone.landed) ?? verified.length;
+  const total = numeric(milestone.summary?.total) ?? numeric(milestone.total) ?? rows.length;
   const shipped = milestone.shipped !== undefined ? Boolean(milestone.shipped) : rows.length > 0 && verified.length === rows.length;
   return { milestone, rows, done, total, shipped };
 }
