@@ -625,6 +625,8 @@ test('[A1] command results match the catalog across roots and subcommands', () =
   json(box, repo, 'spec', ['view', '--out', join(box.dir, 'spec.html')], 'view');
   json(box, repo, 'spec', ['show', 'G1'], 'show');
   json(box, repo, 'spec', ['unmet'], 'unmet');
+  const catalogStarters = json(box, repo, 'blueprint', ['starters', 'web-app'], 'starters').starters;
+  assert.ok(catalogStarters.length && catalogStarters.every((starter) => !starter.filed && starter.id === null), 'blueprint starters lists unfiled starters with no id');
   assert.equal(json(box, repo, 'spec', ['draft', 'A draft API catalogue row'], 'draft').id, 'G2');
   for (const [name, kind, rules] of [['catalog', undefined, [['R1', 'A catalog rule.']]], ['catalog-practice', 'practice', [['R1', 'A catalog rule.'], ['R2', 'A practice catalog rule.']]]]) writeFileSync(join(box.dir, `${name}-blueprint.json`), `${JSON.stringify({ blueprint: 1, name, title: name, version: 1, kind, rules: rules.map(([key, text]) => ({ key, text, why: 'the API lists it.' })) })}\n`);
   assert.deepEqual((({ rows, blueprints }) => [rows[0].status, rows.length, blueprints.length, blueprints[1].shared.length])(json(box, repo, 'blueprint', ['add', join(box.dir, 'catalog-blueprint.json'), '--blueprint', join(box.dir, 'catalog-practice-blueprint.json')], 'add')), ['draft', 2, 2, 1], 'two blueprints in one add land as one result, a shared rule drafted once (#720)');
