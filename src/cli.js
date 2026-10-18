@@ -272,7 +272,10 @@ import {
   registerProjectAndLink,
   registeredProjectRootsSnapshot,
 } from './projects.js';
-import { milestoneRoadmap, localMilestoneAliases } from './roadmap.js';
+import {
+  milestoneRoadmap,
+  localMilestoneAliases,
+} from './roadmap.js';
 import { milestoneReferencesToRemove } from './milestones.js';
 import {
   rigorLines,
