@@ -349,6 +349,9 @@ a.ghost { color: var(--ink); }
 .upgrade-note h3 { margin: 10px 0 4px; font-size: 13px; }
 .upgrade-note p, .upgrade-note footer { margin: 4px 0; font-size: 12px; }
 .upgrade-note button { flex: none; min-height: var(--tap); }
+/* On a phone the link invitation above can wrap a line taller with Linux fonts (199px, not 179px), so the card keeps
+   20px less and scrolls inside; it says the same and the first item stays above the fold (#871). */
+@media (width < 600px) { .upgrade-note { max-height: min(21vh, 170px); } }
 .release-note { padding: 0 2px 12px; }
 .release-note p { margin: 0; font-size: 13px; line-height: 1.6; color: var(--ink-muted); overflow-wrap: anywhere; }
 .release-note code { font: 12px var(--mono); color: var(--ink); white-space: nowrap; }
