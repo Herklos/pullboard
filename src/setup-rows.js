@@ -31,6 +31,16 @@ export function withStarterWork(setup, { board, me, main, config, root, seat }) 
     agentNext: main && setup.approvedRowIds?.length ? 'pullboard spec apply' : command };
 }
 
+/** Keep spec setup optional on a working rowless board, retaining approval guidance for real rows. */
+export function requirementStep({ rows, drafted, toApply, completed, hasItems }) {
+  const optional = rows.length === 0 && hasItems;
+  return { number: 1, done: optional || (rows.some(row => row.status === 'approved') && ((!drafted.length && !toApply.length) || completed)),
+    question: optional ? 'Spec rows are optional on this working board; add a requirement later with pullboard spec draft "<text>".'
+      : 'Ask the person: what are we building, and who will use it? Draft a few requirements, then ask the person to approve them.',
+    command: 'pullboard spec draft "<text>"',
+    afterAnswer: 'Record each answer with pullboard spec draft "<text>"; the person approves the returned ids in Pullboard View or runs pullboard spec approve <ids> in their own terminal; then the coordinator runs pullboard spec apply.' };
+}
+
 /**
  * The setup step once every open row has a person decision that spec apply has not written yet.
  *

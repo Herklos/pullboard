@@ -14,6 +14,10 @@ import {
   carriesImplies,
   IMPLIES_ENGINE,
 } from './implies.js';
+import {
+  carriesConflict,
+  CONFLICT_ENGINE,
+} from './trunk-conflict.js';
 import { CHECK_ACCEPT_ENGINE } from './check-accept.js';
 import { HEALTH_SENTINEL_ENGINE } from './health-receipts.js';
 import {
@@ -59,10 +63,11 @@ export const ENGINE_OPERATIONS = Object.freeze([
 const OPERATION_ENGINE = Object.freeze({ orderMilestoneItems: MILESTONE_RANK_ENGINE, reopen: 8, recordLandingBatch: 8, recordLandingWaiver: 8, recordLandingFlake: 8, finishLandingBatch: 8, acceptCheck: CHECK_ACCEPT_ENGINE,
   shipMilestone: MILESTONE_SHIP_ENGINE });
 
-/** Dependency edits, causes, sealed reviews, submission proofs, health observations and milestone targets retain distinct recorded engine meanings. */
+/** Dependency edits, causes, sealed reviews, submission proofs, trunk conflicts, health observations and milestone targets retain distinct recorded engine meanings. */
 function minimumOperationEngine(operation, args, board) {
   if (operation === 'recordHealthFindings') return HEALTH_SENTINEL_ENGINE;
   const options = args[1];
+  if (carriesConflict(operation, args)) return CONFLICT_ENGINE;
   if (operation === 'submit' && options?.submissionProof !== undefined
     || operation === 'recordLandingBatch' && args[0]?.batch?.invariantEvidence !== undefined) return SUBMISSION_PROOF_ENGINE;
   const given = (name) => Boolean(options && typeof options === 'object' && Object.hasOwn(options, name) && options[name] !== undefined && options[name] !== null && options[name] !== false);
