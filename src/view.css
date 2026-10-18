@@ -989,6 +989,7 @@ code.inline.long { white-space: break-spaces; overflow-wrap: anywhere; }
   .share-card { display: grid; grid-template-columns: 30px minmax(0, 1fr) var(--tap); align-items: start; }
   .share-ic { margin-top: 4px; }
   .share-txt { grid-column: 2; }
+  .share-txt a { display: block; }
   .share-x { grid-column: 3; grid-row: 1; }
   .share-gh { grid-column: 2 / 4; justify-self: start; }
 }

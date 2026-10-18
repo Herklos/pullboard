@@ -1,3 +1,5 @@
+/** @pullboard-test-input source-tree */
+/** @pullboard-test-input docs-tree */
 /** Keep the public API guide aligned with the CLI's versioned shape catalog [A1]. */
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -57,4 +59,42 @@ test('[A2] API guide documents the local HTTP response catalog', () => {
   assert.match(guide, /notification has no `id` and does not move the reconnect cursor/);
   assert.match(guide, /`GET \/api\/v1\/events\?boards=<id>,<id>`/);
   assert.match(guide, /`<id>:<sequence>` pairs joined by commas/);
+});
+
+/** Expand the simple alternation groups used by the HTTP router's path matchers. */
+function expandRouteAlternatives(path) {
+  const group = /\(([^()]*\|[^()]*)\)/u.exec(path);
+  if (!group) return [path];
+  return group[1].split('|').flatMap(value => expandRouteAlternatives(path.replace(group[0], value)));
+}
+
+/** Collect exact and patterned v1 paths dispatched by the local view and its API router. */
+function routedV1Paths() {
+  const sources = [
+    readFileSync(new URL('../src/serve.js', import.meta.url), 'utf8'),
+    readFileSync(new URL('../src/api-http.js', import.meta.url), 'utf8'),
+  ];
+  const paths = new Set();
+  for (const source of sources) {
+    for (const match of source.matchAll(/url\.pathname\s*===\s*'([^']+)'/gu)) {
+      if (match[1].startsWith('/api/v1/')) paths.add(match[1]);
+    }
+  }
+  for (const match of sources[1].matchAll(/const\s+\w+\s*=\s*(\/[^\r\n]*\/[a-z]*)\.exec\(url\.pathname\)/gu)) {
+    let pattern = match[1].slice(1, match[1].lastIndexOf('/'));
+    pattern = pattern.replace(/^\^/u, '').replace(/\$$/u, '').replaceAll('\\/', '/');
+    pattern = pattern.replace('/boards/([^/]+)', '/boards/:board').replaceAll('([^/]+)', ':id');
+    for (const path of expandRouteAlternatives(pattern)) {
+      const normalized = path;
+      if (normalized.startsWith('/api/v1/')) paths.add(normalized);
+    }
+  }
+  return [...paths].sort();
+}
+
+test('[N26] every routed v1 path is documented', () => {
+  const paths = routedV1Paths();
+  assert.ok(paths.length > 0, 'the local view and API router expose versioned paths');
+  const missing = paths.filter(path => !guide.includes(path));
+  assert.deepEqual(missing, [], 'API guide documents every local view v1 path');
 });
