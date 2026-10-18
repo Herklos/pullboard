@@ -21,6 +21,15 @@ import {
 } from './git.js';
 import { listApiProjects } from './projects.js';
 
+/** Parse a registered-project reference and resolve only an unambiguous project name or basename. */
+export function resolveMilestoneProjectReference(reference, projects) {
+  const match = /^(.+)#([1-9]\d*)$/.exec(reference);
+  if (!match) return null;
+  const [, repo, number] = match;
+  const candidates = projects.filter((project) => project.name === repo || basename(project.root) === repo);
+  return { repo, number, project: candidates.length === 1 ? candidates[0] : null };
+}
+
 /** Resolve a repo-qualified milestone item against registered boards, optionally within an API scope.
  * @param {string} root
  * @param {any} board
@@ -33,14 +42,13 @@ export function milestoneRoadmap(root, board, options = {}) {
   const externalItems = new Map();
   const hidden = () => ({ id: `external-${++hiddenExternal}`, title: 'External item', status: 'unavailable' });
   const resolveExternal = (reference) => {
-    const match = /^(.+)#([1-9]\d*)$/.exec(reference);
-    if (!match) return options.hideOutOfScope ? hidden() : { id: reference, title: reference, status: 'unavailable' };
-    const [, repo, number] = match;
-    const candidates = projects.filter((project) => project.name === repo || basename(project.root) === repo);
-    if (candidates.length !== 1) return options.hideOutOfScope ? hidden() : { id: reference, title: `#${number} (${repo})`, status: 'unavailable' };
+    const parsed = resolveMilestoneProjectReference(reference, projects);
+    if (!parsed) return options.hideOutOfScope ? hidden() : { id: reference, title: reference, status: 'unavailable' };
+    const { repo, number, project } = parsed;
+    if (!project) return options.hideOutOfScope ? hidden() : { id: reference, title: `#${number} (${repo})`, status: 'unavailable' };
     try {
-      const info = repoInfo(candidates[0].root);
-      const other = resolve(candidates[0].root) === resolve(root)
+      const info = repoInfo(project.root);
+      const other = resolve(project.root) === resolve(root)
         ? board
         : openBoard(join(info.commonDir, 'pullboard', 'board.sqlite'), undefined, { isMain: codeIsFromMain() });
       try {

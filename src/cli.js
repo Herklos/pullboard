@@ -272,8 +272,13 @@ import {
   registerProjectAndLink,
   registeredProjectRootsSnapshot,
 } from './projects.js';
-import { milestoneRoadmap } from './roadmap.js';
-import { milestonesListing } from './milestones.js';
+import {
+  milestoneRoadmap,
+  resolveMilestoneProjectReference,
+} from './roadmap.js';
+import {
+  milestoneReferencesToRemove,
+} from './milestones.js';
 import {
   rigorLines,
   rigorReport,
@@ -3715,9 +3720,24 @@ function workCommands(io, args) {
       return 0;
     }),
     withdraw: () => act(async (ctx, board, me) => {
-      await ordered(ctx, board, 'withdraw', [idArg(first), { agentId: me.id, reason: [second, ...rest].filter(Boolean).join(' ') }]);
-      const left = milestonesListing(board, idArg(first));
-      for (const name of left) await ordered(ctx, board, 'editMilestoneItems', [name, { agentId: me.id, remove: [idArg(first)] }]);
+      const id = idArg(first);
+      await ordered(ctx, board, 'withdraw', [id, { agentId: me.id, reason: [second, ...rest].filter(Boolean).join(' ') }]);
+      const projects = listApiProjects();
+      const localRoot = resolve(ctx.info.root);
+      const aliases = new Set();
+      for (const milestone of store.milestones(board)) {
+        for (const reference of milestone.items) {
+          if (typeof reference !== 'string') continue;
+          const parsed = resolveMilestoneProjectReference(reference, projects);
+          if (!parsed?.project || !Number.isSafeInteger(Number(parsed.number)) || Number(parsed.number) !== id) continue;
+          if (resolve(parsed.project.root) === localRoot) aliases.add(reference);
+        }
+      }
+      const removals = milestoneReferencesToRemove(board, [id, ...aliases]);
+      const left = removals.map(({ name }) => name);
+      for (const { name, remove } of removals) {
+        await ordered(ctx, board, 'editMilestoneItems', [name, { agentId: me.id, remove }]);
+      }
       io.result?.({ id: idArg(first), reason: [second, ...rest].filter(Boolean).join(' '), milestones: left });
       io.say(`withdrew #${first}${left.length ? `; removed it from milestone ${left.join(', ')}` : ''}`);
       return 0;

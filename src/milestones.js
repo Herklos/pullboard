@@ -57,6 +57,15 @@ export function milestonesListing(board, id) {
   return milestones(board).filter((milestone) => milestone.items.includes(id)).map((milestone) => milestone.name);
 }
 
+/** Return each milestone and its matching references, preserving milestone and item order. */
+export function milestoneReferencesToRemove(board, references) {
+  const wanted = new Set(references);
+  return milestones(board).flatMap((milestone) => {
+    const remove = milestone.items.filter((reference) => wanted.has(reference));
+    return remove.length ? [{ name: milestone.name, remove }] : [];
+  });
+}
+
 /**
  * Return milestones with each item's current status and state, a landed count, and the
  * milestone's target and shipment. `done` is the landed count: accepted work has not shipped yet.
