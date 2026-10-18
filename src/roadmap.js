@@ -79,12 +79,7 @@ export function milestoneRoadmap(root, board, options = {}) {
               : held ? 'held' : 'waiting';
       summary[state]++;
     }
-    if (!milestone.shipped && pace.last6h >= 3) {
-      const six = summary.left / (pace.last6h / 6);
-      const two = pace.last2h ? summary.left / (pace.last2h / 2) : six;
-      summary.estimate = { low: Math.round(Math.min(six, two) * 2) / 2,
-        high: Math.round(Math.max(six, two) * 2) / 2 };
-    }
+    Object.assign(summary, milestoneForecast(summary.left, pace, Boolean(milestone.shipped)));
     return { ...milestone, summary };
   });
 }
@@ -101,7 +96,8 @@ function landingPace(board, items, now) {
   }
   const times = [...first.values()].filter(at => at <= now);
   return { last6h: times.filter(at => at > now - 6 * 3_600_000).length,
-    last2h: times.filter(at => at > now - 2 * 3_600_000).length };
+    last2h: times.filter(at => at > now - 2 * 3_600_000).length,
+    last24h: times.filter(at => at > now - 24 * 3_600_000).length };
 }
 
 /** Associate open person questions with typed item evidence and explicit local item references. */
@@ -116,4 +112,30 @@ function personDecisionItems(board) {
     }
   }
   return ids;
+}
+
+
+/** Choose the measured window for remaining work; sparse recent history may use a full day [N26]. */
+function milestoneForecast(left, pace, shipped) {
+  if (shipped) return { estimate: null, window: null, reason: null };
+  if (pace.last6h >= 3) {
+    const six = left / (pace.last6h / 6);
+    const two = pace.last2h ? left / (pace.last2h / 2) : six;
+    return { estimate: { low: Math.round(Math.min(six, two) * 2) / 2,
+      high: Math.round(Math.max(six, two) * 2) / 2 }, window: '6h', reason: null };
+  }
+  if (pace.last24h >= 3) {
+    const hours = Math.round(left / (pace.last24h / 24) * 2) / 2;
+    return { estimate: { low: hours, high: hours }, window: '24h', reason: null };
+  }
+  return { estimate: null, window: null, reason: 'few-landings' };
+}
+
+/** Format the supplied forecast for the CLI, retaining equal bounds as one number [N26]. */
+export function roadmapEstimate(summary) {
+  const bounds = summary.estimate;
+  if (!bounds) return summary.reason === 'few-landings' ? '; too few landings yet to estimate.' : '; estimate unavailable.';
+  const hours = bounds.low === bounds.high ? bounds.low : `${bounds.low} to ${bounds.high}`;
+  const pace = summary.window === '24h' ? "the last day's pace" : "today's pace";
+  return `; about ${hours} h at ${pace}.`;
 }

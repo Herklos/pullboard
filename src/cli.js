@@ -272,7 +272,7 @@ import {
   registerProjectAndLink,
   registeredProjectRootsSnapshot,
 } from './projects.js';
-import { milestoneRoadmap } from './roadmap.js';
+import { milestoneRoadmap, roadmapEstimate } from './roadmap.js';
 import {
   rigorLines,
   rigorReport,
@@ -2392,9 +2392,7 @@ function readCommands(io, { first, second, rest, values }) {
         io.say(`${milestone.name}: ${milestone.landed}/${milestone.total} landed${when}`);
         if (!milestone.shipped) {
           const summary = milestone.summary;
-          const bounds = summary.estimate;
-          const hours = bounds && (bounds.low === bounds.high ? bounds.low : `${bounds.low} to ${bounds.high}`);
-          const estimate = bounds ? `; about ${hours} h at today's pace.` : '; estimate unavailable.';
+          const estimate = roadmapEstimate(summary);
           io.say(`  ${summary.left} left of ${summary.total}: ${summary.landed} landed, ${summary.landing} landing, ${summary.review} in review, ${summary.building} building, ${summary.waiting} waiting, ${summary.held} held${estimate}`);
         }
         if (milestone.note) io.say(`  ${milestone.note}`);
