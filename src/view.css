@@ -187,6 +187,10 @@ a.ghost { color: var(--ink); }
 .ob-help small { display: block; color: var(--ink); font-size: 15px; font-weight: 600; }
 /* The help strip's Copy is the mockup's 40 px button, so on a computer its sentence keeps to one line. */
 .ob-help button { height: 40px; padding: 0 14px; border-radius: 10px; font-size: 14.5px; }
+/* On a computer the sentence keeps to one line whatever fonts are installed (#829): the strip keeps the mockup's
+   width and grows only as far as a wider font needs, centred, into the panel's own padding. Linux's DejaVu needs
+   513px for the longest sentence where the panel's box gives 520px. */
+@media (width >= 760px) { .ob-help { position: relative; left: 50%; transform: translateX(-50%); width: max-content; min-width: min(500px, 100%); max-width: calc(100vw - 32px); margin: 26px 0 0; } .ob-help small { white-space: nowrap; } }
 /* The browser's own permission prompt, drawn so people know what to click. */
 .ob-ask { position: relative; margin: 28px auto 0; max-width: 380px; padding: 16px 18px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); box-shadow: var(--shadow); text-align: left; }
 .ob-ask .t { font-weight: 600; }

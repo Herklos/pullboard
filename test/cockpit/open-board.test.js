@@ -35,7 +35,7 @@ function call(base, path, { method = 'GET', headers = {} } = {}) {
  * the person answers), and otherwise passed to the view the test started on its own port.
  */
 async function openBoardStand(chrome, view) {
-  const stand = { signedIn: false, linked: [], local: null, hold: false, held: [], failures: [], failList: 0 };
+  const stand = { signedIn: false, linked: [], local: null, hold: false, held: [], failures: [], failList: 0, dropped: 0 };
   const client = 'export function rememberPairing() { return null; }\nexport async function createTransport() { return { async request(path) { if (path === "/api/v1/boards") return { version: 1, boards: [], warnings: [] }; throw new Error("no paired board"); } }; }\n';
   const relay = createRelayBrowserHandler({ authenticate: async () => { if (stand.signedIn) return { kind: 'session' }; throw new Refused('AUTH_REQUIRED', 'Sign in.'); } });
   const send = (requestId, status, headers, body) => chrome.send('Fetch.fulfillRequest', { requestId, responseCode: status, responseHeaders: headers, body: Buffer.from(body).toString('base64') });
@@ -45,6 +45,15 @@ async function openBoardStand(chrome, view) {
     if (!stand.local) return chrome.send('Fetch.failRequest', { requestId, errorReason: 'ConnectionRefused' });
     const reply = await call(stand.local, address.pathname + address.search, { method: asked.method, headers: Object.fromEntries(Object.entries(asked.headers).filter(([name]) => name.toLowerCase() !== 'host')) });
     return send(requestId, reply.status, Object.entries(reply.headers).filter(([name]) => !['content-length', 'transfer-encoding', 'connection', 'keep-alive', 'date'].includes(name)).map(([name, value]) => ({ name, value: String(value) })), reply.body);
+  };
+  /**
+   * Record a reply that failed. A reply that comes after the page stopped waiting, because it moved on, reloaded or its
+   * own wait ran out, has nowhere to go: Chrome dropped that request. It is counted, never a failure; any other error
+   * still is (#829).
+   */
+  const settle = (error) => {
+    if (/Invalid InterceptionId/u.test(error.message)) stand.dropped += 1;
+    else stand.failures.push(error.message);
   };
   const listener = ({ data }) => {
     const message = JSON.parse(String(data));
@@ -78,7 +87,7 @@ async function openBoardStand(chrome, view) {
       const handled = await relay({ method: 'GET', url: address.pathname, headers: {} }, { writeHead: (status, headers) => { head = headers; }, end: (content) => { body = content ?? ''; } });
       if (!handled) return chrome.send('Fetch.failRequest', { requestId, errorReason: 'Failed' });
       return fulfil(requestId, head['content-type'], body, [{ name: 'Content-Security-Policy', value: head['content-security-policy'].replace("connect-src 'self'", "connect-src 'self' " + view.base) }]);
-    })().catch((error) => stand.failures.push(error.message));
+    })().catch(settle);
   };
   chrome.socket.addEventListener('message', listener);
   await chrome.send('Fetch.enable', { patterns: [{ urlPattern: HOSTED + '/*', requestStage: 'Request' }, { urlPattern: LOCAL + '/*', requestStage: 'Request' }, { urlPattern: view.base + '/api/v1/boards', requestStage: 'Request' }, { urlPattern: view.base + '/api/v1/boards?*', requestStage: 'Request' }] });
@@ -117,7 +126,7 @@ async function openBoardStand(chrome, view) {
   stand.release = async () => {
     stand.hold = false;
     const held = stand.held.splice(0);
-    for (const entry of held) await toView(entry);
+    for (const entry of held) await toView(entry).catch(settle);
   };
   /** Stop serving the stand-in. */
   stand.stop = async () => {
