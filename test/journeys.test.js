@@ -1,5 +1,6 @@
 /** The view's main journeys as real-input scenarios in Chrome [N26], and the two-home hosted journey through the real view, relay, browser client and item API [N40]. */
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import { createServer, request } from 'node:http';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -300,6 +301,185 @@ test('the hosted journey names what it saw when a board row never arrives [N40]'
   assert.equal(unavailable.report.unknownRowsPresent, null, 'unavailable page facts are not presented as observed false values');
   assert.equal(unavailable.report.rowsOmitted, null, 'unavailable row capture is not reported as zero omitted rows');
   assert.equal(unavailable.report.apiAnswers, null, 'unavailable trace data is not presented as an empty observed trace');
+});
+
+/**
+ * The relay's refusal messages that tell a 401 apart (#825): no single pb_session cookie, a cookie that is not a session,
+ * or a session the relay expired or revoked. Any other text is "other", so no message text from the page is kept.
+ */
+const JOURNEY_REFUSAL_KINDS = [
+  ['sign in to the configured relay origin', 'cookie-missing-or-repeated'],
+  ['sign in to the relay in this browser', 'cookie-not-a-session'],
+  ['this credential is expired or revoked', 'session-expired-or-revoked'],
+];
+
+/** Decode only public refusal categories; malformed or encoded bodies never become error text. */
+function journeyRefusalBody(response) {
+  try {
+    if (typeof response?.body !== 'string') return { code: 'invalid', kind: 'invalid' };
+    const value = JSON.parse(response.base64Encoded ? Buffer.from(response.body, 'base64').toString('utf8') : response.body);
+    const error = value?.error;
+    if (!error || typeof error !== 'object' || Array.isArray(error)) return { code: 'invalid', kind: 'invalid' };
+    // These are the relay HTTP adapter's public 401/403 codes, not arbitrary uppercase response text.
+    const codes = new Set(['AUTH_REQUIRED', 'DEVICE_REVOKED', 'NO_REPO_ACCESS', 'TOKEN_BOARD', 'TOKEN_NOT_OWNED', 'HUMAN_REQUIRED', 'BAD_ORIGIN', 'WRITE_REQUIRED']);
+    const text = typeof error.message === 'string' ? error.message : '';
+    return { code: codes.has(error.code) ? error.code : 'other',
+      kind: JOURNEY_REFUSAL_KINDS.find(([start]) => text.startsWith(start))?.[1] ?? 'other' };
+  } catch { return { code: 'invalid', kind: 'invalid' }; }
+}
+
+/**
+ * Record, from Chrome's own events, what navigated the hosted page and why each 401 or 403 was refused, and read the
+ * pb_session cookies' attributes on demand. Only kinds and attributes are kept: never a URL beyond its class, a cookie
+ * value or a message's text. The origin override permits an owned loopback HTTP fixture with real Chrome events. #825: CI captured a navigation and later 401s; their cause is still unproven.
+ */
+function journeyAuthTrace(chrome, hostedOrigin = JOURNEY_HOSTED) {
+  assert.ok(hostedOrigin === JOURNEY_HOSTED || /^http:\/\/127\.0\.0\.1:\d+$/u.test(hostedOrigin), 'trace origin is the hosted journey or its owned loopback fixture');
+  const navigations = [];
+  const refusals = [];
+  const watched = new Map();
+  let startedAt = performance.now();
+  let active = false;
+  const clock = () => Math.round(Math.max(0, performance.now() - startedAt));
+  const target = (url) => {
+    let address;
+    try { address = new URL(url); } catch { return 'other'; }
+    if (address.href === 'about:blank') return 'about:blank';
+    if (address.origin === hostedOrigin) return address.pathname.startsWith('/auth/') ? 'hosted sign-in' : address.pathname === '/' ? 'hosted root' : 'hosted other';
+    if (address.origin === JOURNEY_LOCAL) return address.pathname === '/local/connect' ? 'local round trip' : 'local other';
+    return 'other';
+  };
+  const listener = ({ data }) => {
+    let message;
+    try { message = JSON.parse(String(data)); } catch { return; }
+    if (!active || navigations.length + refusals.length >= 128) return;
+    const params = message.params ?? {};
+    if (message.method === 'Page.frameRequestedNavigation' && !params.frameId?.includes(':')) {
+      navigations.push({ atMs: clock(), reason: String(params.reason ?? 'unknown'), disposition: String(params.disposition ?? ''), target: target(params.url) });
+    } else if (message.method === 'Page.frameNavigated' && !params.frame?.parentId) {
+      navigations.push({ atMs: clock(), reason: 'navigated', target: target(params.frame?.url) });
+    } else if (message.method === 'Network.responseReceived' && [401, 403].includes(params.response?.status)) {
+      let address;
+      try { address = new URL(params.response.url); } catch { return; }
+      if (address.origin !== hostedOrigin || !address.pathname.startsWith('/api/')) return;
+      watched.set(params.requestId, { atMs: clock(), status: params.response.status, pathKind: journeyApiPathKind(address.pathname) });
+    } else if (message.method === 'Network.loadingFinished' && watched.has(params.requestId)) {
+      const refusal = watched.get(params.requestId);
+      watched.delete(params.requestId);
+      chrome.send('Network.getResponseBody', { requestId: params.requestId }).then((response) => {
+        refusals.push({ ...refusal, ...journeyRefusalBody(response) });
+      }, () => { refusals.push({ ...refusal, code: 'unread', kind: 'unread' }); });
+    }
+  };
+  chrome.socket.addEventListener('message', listener);
+  return {
+    /** Start a fresh record for the visit the row wait watches. */
+    begin() { navigations.length = 0; refusals.length = 0; watched.clear(); startedAt = performance.now(); active = true; },
+    /** What was recorded, with the pb_session cookies' attributes as Chrome holds them now. */
+    async read() {
+      let cookies = 'unavailable';
+      try {
+        cookies = (await chrome.send('Network.getAllCookies')).cookies.filter((cookie) => cookie.name === 'pb_session')
+          .map(({ domain, path, secure, session, sameSite, sourceScheme, sourcePort, httpOnly }) => ({ domain, path, secure, session, sameSite, sourceScheme, sourcePort, httpOnly }));
+      } catch { /* The rest of the record still stands. */ }
+      return { navigations: navigations.slice(), refusals: refusals.slice(), cookies };
+    },
+    /** Stop listening. */
+    close() { active = false; chrome.socket.removeEventListener('message', listener); },
+  };
+}
+
+/** Report the failed row wait without letting either diagnostic replace its original error. */
+async function failJourneyRows(t, rowObservation, authTrace) {
+  try { t.diagnostic(JSON.stringify(rowObservation.report)); } catch { /* The original row failure remains the test result. */ }
+  try { t.diagnostic('auth trace ' + JSON.stringify(await authTrace.read())); } catch { /* The original row failure remains the test result. */ }
+  throw rowObservation.error;
+}
+
+test('auth diagnostics tolerate malformed refusals and preserve the original row error [N40]', { timeout: 90_000 }, async (t) => {
+  const executable = chromeExecutable();
+  assert.ok(executable, 'Chrome is required for actual HTTP auth diagnostics.');
+  const marker = 'fixture-' + randomUUID();
+  const privateCode = 'PRIVATE_' + randomUUID().slice(0, 8).toUpperCase();
+  const cases = new Map([
+    ['valid', { status: 401, body: JSON.stringify({ error: { code: 'AUTH_REQUIRED', message: 'sign in to the relay in this browser' } }), code: 'AUTH_REQUIRED', kind: 'cookie-not-a-session' }],
+    ['forbidden', { status: 403, body: JSON.stringify({ error: { code: 'BAD_ORIGIN', message: 'send cookie-authorized writes from the relay origin' } }), code: 'BAD_ORIGIN', kind: 'other' }],
+    ['invalid', { status: 401, contentType: 'text/html', body: '<html>' + marker + '</html>', code: 'invalid', kind: 'invalid' }],
+    ['unknown', { status: 401, body: JSON.stringify({ error: { code: privateCode, message: marker } }), code: 'other', kind: 'other' }],
+  ]);
+  const cookieArrivals = [];
+  const server = createServer((req, res) => {
+    const address = new URL(req.url, 'http://127.0.0.1');
+    if (address.pathname === '/') {
+      res.writeHead(200, { 'Content-Type': 'text/html' });
+      res.end('<!doctype html><title>Owned diagnostic fixture</title><main>Diagnostic fixture</main>');
+      return;
+    }
+    const entry = cases.get(address.searchParams.get('case'));
+    if (!entry) { res.writeHead(404); res.end(); return; }
+    cookieArrivals.push((req.headers.cookie ?? '').split(';').some(part => part.trim() === 'pb_session=' + marker));
+    res.writeHead(entry.status, { 'Content-Type': entry.contentType ?? 'application/json', 'Cache-Control': 'no-store' });
+    res.end(entry.body);
+  });
+  const profile = mkdtempSync(join(tmpdir(), 'pullboard-journey-auth-trace-'));
+  let chrome;
+  let trace;
+  try {
+    await new Promise((ready, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', ready); });
+    const origin = 'http://127.0.0.1:' + server.address().port;
+    chrome = await openSnapshotChrome(executable, origin + '/', profile);
+    const planted = await chrome.send('Network.setCookie', { name: 'pb_session', value: marker, url: origin + '/', httpOnly: true, sameSite: 'Lax' });
+    assert.equal(planted.success, true, 'the isolated browser holds its own synthetic cookie');
+    trace = journeyAuthTrace(chrome, origin);
+    trace.begin();
+    for (const [name, entry] of cases) {
+      const path = '/api/v1/boards/' + marker + '/state?case=' + name + '&private=' + marker;
+      const status = await chrome.stable(`(async () => {
+        const response = await fetch(${JSON.stringify(path)}, { credentials: 'include' });
+        await response.text(); return response.status;
+      })()`);
+      assert.equal(status, entry.status, 'the actual browser fetch returned the HTTP refusal status');
+    }
+    let report;
+    const deadline = Date.now() + 10_000;
+    do { report = await trace.read(); } while (report.refusals.length < cases.size && Date.now() < deadline);
+    const project = ({ status, code, kind, pathKind }) => ({ status, code, kind, pathKind });
+    const order = (left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right));
+    assert.deepEqual(report.refusals.map(project).sort(order), [...cases.values()].map(({ status, code, kind }) =>
+      ({ status, code, kind, pathKind: '/api/v1/boards/:id/state' })).sort(order));
+    assert.deepEqual(cookieArrivals, [true, true, true, true], 'real HTTP requests carried the isolated cookie');
+    assert.ok(!JSON.stringify(report).includes(marker), 'no body, cookie value or URL identifier enters the trace');
+    assert.ok(!JSON.stringify(report).includes(privateCode), 'unknown uppercase response codes are redacted');
+    assert.equal(report.cookies.length, 1, 'the actual browser cookie attributes remain observable');
+    assert.equal(report.cookies[0].httpOnly, true);
+    let originalError;
+    try { await chrome.waitFor("document.querySelector('#row-that-never-arrives')", 250); }
+    catch (error) { originalError = error; }
+    assert.ok(originalError, 'the real browser row wait fails in the controlled fixture');
+    const diagnostics = [];
+    await assert.rejects(() => failJourneyRows({ diagnostic(line) { diagnostics.push(line); t.diagnostic(line); } },
+      { error: originalError, report: { controlledMissingRow: true } }, trace),
+    error => error === originalError, 'the actual reporting path rethrows the exact original row failure');
+    assert.ok(diagnostics.some(line => line.startsWith('auth trace ')), 'the controlled row failure prints the trace');
+    assert.ok(!diagnostics.join('\n').includes(marker), 'printed diagnostics contain no private fixture values');
+  } finally {
+    try { trace?.close(); if (chrome) await closeSnapshotChrome(chrome); }
+    finally {
+      try { server.closeAllConnections(); if (server.listening) await new Promise(done => server.close(done)); }
+      finally { rmSync(profile, { recursive: true, force: true }); }
+    }
+  }
+});
+
+test('auth refusal protocol bodies decode without exposing invalid payloads [N40]', () => {
+  const value = JSON.stringify({ error: { code: 'AUTH_REQUIRED', message: 'this credential is expired or revoked' } });
+  const expected = { code: 'AUTH_REQUIRED', kind: 'session-expired-or-revoked' };
+  assert.deepEqual(journeyRefusalBody({ body: value }), expected);
+  assert.deepEqual(journeyRefusalBody({ body: Buffer.from(value).toString('base64'), base64Encoded: true }), expected);
+  for (const body of ['not JSON', '[]', 'null', '{}']) {
+    assert.deepEqual(journeyRefusalBody({ body }), { code: 'invalid', kind: 'invalid' });
+  }
+  assert.deepEqual(journeyRefusalBody(undefined), { code: 'invalid', kind: 'invalid' });
 });
 
 /** Capture page-used API answers and response arrival times without retaining identifiers or waiting for streams. */
@@ -636,6 +816,7 @@ async function everyBoardJourney(t, slow = null) {
   let chromeA;
   let chromeB;
   let journeyTrace;
+  let authTrace;
   let site;
   let stopRoutes;
   let setup;
@@ -673,6 +854,7 @@ async function everyBoardJourney(t, slow = null) {
     site = await journeyRelaySite(machineA, viewB.base);
     chromeB = await openSnapshotChrome(executable, 'about:blank', profileB);
     journeyTrace = journeyPageAnswers(chromeB, viewB.base);
+    authTrace = journeyAuthTrace(chromeB);
     stopRoutes = await routeJourneyOrigins(chromeB, site, viewB, slow);
     const person = await machineA.phoneSession();
     assert.equal((await chromeB.send('Network.setCookie', {
@@ -697,6 +879,7 @@ async function everyBoardJourney(t, slow = null) {
     await chromeB.waitFor("location.hash === '' && document.querySelector('#chain')?.textContent.includes('linked machine A board')", 45_000); // budget: bounded setup wait within this journey test’s declared outer timeout (5x relay-work budget plus 180 seconds).
     await chromeB.send('Page.navigate', { url: 'about:blank' });
     journeyTrace.begin();
+    authTrace.begin();
     if (slow) slow.armed = true;
     await chromeB.send('Page.navigate', { url: JOURNEY_HOSTED + '/' });
     const rowPredicate = `(${journeySidebarReady.toString()})([...document.querySelectorAll('#proj-list .proj.repo .pname')].map(node => node.textContent.trim()), ${JSON.stringify(JOURNEY_BOARD_NAMES)})`;
@@ -721,10 +904,7 @@ async function everyBoardJourney(t, slow = null) {
       })`)),
       () => journeyTrace.snapshot(),
     );
-    if (!rowObservation.ready) {
-      try { t.diagnostic(JSON.stringify(rowObservation.report)); } catch { /* The original row failure remains the test result. */ }
-      throw rowObservation.error;
-    }
+    if (!rowObservation.ready) await failJourneyRows(t, rowObservation, authTrace);
     const pageAnswers = await journeyTrace.snapshot();
     try {
       for (const [source, boardName] of [['linked', 'fixture/repository'], ['local', 'local-machine-b']]) {
@@ -807,7 +987,7 @@ async function everyBoardJourney(t, slow = null) {
   } finally {
     try { await stopRelayAll(setup); }
     finally {
-      try { if (journeyTrace) journeyTrace.close(); if (stopRoutes && chromeB) await stopRoutes(); }
+      try { if (authTrace) authTrace.close(); if (journeyTrace) journeyTrace.close(); if (stopRoutes && chromeB) await stopRoutes(); }
       finally {
         try { if (chromeB) await closeSnapshotChrome(chromeB); }
         finally {
