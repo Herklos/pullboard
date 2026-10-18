@@ -134,7 +134,11 @@ async function hostedStandIn(chrome, pages, styles, local) {
         ],
         body: Buffer.from(document ? page : asset ?? styles).toString('base64'),
       });
-    })().catch((error) => failures.push(`${asked.url} (${resourceType}, ${requestId}): ${error.message}`)));
+    })().catch((error) => {
+      // A reply that comes after the page stopped waiting, because it moved to its next visit, has nowhere to go: Chrome
+      // dropped that request. It is not a failure; any other error still is (#834, as in open-board's stand-in, #829).
+      if (!/Invalid InterceptionId/u.test(error.message)) failures.push(`${asked.url} (${resourceType}, ${requestId}): ${error.message}`);
+    }));
   };
   chrome.socket.addEventListener('message', listener);
   await chrome.send('Fetch.enable', { patterns: [{ urlPattern: HOSTED + '/*', requestStage: 'Request' }, { urlPattern: LOCAL + '/*', requestStage: 'Request' }, { urlPattern: local.own + '/api/v1/boards/*/state*', requestStage: 'Request' }] });
