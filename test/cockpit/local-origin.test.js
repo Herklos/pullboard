@@ -809,7 +809,8 @@ test('every hosted page state says what it is and what to do next [N26,H5]', { t
     assert.equal(outdated.heading, 'Where are your projects?', 'a view too old to answer reads as none');
     stand.local = view.base;
     await chrome.send('Page.navigate', { url: HOSTED + '/?list' });
-    await chrome.waitFor("location.origin === 'https://app.pullboard.dev' && document.querySelector('#chain')?.textContent.includes('A board the hosted page lists')", 30_000); // budget: hang ceiling for the discovery, one round trip and the first board read.
+    // The opened item's detail is its own round trip after the list (#834): until it lands, #detail says Loading and has no actions.
+    await chrome.waitFor("location.origin === 'https://app.pullboard.dev' && document.querySelector('#chain')?.textContent.includes('A board the hosted page lists') && document.querySelectorAll('#detail button[data-shout], #detail button[data-new]').length === 2", 30_000); // budget: hang ceiling for the discovery, one round trip, the first board read and the opened item's detail.
     const list = JSON.parse(await chrome.stable(`JSON.stringify({ note: document.querySelector('#local-note').hidden, side: document.querySelector('.side').getClientRects().length > 0, heading: document.querySelector('#proj-list .proj.on .pname')?.textContent, source: document.querySelector('#proj-list .proj.on .src')?.textContent, tab: document.querySelector('.tab.on')?.textContent, step: document.querySelector('#new-item').getClientRects().length > 0, state: JSON.parse(${shown}) })`));
     // Normal-list next actions use the view styles at both sizes and in both themes (outside review 950).
     for (const width of [390, 1280]) {
