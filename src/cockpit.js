@@ -1402,7 +1402,7 @@ function boardSummary(board, state) {
     open: count((item) => item.status === 'open'),
     verified: count((item) => item.status === 'verified'),
     pending: calls('pending'),
-    drafts: calls('draft'),
+    drafts: calls('draft') + calls('rigor-draft'),
     holds: calls('hold'),
     laneHolds: state.holds,
     decisions: calls('decision'),
@@ -2531,20 +2531,22 @@ function render() {
   // on the board with who holds it; it is the agents' to move.
   const personalNeeds = personNeeds(p);
   // Adapt display targets and the existing hold age without reimplementing which calls belong here.
-  const needs = personalNeeds.filter((row) => row.kind !== 'draft').map((row) => row.kind === 'decision'
+  const needs = personalNeeds.filter((row) => !['draft', 'rigor-draft'].includes(row.kind)).map((row) => row.kind === 'decision'
     ? ['decide:' + row.id, row.ref, row.text, 'decide', row.at]
     : row.kind === 'pending' ? ['spec:' + row.id, row.ref, row.text, row.what]
       : ['tab:shouts', row.ref, row.text, row.what, p.holds.find((hold) => hold.hold_lane === row.id)?.hold_at]);
   const drafts = personalNeeds.find((row) => row.kind === 'draft')?.count ?? 0;
+  const rigorDrafts = personalNeeds.filter((row) => row.kind === 'rigor-draft');
   // Each of the person's calls is a row at the head of Active, shaped like an item: what it is first, then NEEDS YOU and
   // its kind where an item has its lane, and what to do at the right. Every call is a row; the draft rows are one row
   // with their count. Read-only, a row is its words, opening nothing.
-  $('needs').hidden = (!needs.length && !drafts) || view.state !== 'active' || Boolean(view.lane);
+  $('needs').hidden = (!needs.length && !drafts && !rigorDrafts.length) || view.state !== 'active' || Boolean(view.lane);
   const needRow = ([target, ref, text, what, at], kind, action) => '<li class="row ask"' + (readOnly ? '' : ' data-go="' + esc(target) + '"') + '><span class="dot ask"></span><div><div class="t">' + (ref ? '<span>' + esc(ref) + '</span>' : '') + rich(text, titles, !readOnly) + '</div>'
     + (at ? '<span class="row-age">' + age(at) + '</span>' : '') + '<div class="meta"><span class="why"><b>NEEDS YOU</b> ' + esc(kind) + '</span></div></div><span class="chip warn">' + esc(action) + '</span></li>';
   const needKind = (entry) => entry[3] === 'decide' ? needRow([entry[0], '', entry[2], entry[3], entry[4]], 'a decision, asked by ' + entry[1], 'decide')
     : entry[0].startsWith('spec:') ? needRow(entry, 'an open question in SPEC.md', 'answer') : needRow(entry, entry[3], 'release');
   $('needs').innerHTML = needs.map(needKind).join('')
+    + rigorDrafts.map(row => needRow([row.target, row.ref, row.text], 'a proved Rigor draft', 'Approve or Decline')).join('')
     + (drafts ? needRow(['tab:spec', String(drafts), 'draft spec rows to approve or drop'], 'Spec rows waiting on you', 'review') : '');
 
   const lanes = p.lanes;

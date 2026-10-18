@@ -99,6 +99,10 @@ import {
   explicitCheckFiles,
 } from './browser-admission.js';
 import {
+  submitInvariantLine,
+  submitInvariantProposals,
+} from './submit-invariants.js';
+import {
   bareWorktreeFinding,
   codeIsFromMain,
   contains,
@@ -170,6 +174,7 @@ import {
 import { Refused } from './refused.js';
 import { personNeeds } from './needs.js';
 import { personNeedsState } from './needs-state.js';
+import { startServeSentinel } from './serve-sentinel.js';
 import {
   commitCitations,
   committedIds,
@@ -304,6 +309,7 @@ import { rigorDraft } from './rigor-draft.js';
 import { serveApi } from './api.js';
 import { watchCommand } from './watch.js';
 import { serveMcp } from './mcp.js';
+import { scanHealthSentinel } from './health-sentinel.js';
 import {
   doctorProblems,
   doctrineProblems,
@@ -1624,8 +1630,16 @@ function boardSetup(ctx, card, identity) {
  * @param {Awaited<ReturnType<typeof keepViewRunning>>} view what keeping the background view running did
  * @returns {number}
  */
-function resumeHere(io, view) {
+async function resumeHere(io, view) {
   const ctx = context(io);
+  await withBoard(ctx, async board => {
+    const me = whoAmI(ctx, board);
+    const observation = scanHealthSentinel(ctx.file, { root: ctx.info.root, config: ctx.config, now: ctx.clock.now() });
+    if (observation) {
+      try { await ordered(ctx, board, 'recordHealthFindings', [{ agentId: me.id, ...observation }]); }
+      catch (error) { if (!(error instanceof Refused) || error.code !== 'HEALTH_SCAN_STALE') throw error; }
+    }
+  });
   const { root, isMain } = ctx.info;
   const mainRoot = primaryCheckoutRoot(ctx.info);
   const worktreeConfig = mainRoot ? (isMain ? ctx.config : loadConfig(mainRoot)) : null;
@@ -1643,10 +1657,12 @@ function resumeHere(io, view) {
     const staleVerdicts = pendingMerges.filter(item => item.item_verdict_state);
     const decisionSections = isMain ? coordinatorDecisionSections(board, ctx) : null;
     const { shouts = [], ...decisions } = decisionSections ?? {};
+    const needsState = personNeedsState(root, { board, includeRigorUndrafted: me.id === COORDINATOR });
     return {
       me,
       all,
-      needsYou: personNeeds(personNeedsState(root, { board })),
+      needsYou: personNeeds(needsState),
+      ...(me.id === COORDINATOR ? { rigor: { undrafted: needsState.rigorUndrafted } } : {}),
       ...(decisionSections ? { ...decisions, ...verifiedMergeGroups(root, pendingMerges, shouts, ctx.clock.now().getTime()),
         flow: proofStats(board, { now: ctx.clock.now().getTime() }).flow } : {}),
       requests: me.id === COORDINATOR ? store.openRequests(board) : [],
@@ -1765,6 +1781,7 @@ function resumeHere(io, view) {
     section(card.needsYou, (need) => need.kind === 'decision'
       ? `waiting on the person: #${need.id} from ${need.ref} (${span(ctx, need.at)}): ${firstLine(need.text)}`
       : `needs the person: ${need.ref}: ${firstLine(need.text)} (${need.what})`);
+    section(card.rigor?.undrafted ?? [], (cause) => `Rigor needs a proved draft: ${cause.key}, items ${cause.items.map(item => `#${item.id}`).join(', ')}; pullboard rigor draft "${cause.key.replaceAll('"', '\\"')}" "<rule>" --check "<command>" --red <commit> --green <commit>`);
     if (card.toVerify.length) say('review queue:');
     section(card.toVerify, (item) => `  to verify: #${item.item_id} ${item.item_lane} (${span(ctx, item.item_updated_at)})`);
     if (card.toMerge.length) say('merge verified work, run the gate, then record each with pullboard merged <id> <commit>');
@@ -1859,13 +1876,14 @@ async function viewHere(io, values) {
   try {
     // The adapter override is carried only by the in-process command streams, for private CLI fixtures.
     view = await (io.serveView ?? serveView)({ port, isMain: codeIsFromMain(), ...(projectRoot ? { projectRoot } : {}) });
+    const sentinel = startServeSentinel({ projectRoot });
     const boundAt = new Date().toISOString();
     const closeServer = view.close;
     view = {
       ...view,
       pid: process.pid,
       boundAt,
-      close: async () => { forgetView(view.port); await closeServer(); },
+      close: async () => { await sentinel.close(); forgetView(view.port); await closeServer(); },
     };
     try {
       rememberView({ port: view.port, secret: new URL(view.url).searchParams.get('k'), pid: process.pid, boundAt,
@@ -2442,7 +2460,8 @@ function readCommands(io, { first, second, rest, values }) {
       const summary = withBoard(ctx, (board) => {
         const me = whoAmI(ctx, board);
         const mine = store.listItems(board).filter((item) => item.item_status === 'claimed' && item.item_owner === me.id);
-        return { me, mine, stats: store.stats(board), reviewQueue: { ...store.reviewQueue(board), ...store.reviewQueueBreakdown(board) }, unread: store.unreadCount(board, me.id), relay: relayStatus(ctx.info.root) };
+        return { me, mine, stats: store.stats(board), reviewQueue: { ...store.reviewQueue(board), ...store.reviewQueueBreakdown(board) }, unread: store.unreadCount(board, me.id), relay: relayStatus(ctx.info.root),
+          submitInvariantProposals: submitInvariantProposals(store.events(board), ctx.config) };
       });
       if (values.json) {
         io.result(summary);
@@ -2455,6 +2474,7 @@ function readCommands(io, { first, second, rest, values }) {
       io.say(`board: ${items.open} open, ${items.claimed} claimed, ${items.submitted} awaiting verification, ${items.verified} verified, ${items.withdrawn} withdrawn`);
       io.say(`verdicts: ${accepted} accepted, ${rejected} rejected`);
       io.say(reviewQueueLine(ctx, summary.reviewQueue));
+      for (const proposal of summary.submitInvariantProposals) io.say(submitInvariantLine(proposal));
       if (Object.keys(ctx.config.products).length) {
         const all = withBoard(ctx, (board) => store.listItems(board, { all: true }));
         productSummaries(ctx.config, loadSpec(ctx.info.root, ctx.config), all).forEach((product) => io.say(productLine(product)));
@@ -2712,6 +2732,7 @@ async function submitHere(ctx, id) {
     // The waived run is written to the item's thread before the submission, so no waived proof reads as green.
     if (waived) await ordered(ctx, board, 'appendFact', [id, { agentId: me.id, kind: 'measurement', text: `submission proof at ${commit.slice(0, 12)} was red and is recorded as waived, not green; every failure is covered by a live person waiver:\n${waivedLines.join('\n')}` }]);
     return await ordered(ctx, board, 'submit', [id, { agentId: me.id, commit, tree: headTree(root) ?? '', files: filesSince(root, id, claimHead, commit), policyCommit: acceptedMain.commit,
+      submissionProof: { version: 1, files: gate.files, full: gate.full, deferred: gate.deferred, reason: gate.reason },
       ...(gate.deferred ? { note: 'full suite deferred to the landing gate' } : {}) }]);
   });
   const report = waived

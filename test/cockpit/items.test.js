@@ -1,4 +1,5 @@
 /** Cockpit items checks, using the shared real-board fixtures [N26]. */
+import { submitFixture } from '../board-submit-fixture.js';
 import assert from 'node:assert/strict';
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { request } from 'node:http';
@@ -1134,7 +1135,7 @@ function pipelineBoard(box, alpha) {
   at(0, board => store.register(board, { lane: 'tests', path: join(box.dir, 'pipeline-reviewer') }));
   for (const [id, minute] of [[1, 0], [2, 0], [3, 0], [4, 0], [5, 0], [6, 2]]) at(minute, board => store.addItem(board, { by: 'coordinator', lane: 'web', title: 'Pipeline item ' + id + (id === 6 ? ' ' + 'Averylongword'.repeat(35) : ''), specIds: ['G1'], criterion: 'Shows the stage' }));
   const claim = (id, minute) => at(minute, board => store.claim(board, id, { agentId: 'web-1', lane: 'web', leaseMs: 24 * 60 * 60_000, head: commit, freeze: () => ({ text: '{}', digest }) }));
-  const submit = (id, minute) => at(minute, board => store.submit(board, id, { agentId: 'web-1', commit, tree }));
+  const submit = (id, minute) => at(minute, board => submitFixture(board, id, { agentId: 'web-1', commit, tree }));
   const acceptAt = (id, minute) => at(minute, board => store.verify(board, id, { agentId: 'tests-1', decision: 'ACCEPT', note: 'Private pipeline fixture', head: commit, digest, policy: 'any' }));
   claim(1, 3); submit(1, 4); acceptAt(1, 5);
   at(6, board => store.merged(board, 1, { agentId: 'coordinator', commit }));

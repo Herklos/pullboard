@@ -1,4 +1,5 @@
 /** Event-derived proof numbers have the same data in text and versioned JSON [R1,R2,A1]. */
+import { submitFixture } from './board-submit-fixture.js';
 import assert from 'node:assert/strict';
 import { runFixtureGit } from './fixture-child.js';
 import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
@@ -38,7 +39,7 @@ function fixture(t) {
   const freeze = () => ({ text: 'Proof fixture', digest: 'frozen' });
   const submit = (commit) => {
     store.claim(board, id, { agentId: builder, lane: 'web', leaseMs: 3_600_000, freeze });
-    store.submit(board, id, { agentId: builder, commit, tree: 'b'.repeat(40) });
+    submitFixture(board, id, { agentId: builder, commit, tree: 'b'.repeat(40) });
   };
   submit('a'.repeat(40));
   store.verify(board, id, { agentId: reviewer, decision: 'REJECT', reason: 'TEST_FAILURE', note: 'Fixture rejects the first attempt.', head: 'a'.repeat(40), digest: 'frozen', policy: 'any' });

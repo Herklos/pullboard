@@ -61,6 +61,7 @@ import { Refused } from './refused.js';
 import { refusalDocument } from './json.js';
 import { relayLinkAvailability } from './relay.js';
 import { personNeeds } from './needs.js';
+import { rigorDraftNeeds } from './rigor-notices.js';
 import { projectRowDecisions } from './row-decisions.js';
 import { loadSpec } from './spec.js';
 
@@ -368,7 +369,9 @@ export function projectState(root, { seen = null, board: providedBoard = null, i
       products: productSummaries(config, loadSpec(info.root, config), all),
     });
     // Pending person decisions govern the calls on the API, sealed relay and exported page alike.
-    return { ...state, needs: personNeeds(state) };
+    const rigorRows = projectRowDecisions(store.rowDecisions(board), { spec: loadSpec(info.root, config).rows, practice: doctrine.rows });
+    const projected = { ...state, rigorDrafts: rigorDraftNeeds(rigorRows) };
+    return { ...projected, needs: personNeeds(projected) };
   }, providedBoard);
 }
 

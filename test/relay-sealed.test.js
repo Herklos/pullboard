@@ -1,4 +1,5 @@
 /** Two real clients and encrypted CLI records exercise the relay without sharing their key [A4,H7]. */
+import { submitFixture } from './board-submit-fixture.js';
 import assert from 'node:assert/strict';
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
 import { runFixtureExecFile as execFileSync, runFixtureChild as spawnSync, cleanupFixtureChildren, runFixtureChild, runFixtureGit, runFixtureChildAsync } from './fixture-child.js';
@@ -411,7 +412,7 @@ test('two real clients refuse forged relay actors and person-only requests while
     const lane = store.getItem(source, 1).item_lane;
     assert.equal(store.register(source, { lane: 'remote', path: join(box.directory, 'remote') }), 'remote-1');
     store.claim(source, 1, { agentId: 'remote-1', lane, leaseMs: 3600000, freeze: () => ({ text: '{}', digest: 'd'.repeat(64) }) });
-    store.submit(source, 1, { agentId: 'remote-1', commit: 'a'.repeat(40), tree: 'b'.repeat(40) });
+    submitFixture(source, 1, { agentId: 'remote-1', commit: 'a'.repeat(40), tree: 'b'.repeat(40) });
     question = store.shout(source, { from: 'coordinator', to: 'person', text: 'Private person decision', decision: true, lanes: [lane] });
     checkpointSequence(source, 0);
     moves = [
@@ -530,7 +531,7 @@ test('two real clients enforce the verify policy captured in the item freeze [H1
     assert.equal(JSON.parse(refreshed.item_frozen).policy.version, 1, 'explicit refreeze repairs malformed captured policy metadata');
     assert.deepEqual(JSON.parse(refreshed.item_frozen).policy.verify, { policy: 'coordinator', family: 'require' }, 'explicit native refreeze upgrades the legacy claim policy');
     assert.notEqual(refreshed.item_frozen_digest, legacyDigest, 'explicit refreeze establishes a new digest for the newly captured policy');
-    store.submit(afterRefreeze, 1, { agentId: builderId, commit, tree, files: [] });
+    submitFixture(afterRefreeze, 1, { agentId: builderId, commit, tree, files: [] });
     store.register(afterRefreeze, { lane: 'coordinator', path: box.root, family: 'Coordinator Family' });
     store.register(afterRefreeze, { lane, path: join(box.directory, 'verifier-same'), family: 'Builder Family' });
     verifierSame = store.agentAt(afterRefreeze, join(box.directory, 'verifier-same')).agent_id;
@@ -546,7 +547,7 @@ test('two real clients enforce the verify policy captured in the item freeze [H1
     const makeSubmitted = (title, verify, version = 1) => {
       const id = store.addItem(afterRefreeze, { by: 'coordinator', lane, title });
       store.claim(afterRefreeze, id, { agentId: builderId, lane, leaseMs: 3_600_000, freeze: makeFrozen(verify, version), head: commit });
-      store.submit(afterRefreeze, id, { agentId: builderId, commit, tree, files: [] });
+      submitFixture(afterRefreeze, id, { agentId: builderId, commit, tree, files: [] });
       return store.getItem(afterRefreeze, id);
     };
     const legacy = makeSubmitted('legacy frozen verify without policy capture', null);
