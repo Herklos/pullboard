@@ -172,6 +172,7 @@ import {
   outOfLane,
 } from './lanes.js';
 import { Refused } from './refused.js';
+import { applyStep, personAsk } from './setup-rows.js';
 import { personNeeds } from './needs.js';
 import { personNeedsState } from './needs-state.js';
 import { startServeSentinel } from './serve-sentinel.js';
@@ -1628,23 +1629,13 @@ function boardSetup(ctx, card, identity) {
   if (!current && !recordedComplete) recordSetupState(ctx, identity, 'complete');
   else if (current && !completed && !started) recordSetupState(ctx, identity, 'started');
   const seat = ctx.io.callerRole() === 'seat';
-  if (current?.number === 1 && !drafted.length && toApply.length) {
-    const rowIds = toApply.map(row => row.id);
-    const names = rowIds.join(', ');
-    return { step: 1, total: 5, ...current, steps, waitingOn: 'coordinator-apply', rowIds,
-      question: seat ? `The person approved ${names}; the coordinator applies them.` : `The person approved ${names}; apply them: pullboard spec apply.`, command: 'pullboard spec apply',
-      afterAnswer: 'spec apply writes the person\u2019s decisions into SPEC.md; then commit SPEC.md so every worktree reads them.',
-      agentNext: seat ? `ask the coordinator to apply ${names}: pullboard shout coordinator "the person approved ${names}; please run pullboard spec apply"` : 'pullboard spec apply, then commit SPEC.md' };
-  }
+  if (current?.number === 1 && !drafted.length && toApply.length) return { step: 1, total: 5, ...current, steps, ...applyStep(toApply.map(row => row.id), seat) };
   if (current?.number === 1 && drafted.length) {
     const rowIds = drafted.map(row => row.id);
     const names = rowIds.join(', ');
     const command = `pullboard spec show ${rowIds[0]}`;
     // A pending question takes an answer, a draft row an approval: each gets the command that decides it.
-    const questions = drafted.filter(row => row.status === 'pending').map(row => row.id);
-    const drafts = drafted.filter(row => row.status !== 'pending').map(row => row.id);
-    const personCommand = [drafts.length ? `pullboard spec approve ${drafts.join(',')}` : '', ...questions.map(id => `pullboard spec answer ${id} "<choice>"`)].filter(Boolean).join('; ');
-    const verb = !questions.length ? 'approve' : drafts.length ? 'decide' : 'answer';
+    const { personCommand, verb } = personAsk(drafted);
     return { step: 1, total: 5, ...current, steps, waitingOn: 'person-approval', rowIds, ...(toApply.length ? { approvedRowIds: toApply.map(row => row.id) } : {}),
       question: seat ? `Waiting for the coordinator to bring approval of ${names} to the person.` : `Waiting for the person to ${verb} ${names}.`, command,
       personCommand,
