@@ -37,6 +37,7 @@ import {
   recordAttempt,
   recordRowDecisions,
   applyRowDecisions,
+  draftSpecRow,
   refreeze,
   register,
   release,
@@ -272,6 +273,7 @@ function recordEventContract() {
   answerDecision(board, request, { agentId: coordinator, text: 'done', lanes: ['docs', 'tests'] });
   const decisions = recordRowDecisions(board, { agentId: PERSON, channel: 'terminal', decisions: [{ kind: 'spec', file: 'SPEC.md', id: 'A1', source: '- A1 [draft] Exact row.', replacement: '- A1 [approved] Exact row.', text: 'Exact row.', decision: 'approve', reason: '' }] });
   applyRowDecisions(board, { agentId: coordinator, events: decisions.map((record) => record.event) });
+  draftSpecRow(board, { agentId: builder, row: { id: 'A2', text: 'A lane drafted row.', gate: 'review', tier: 'must', section: 'A · Fixture' } });
   const freeze = (digest) => () => ({ text: `criterion-${digest}`, digest });
   const first = addItem(board, { by: coordinator, lane: 'docs', title: 'Accepted example', criterion: 'Initial', specIds: ['A1'], route: 'strong' });
   const fact = appendFact(board, first, { agentId: builder, kind: 'note', text: 'Captured evidence', ref: 'docs/formats.md:1-3@' + 'a'.repeat(40) });

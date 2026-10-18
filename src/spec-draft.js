@@ -31,10 +31,10 @@ function prefixedSections(parsed) {
  *
  * @param {string} root
  * @param {any} config
- * @param {{ target: 'spec' | 'doctrine', text: string, gate: string, tier?: string, section?: string, fields?: string[] }} draft
+ * @param {{ target: 'spec' | 'doctrine', text: string, gate: string, tier?: string, section?: string, fields?: string[], id?: string, taken?: string[], write?: boolean }} draft
  * @returns {{ id: string, file: string, line: string, row: { id: string, status: string, tier: string, text: string, gate: string, section: string } }}
  */
-export function draftRow(root, config, { target, text, gate, tier = 'must', section: requested, fields = [] }) {
+export function draftRow(root, config, { target, text, gate, tier = 'must', section: requested, fields = [], id: fixed, taken = [], write = true }) {
   const spec = loadSpec(root, config);
   const practice = loadDoctrine(root, config);
   const parsed = target === 'doctrine' ? practice.repo : spec;
@@ -49,8 +49,10 @@ export function draftRow(root, config, { target, text, gate, tier = 'must', sect
     : 'add a section heading with an id prefix such as G · Goals'}`);
   const malformed = [[spec.file, spec.problems], [practice.repo.file, practice.repo.problems]].find(([, problems]) => problems.length);
   if (malformed) throw new Refused('SPEC_INVALID', `fix the unparsed row in ${malformed[0]} before drafting; an existing id may be ambiguous`);
-  const id = nextRowId(section.prefix, [...spec.rows, ...practice.repo.rows]);
+  // A board draft holds an id too (#878), so a new id skips them; spec apply writes a board draft at its own id.
+  const id = fixed ?? nextRowId(section.prefix, [...spec.rows, ...practice.repo.rows, ...taken.map((taken) => ({ id: taken }))]);
   const line = [`- ${id} [draft, ${tier}] ${text} | gate: ${gate}`, ...fields].join(' | ');
+  if (!write) return { id, file: name, line, row: { id, status: 'draft', tier, text, gate, section: section.name, prefix: section.prefix } };
   const source = readFileSync(parsed.file, 'utf8');
   const after = insertSectionRows(source, parsed, section, [line]);
   writeRowApply(root, { records: [], files: [{ file: name, before: source, after }], signoffs: { before: null, receipts: [] } });

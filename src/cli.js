@@ -103,6 +103,7 @@ import {
   withGateSlot,
 } from './gate.js';
 import { draftRow } from './spec-draft.js';
+import { pendingRowDrafts, withRowDrafts } from './row-drafts.js';
 import { gateWaitReporter } from './gate-wait.js';
 import {
   checkNeedsBrowser,
@@ -3985,6 +3986,13 @@ async function specCommand(io, { first, second, rest, values }) {
     }
     if (values.source !== undefined) throw new Refused('FLAG_NOT_ALLOWED', 'spec draft --source belongs to --doctrine; use both when proposing a ruling');
     const tier = values.aim ? 'aim' : 'must';
+    if (!ctx.info.isMain) {
+      // A lane cannot write SPEC.md, so its draft is recorded on the board and cited at once; spec apply writes it (#878).
+      const entry = await withBoard(ctx, async (board) => ordered(ctx, board, 'draftSpecRow', [{ agentId: store.agentAt(board, ctx.info.root)?.agent_id, row: draftRow(ctx.info.root, ctx.config, { target: 'spec', text: second.trim(), gate: values.gate?.trim() ?? 'review', tier, section: values.section, taken: store.rowDrafts(board).map((draft) => draft.id), write: false }).row }]));
+      io.result?.({ id: entry.id, row: entry });
+      io.say(entry.id);
+      return 0;
+    }
     const { id, row } = draftRow(ctx.info.root, ctx.config, { target: 'spec', text: second.trim(), gate: values.gate?.trim() ?? 'review', tier, section: values.section });
     io.result?.({ id, row });
     io.say(id);
@@ -4037,6 +4045,9 @@ async function specCommand(io, { first, second, rest, values }) {
     return withBoard(ctx, async (board) => {
       const me = whoAmI(ctx, board);
       if (!ctx.info.isMain || me.id !== COORDINATOR) throw new Refused('COORDINATOR_ONLY', 'only the coordinator applies row decisions; ask your coordinator to run pullboard spec apply');
+      // A lane's board drafts (#878) reach SPEC.md as draft rows at their own ids; the person approves them there as before.
+      const drafted = pendingRowDrafts(loadSpec(ctx.info.root, ctx.config), store.rowDrafts(board)).map((draft) => draftRow(ctx.info.root, ctx.config, { target: 'spec', text: draft.text, gate: draft.gate, tier: draft.tier, section: /^(.*?)\d+$/u.exec(draft.id)[1], id: draft.id }));
+      drafted.forEach((row) => io.say(`${row.file}: ${row.id} drafted from a lane, for the person to approve`));
       const plan = planRowApply(ctx.info.root, ctx.config, store.rowDecisions(board));
       writeRowApply(ctx.info.root, plan);
       let applied;
@@ -4044,7 +4055,7 @@ async function specCommand(io, { first, second, rest, values }) {
       catch (error) { restoreRowApply(ctx.info.root, plan); throw error; }
       io.result?.({ applied, files: plan.files.map((file) => file.file) });
       applied.forEach((record) => io.say(`${record.file}: ${record.id} ${record.decision === 'approve' ? 'approved' : 'wont'}${record.reason ? `: ${record.reason}` : ''}`));
-      if (!applied.length) io.say('no pending row decisions');
+      if (!applied.length && !drafted.length) io.say('no pending row decisions');
       else io.say('stage and commit the changed row files and any .pullboard/signoffs.jsonl receipts');
       return 0;
     });
@@ -4103,7 +4114,7 @@ async function specCommand(io, { first, second, rest, values }) {
       findings.forEach((finding) => messages.push(`${name}:${finding.line} ${finding.id ?? ''} ${finding.level}: ${finding.message}`.replace('  ', ' ')));
       const history = parsed === practice ? doctrineHistory(ctx.info.root, name) : committedIds(ctx.info.root, name);
       const cited = name === ctx.config.spec ? citations(ctx, history) : new Map();
-      const lost = permanenceProblems(parsed === practice ? practice.repo : parsed, { committed: history.ids, cited });
+      const lost = permanenceProblems(parsed === practice ? practice.repo : name === ctx.config.spec ? withRowDrafts(parsed, hookRead(ctx, (board) => store.rowDrafts(board))) : parsed, { committed: history.ids, cited });
       if (name === ctx.config.spec) {
         const answered = handAnsweredQuestions(previousSources.get(name) ?? [], parsed.rows, () => hookRead(ctx, (board) => store.rowDecisions(board)) ?? []);
         lost.push(...answered.map((id) => ({ id, message: io.guidance(`pending question answered by hand; ask the person to run pullboard spec answer ${id} "<choice or text>" and restore the pending row`) })));
@@ -4275,7 +4286,7 @@ async function hookCommand(io, { first, second }) {
     problems = preCommitProblems({ root: info.root, isMain: info.isMain || landing, config: ctx.config, agent, boardFile: ctx.file, preMergeHook: first === 'pre-merge-commit', onNotice: (message) => io.err(`pullboard pre-commit: warning: ${message}`) });
   } else if (first === 'commit-msg') {
     const message = readFileSync(second ?? '', 'utf8');
-    const spec = loadSpec(info.root, ctx.config);
+    const spec = withRowDrafts(loadSpec(info.root, ctx.config), hookRead(ctx, (board) => store.rowDrafts(board)));
     commitCitationWarnings(message, { spec, doctrine: ctx.doctrine })
       .forEach((warning) => io.say(`pullboard commit-msg: warning: ${warning}`));
     problems = commitMsgProblems(message, { rules: ctx.config.commits, spec, doctrine: ctx.doctrine });

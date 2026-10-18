@@ -17,8 +17,12 @@ export const WITHDRAW_MILESTONE_ENGINE = 51;
 /** First engine that automatically escalates an item's second rejection at its current route [B15]. */
 export const AUTO_ESCALATE_ENGINE = 50;
 
+/** The first engine that records a spec row a lane agent drafts on the board, not in SPEC.md (#878). */
+export const ROW_DRAFT_ENGINE = 55;
+
 /** Executable move semantics, carried by every sealed move and retained during replay [H16]. */
 export const ENGINE_VERSION = Math.max(
+  ROW_DRAFT_ENGINE,
   AUTO_ESCALATE_ENGINE,
   RIGOR_NOTICE_ENGINE,
   WITHDRAW_MILESTONE_ENGINE,

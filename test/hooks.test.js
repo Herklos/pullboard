@@ -253,3 +253,33 @@ test('a spec-less feature commit is told a path that works [S1,B26]', () => {
     assert.doesNotMatch(advice.join('\n'), /\[G1(?:,G2)?\]/u, 'a fenced example is never suggested as a citation');
   }
 });
+
+test('a lane agent drafts a row and cites it without leaving its lane [S1,B26]', () => {
+  const box = e2e.project('pullboard spec check');
+  assert.equal(box.run(box.repo, 'add', 'web', 'Show the list', '--criterion', 'web/list.html exists').code, 0);
+  const claimed = box.run(box.web, 'claim', '1');
+  assert.equal(claimed.code, 0, claimed.out + claimed.err);
+  const drafted = box.run(box.web, 'spec', 'draft', 'A person sees their list');
+  assert.equal(drafted.code, 0, drafted.out + drafted.err);
+  const id = drafted.out.trim().split('\n').at(-1);
+  assert.match(id, /^G\d+$/u, `spec draft prints the new id: ${drafted.out}`);
+  assert.equal(box.tryGit(box.web, 'status', '--porcelain').stdout, '', 'drafting from the lane leaves its worktree clean');
+  mkdirSync(join(box.web, 'web'), { recursive: true });
+  writeFileSync(join(box.web, 'web', 'list.html'), '<ul></ul>\n');
+  box.git(box.web, 'add', 'web/list.html');
+  const commit = box.tryGit(box.web, 'commit', '-q', '-m', `feat(web): show the list [${id}]`);
+  assert.equal(commit.status, 0, `the lane cites its drafted row in a feature commit: ${commit.stderr}`);
+  const submitted = box.run(box.web, 'submit', '1');
+  assert.equal(submitted.code, 0, `the lane submits with the gate pullboard spec check: ${submitted.out}${submitted.err}`);
+
+  // The coordinator's spec apply writes the board draft into SPEC.md as a draft row, and the person approves it there.
+  const row = () => readFileSync(join(box.repo, 'SPEC.md'), 'utf8').split('\n').find((line) => line.startsWith(`- ${id} `));
+  assert.equal(row(), undefined, 'until apply, SPEC.md does not hold the lane draft');
+  const applied = box.run(box.repo, 'spec', 'apply');
+  assert.equal(applied.code, 0, applied.out + applied.err);
+  assert.match(applied.out, new RegExp(`${id} drafted from a lane, for the person to approve`, 'u'));
+  assert.equal(row(), `- ${id} [draft, must] A person sees their list | gate: review`, 'spec apply writes the draft at its own id');
+  assert.equal(box.run(box.repo, 'spec', 'approve', id).code, 0, 'the person approves the drafted row as before');
+  assert.equal(box.run(box.repo, 'spec', 'apply').code, 0);
+  assert.match(row(), /\[approved, must\]/u, 'the approved row is applied');
+});
