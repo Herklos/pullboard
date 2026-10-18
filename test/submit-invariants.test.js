@@ -4,7 +4,13 @@ import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
 import * as store from '../src/board.js';
-import { appliedSequence, applyEngineMove, applyRelayMove, prepareEngineMove } from '../src/engine.js';
+import {
+  appliedSequence,
+  applyEngineMove,
+  applyRelayMove,
+  engineReceipt,
+  prepareEngineMove,
+} from '../src/engine.js';
 import { exportBoard, importBoard } from '../src/exchange.js';
 import { SUBMISSION_PROOF_ENGINE, landingFileTimes } from '../src/submit-invariants.js';
 import { ENGINE_VERSION } from '../src/machine.js';
