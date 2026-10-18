@@ -10,9 +10,20 @@
  * caller can mint a person-origin citation (P6). The only route to `by: "person"` is a real
  * person answer, which keeps its own person-channel rules.
  */
-import { createHash, randomUUID } from 'node:crypto';
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import {
+  createHash,
+  randomUUID,
+} from 'node:crypto';
+import {
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  writeFileSync,
+} from 'node:fs';
+import {
+  dirname,
+  join,
+} from 'node:path';
 import { COORDINATOR } from './config.js';
 import { ENGINE_VERSION } from './machine.js';
 import { Refused } from './refused.js';

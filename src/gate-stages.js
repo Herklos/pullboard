@@ -1,5 +1,9 @@
 /** Shared local and registered-runner gate accounting [B3,R3,C7]. */
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import {
+  existsSync,
+  readFileSync,
+  statSync,
+} from 'node:fs';
 import { join } from 'node:path';
 
 /**

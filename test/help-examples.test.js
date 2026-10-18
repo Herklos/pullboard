@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { createE2eHelpers } from './e2e-helpers.js';
 
-/** Read flags that appear outside optional square-bracket groups in a usage line. */
+/** Read required flag groups, keeping mutually exclusive alternatives together. */
 function requiredFlags(usage) {
   const flags = [];
   let optionalDepth = 0;
@@ -12,19 +12,30 @@ function requiredFlags(usage) {
     if (usage[index] === '[') optionalDepth += 1;
     else if (usage[index] === ']') optionalDepth = Math.max(0, optionalDepth - 1);
     else if (optionalDepth === 0 && usage.startsWith('--', index)) {
-      const match = usage.slice(index).match(/^--[a-z][a-z-]*/u);
-      if (match) flags.push(match[0]);
+      const match = usage.slice(index).match(/^--[a-z][a-z-]*(?:\|--[a-z][a-z-]*)*/u);
+      if (match) {
+        flags.push(match[0].split('|'));
+        index += match[0].length - 1;
+      }
     }
   }
-  return [...new Set(flags)];
+  return flags;
 }
+
+test('help example flag groups preserve alternatives and optional nesting [O3]', () => {
+  assert.deepEqual(requiredFlags('pullboard command --first <id> --add|--remove ids [--optional]'),
+    [['--first'], ['--add', '--remove']]);
+  assert.deepEqual(requiredFlags('pullboard command [--one [--nested]] --required'), [['--required']]);
+});
 
 test('every help example carries its required flags [O3]', async () => {
   const { HELP } = await import('../src/help.js');
   for (const [name, declaration] of Object.entries(HELP.commands)) {
     const usage = declaration.usages[0];
-    for (const flag of requiredFlags(usage)) {
-      assert.ok(declaration.example.split(/\s+/u).includes(flag), `${name}: ${declaration.example} must include ${flag} from ${usage}`);
+    for (const alternatives of requiredFlags(usage)) {
+      const present = alternatives.filter((flag) => declaration.example.split(/\s+/u).includes(flag));
+      assert.equal(present.length, 1,
+        `${name}: ${declaration.example} must include exactly one of ${alternatives.join('|')} from ${usage}`);
     }
   }
 });

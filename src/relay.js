@@ -1,26 +1,94 @@
 /** Opt-in, sealed relay ordering, with crash-safe migration from the older mirror [H1,H3,H5,H16,H17,P5]. */
-import { createHash, randomUUID } from 'node:crypto';
-import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  createHash,
+  randomUUID,
+} from 'node:crypto';
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { hostname } from 'node:os';
-import { basename, dirname, join } from 'node:path';
-import { gunzipSync, gzipSync } from 'node:zlib';
+import {
+  basename,
+  dirname,
+  join,
+} from 'node:path';
+import {
+  gunzipSync,
+  gzipSync,
+} from 'node:zlib';
 import * as store from './board.js';
-import { exportBoard, importBoard, restoreRelaySnapshot, semanticBoardDigest } from './exchange.js';
-import { appliedSequence, applyEngineMove, applyRelayMove, checkpointSequence, engineReceipt, prepareEngineMove, refuseRelayMove, requireSupportedEngine, startRelayEpoch } from './engine.js';
+import {
+  exportBoard,
+  importBoard,
+  restoreRelaySnapshot,
+  semanticBoardDigest,
+} from './exchange.js';
+import {
+  appliedSequence,
+  applyEngineMove,
+  applyRelayMove,
+  checkpointSequence,
+  engineReceipt,
+  prepareEngineMove,
+  refuseRelayMove,
+  requireSupportedEngine,
+  startRelayEpoch,
+} from './engine.js';
 import { relayMoveActor } from './relay-sender.js';
 import { ENGINE_VERSION } from './machine.js';
-import { presentationDigest, relayPresentation, relaySnapshot } from './relay-presentation.js';
-import { codeIsFromMain, repoInfo, tryGit } from './git.js';
-import { forgetBoardKey, readBoardKey, storeBoardKey } from './relay-key.js';
-import { encodeBoardKey, generateBoardKey, seal, unseal } from './seal.js';
+import {
+  presentationDigest,
+  relayPresentation,
+  relaySnapshot,
+} from './relay-presentation.js';
+import {
+  codeIsFromMain,
+  repoInfo,
+  tryGit,
+} from './git.js';
+import {
+  forgetBoardKey,
+  readBoardKey,
+  storeBoardKey,
+} from './relay-key.js';
+import {
+  encodeBoardKey,
+  generateBoardKey,
+  seal,
+  unseal,
+} from './seal.js';
 import { terminalQr } from './qr.js';
 import { Refused } from './refused.js';
 import { refusalFromReceipt } from './recorded-refusal.js';
 import { relaySenderProblem } from './relay-sender.js';
-import { readRelayMachine, removeRecordedDevice, updateRelayMachine, wrapForRecordedDevice } from './relay-machine.js';
-import { receivePersonRequest, requestMoveProblem } from './relay-requests.js';
-import { nativePhoneAction, phoneProposal, publishPhoneApproval, warnPhoneApproval } from './relay-phone.js';
-import { remoteShell as isRemoteShell, requirePersonChannel, requireRelayOnChannel } from './person.js';
+import {
+  readRelayMachine,
+  removeRecordedDevice,
+  updateRelayMachine,
+  wrapForRecordedDevice,
+} from './relay-machine.js';
+import {
+  receivePersonRequest,
+  requestMoveProblem,
+} from './relay-requests.js';
+import {
+  nativePhoneAction,
+  phoneProposal,
+  publishPhoneApproval,
+  warnPhoneApproval,
+} from './relay-phone.js';
+import {
+  remoteShell as isRemoteShell,
+  requirePersonChannel,
+  requireRelayOnChannel,
+} from './person.js';
 import { listApiProjects } from './projects.js';
 
 export const DEFAULT_RELAY = 'https://app.pullboard.dev';

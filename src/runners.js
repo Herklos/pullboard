@@ -1,17 +1,60 @@
 /** Exact committed source and bounded, credential-free SSH execution for machine runners [C7]. */
-import { spawn, spawnSync } from 'node:child_process';
-import { createHash, randomUUID } from 'node:crypto';
-import { chmodSync, closeSync, createReadStream, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  spawn,
+  spawnSync,
+} from 'node:child_process';
+import {
+  createHash,
+  randomUUID,
+} from 'node:crypto';
+import {
+  chmodSync,
+  closeSync,
+  createReadStream,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  readSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, isAbsolute, join } from 'node:path';
+import {
+  dirname,
+  isAbsolute,
+  join,
+} from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { pipeline } from 'node:stream/promises';
-import { gunzipSync, gzipSync } from 'node:zlib';
-import { configFromSource, defaults } from './config.js';
-import { blockedPaths, secretsIn } from './hooks.js';
-import { cleanGitEnvironment, headCommit, headTree, isClean, repoInfo, untracked } from './git.js';
+import {
+  gunzipSync,
+  gzipSync,
+} from 'node:zlib';
+import {
+  configFromSource,
+  defaults,
+} from './config.js';
+import {
+  blockedPaths,
+  secretsIn,
+} from './hooks.js';
+import {
+  cleanGitEnvironment,
+  headCommit,
+  headTree,
+  isClean,
+  repoInfo,
+  untracked,
+} from './git.js';
 import { Refused } from './refused.js';
-import { gateStages, readStages } from './gate-stages.js';
+import {
+  gateStages,
+  readStages,
+} from './gate-stages.js';
 import { remoteFileDenial } from './sandbox-denial.js';
 
 // Budget: 64 MiB bounds worst-case JSON bridge escaping below Node string limits.
