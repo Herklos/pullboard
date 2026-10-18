@@ -44,6 +44,11 @@ import {
 } from './machine.js';
 import { Refused } from './refused.js';
 import {
+  newRigorNotices,
+  rigorNoticeText,
+} from './rigor-notices.js';
+import { RIGOR_NOTICE_ENGINE } from './rigor-source.js';
+import {
   causeProblem,
   requireNeverAgain,
 } from './rigor.js';
@@ -1662,8 +1667,10 @@ export function verify(board, id, { agentId, decision, reason, note = '', cause,
     if (isAccept && check !== undefined) detail.check = check;
     if (newReview) detail.review = { commit: review.commit, ...(Object.hasOwn(review, 'head') ? { head: review.head } : {}), trunk: review.trunk, paths: [...review.paths] };
     logEvent(board, agentId, verb, id, implies?.length ? { ...detail, implies } : detail);
+    const trigger = board.lastEvent;
     if (!isAccept) autoEscalateRejectedItem(board, id, engine);
     tellVerdictImplications(board, (by, itemId, fact) => logEvent(board, by, 'fact', itemId, fact), id, { seed: impliesId, implies });
+    if (!isAccept) postRigorNotices(board, trigger);
     return { decision, reason: code, ...(isAccept && check !== undefined ? { check } : {}) };
   });
 }
@@ -1729,6 +1736,7 @@ export function reopen(board, id, { agentId, note, cause }) {
     });
     logEvent(board, agentId, 'reopen', id, { commit: submittedCommit, note: note.trim(), judgment: null,
       ...(supersedes ? { supersedes, landingFailure } : {}), ...(cause !== undefined && cause !== null ? { cause } : {}) });
+    postRigorNotices(board, board.lastEvent);
     return { id: item.item_id, commit: submittedCommit, ...(supersedes ? { supersedes, landingFailure } : {}) };
   });
 }
@@ -1966,6 +1974,12 @@ function insertShout(board, { from, to, text, lanes, decision = false, answers =
   if (personAnswer && !['terminal', 'view'].includes(channel)) {
     throw new Refused('B26_PERSON_CHANNEL', 'record the person answer through the terminal or the view; run pullboard view');
   }
+  return persistShout(board, { from, to, text, decision, answers, evidence, request, channel, detail, outcome, personAnswer });
+}
+
+/** Persist a validated message or a fixed internal notice inside the caller's transaction. */
+function persistShout(board, { from, to, text, decision = false, answers = null, evidence = null, request = false,
+  channel = 'terminal', detail = {}, outcome = '', personAnswer = false }) {
   const result = board.db
     .prepare(
       `INSERT INTO shout (shout_from, shout_to, shout_text, shout_at, shout_decision, shout_answers,
@@ -2262,8 +2276,21 @@ export function appendFact(board, id, { agentId, kind, text, ref = null, superse
     const binding = factReference(ref);
     if (neverAgain || asPerson || cause !== null) requireNeverAgain(id, { agentId, cause, neverAgain, asPerson, channel });
     logEvent(board, neverAgain ? PERSON : agentId, 'fact', id, { id: factId, kind, text, ref: binding, supersedes, ...(neverAgain ? { cause, neverAgain: true, channel } : {}), ...(implies?.length ? { implies } : {}) });
-    return tellFactImplications(board, (by, itemId, fact) => logEvent(board, by, 'fact', itemId, fact), factFromEvent(board.lastEvent), { id, implies, supersedes });
+    const trigger = board.lastEvent;
+    const result = tellFactImplications(board, (by, itemId, fact) => logEvent(board, by, 'fact', itemId, fact), factFromEvent(trigger), { id, implies, supersedes });
+    if (neverAgain) postRigorNotices(board, trigger);
+    return result;
   });
+}
+
+/** The enclosing move's transaction owns these implicit notices; older replay emits none. */
+function postRigorNotices(board, trigger) {
+  if ((board.executionEngineVersion ?? ENGINE_VERSION) < RIGOR_NOTICE_ENGINE) return;
+  for (const cause of newRigorNotices(events(board), trigger, { person: PERSON })) {
+    persistShout(board, { from: 'rigor', to: COORDINATOR, text: rigorNoticeText(cause) });
+    logEvent(board, 'rigor', 'rigor-notice', null, { cause: cause.key, items: cause.items,
+      occurrences: cause.occurrences, neverAgain: cause.neverAgain, engine: RIGOR_NOTICE_ENGINE });
+  }
 }
 
 /**

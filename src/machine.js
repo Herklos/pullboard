@@ -9,8 +9,10 @@
  * broken copy, and checks the declaration against the refusals board.js and cli.js raise today.
  */
 
+import { RIGOR_NOTICE_ENGINE } from './rigor-source.js';
+
 /** Executable move semantics, carried by every sealed move and retained during replay [H16]. */
-export const ENGINE_VERSION = 44;
+export const ENGINE_VERSION = Math.max(44, RIGOR_NOTICE_ENGINE);
 
 /** First engine that automatically escalates an item's second rejection at its current route [B15]. */
 export const AUTO_ESCALATE_ENGINE = 44;
