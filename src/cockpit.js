@@ -1,4 +1,8 @@
-import { hostedReleaseDistance, hostedReleaseInfo, hostedReleaseNote } from './view/hosted-release.js';
+import {
+  hostedReleaseDistance,
+  hostedReleaseInfo,
+  hostedReleaseNote,
+} from './view/hosted-release.js';
 import {
   effectiveGuards,
   IN_STATE,
