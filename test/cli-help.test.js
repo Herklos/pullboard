@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { runFixtureChild, runFixtureGit } from './fixture-child.js';
 import { after, test } from 'node:test';
-import { HELP, resultCommands } from '../src/cli.js';
+import { HELP, resultCommands, VERSION } from '../src/cli.js';
 import * as helpDeclaration from '../src/help.js';
 import { importStyleViolations } from './import-style-helpers.js';
 import { pathToFileURL } from 'node:url';
@@ -137,6 +137,14 @@ test('help names come from the command declarations [C7,N37]', async (t) => {
   assert.equal(all.status, 0, all.failure);
   assert.equal(overview.stdout, HELP.overview + '\n');
   assert.equal(all.stdout, HELP.all + '\n');
+  const before = JSON.parse(readFileSync(new URL('./fixtures/help-before-declarations.json', import.meta.url), 'utf8'));
+  assert.equal(HELP.overview, before.help.overview, 'overview preserves the captured pre-refactor bytes');
+  assert.equal(HELP.firstRun, before.help.firstRun, 'first-run help preserves its pre-refactor bytes');
+  const beforeAll = before.help.all.replace(/^pullboard [0-9]+\.[0-9]+\.[0-9]+:/u, `pullboard ${VERSION}:`);
+  assert.equal(HELP.all, beforeAll, 'full help preserves its pre-refactor bytes apart from a release version bump');
+  for (const [name, entry] of Object.entries(before.help.commands)) {
+    assert.deepEqual(HELP.commands[name], entry, `${name} preserves every existing usage, flag, example and note`);
+  }
   t.diagnostic('help overview bytes ' + JSON.stringify(overview.stdout));
 
   const directory = resolve(import.meta.dirname, '../src');
@@ -170,10 +178,6 @@ test('help names come from the command declarations [C7,N37]', async (t) => {
   assert.deepEqual(generated.commands['future-command']?.usages, ['pullboard future-command']);
   assert.equal(generated.overview, HELP.overview, 'a new declaration preserves the overview bytes');
   assert.equal(generated.all, HELP.all, 'a new declaration preserves the full-help bytes');
-  assert.deepEqual(generated.commands['relay join'].usages, ['pullboard relay join <code> [--url <address>]']);
-  assert.deepEqual(generated.commands['spec approve'].usages, ['pullboard spec approve <ids>']);
-  assert.deepEqual(generated.commands['spec decline'].usages, ['pullboard spec decline <ids> --reason "why"']);
-  assert.match(generated.commands['spec fit edit'].usages[0], /^pullboard spec fit edit <row id or #item>/u);
 
   const original = readFileSync(join(directory, 'cli.js'), 'utf8');
   const declaration = /function readCommands\(io, \{ first, second, rest, values \}\) \{\s*return \{/u;

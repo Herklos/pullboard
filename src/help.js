@@ -335,18 +335,19 @@ function commandHelpRows(fullHelp, commandNames) {
     for (let next = index + 1; next < lines.length && lines[next].startsWith(' ') && lines[next].trim() && !lines[next].startsWith('  pullboard '); next += 1) details.push(lines[next].trim());
     rows.push({ usage: lines[index].trim().slice('pullboard '.length).split(/\s{2,}/, 1)[0].trim(), details });
   }
-  const phrases = rows.flatMap((row) => usagePhrases(row.usage));
   const names = [...new Set([
     ...commandNames,
     ...Object.keys(HELP_ALIASES),
-    ...phrases.flatMap((name) => [name.split(' ')[0], name]),
+    ...Object.keys(HELP_EXAMPLES).filter((name) => /^[a-z][a-z0-9-]*(?: [a-z][a-z0-9-]*)*$/u.test(name)),
+    ...rows.flatMap((row) => {
+      const words = commandWords(row.usage);
+      return row.usage.includes(' | ') ? words.slice(0, 1) : words.map((_, index) => words.slice(0, index + 1).join(' '));
+    }).filter((name) => /^[a-z][a-z0-9-]*(?: [a-z][a-z0-9-]*)*$/u.test(name)),
   ])];
-  const expandedRows = rows.flatMap((row) => usageVariants(row.usage)
-    .map((usage) => ({ usage, details: [`pullboard ${usage}`, ...row.details.slice(1)] })));
   return Object.fromEntries(names.map((name) => {
     const parts = name.split(' ');
     const alias = HELP_ALIASES[name];
-    const matches = alias?.source ? rows.filter((row) => row.usage === alias.source || row.usage.startsWith(`${alias.source} `)) : alias ? [] : expandedRows.filter((row) => {
+    const matches = alias?.source ? rows.filter((row) => row.usage === alias.source || row.usage.startsWith(`${alias.source} `)) : alias ? [] : rows.filter((row) => {
       const tokens = row.usage.split(/\s+/u);
       if (!parts.every((part, index) => tokens[index] === part)) return false;
       const next = tokens[parts.length];
@@ -426,23 +427,6 @@ function expandWords(words) {
   let phrases = [''];
   for (const word of words) phrases = phrases.flatMap(prefix => word.split('|').map(choice => (prefix + ' ' + choice).trim()));
   return phrases.filter(Boolean);
-}
-
-/** Expand printed sibling commands into complete usages, retaining each branch's arguments and flags. */
-function usageVariants(usage) {
-  const branches = usage.split(/\s+\|\s+/u);
-  const shared = branches.length > 1 ? commandWords(branches[0]).slice(0, -1) : [];
-  return branches.flatMap((branch, index) => {
-    const command = [...(index ? shared : []), branch.replace(/^pullboard\s+/u, '')].join(' ');
-    const words = commandWords(command);
-    const tail = command.slice(words.join(' ').length);
-    return expandWords(words).flatMap((prefix) => {
-      const base = prefix + tail;
-      const optional = /^(.*?)\[([^\]]+)\](.*)$/u.exec(base);
-      if (!optional || !optional[2].includes('|') || optional[2].trim().startsWith('-')) return [base];
-      return [base, ...optional[2].split('|').map((choice) => `${optional[1]}${choice}${optional[3]}`)];
-    });
-  });
 }
 
 /** Read one printed usage, including sibling commands and optional literal subcommands. */
