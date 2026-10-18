@@ -106,7 +106,7 @@ function citationGuide(spec, type) {
     .map(row => row.id).filter(id => !idProblems(spec, [id]).length))].slice(0, 2);
   return ids.length
     ? `end the header with the spec rows this ${type} serves, like [${ids.join(',')}]; docs, test and chore commits may cite none`
-    : `no approved spec row is available to cite; fenced format examples are not spec rows; run pullboard spec draft "<text>" for this requirement, ask the person to approve the returned id, then cite it in this ${type || 'commit'} header`;
+    : `no approved spec row is available to cite; fenced format examples are not spec rows; run pullboard spec draft "<text>" for this requirement and cite the returned id now in this ${type || 'commit'} header; the person approves it in parallel`;
 }
 
 /**
