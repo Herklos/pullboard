@@ -109,7 +109,7 @@ test('[N26] a milestone ships what landed and moves the rest', async (t) => {
   assert.equal(milestone(before, 'A').done, 1, 'done means landed, so accepted work is not done');
   assert.equal(milestone(before, 'A').total, 3);
   assert.deepEqual(milestone(before, 'A').items.map(({ id, state }) => [id, state]),
-    [[landed, 'landed'], [accepted, 'accepted'], [open, 'open']], 'each item shows its roadmap state');
+    [[open, 'open'], [landed, 'landed'], [accepted, 'accepted']], 'each item shows its roadmap state, work to ship first');
   const text = box.run('roadmap');
   assert.equal(text.status, 0, text.stdout + text.stderr);
   assert.match(text.stdout, /^A: 1\/3 landed · target 2026-01-02T03:04:00\.000Z, past target$/m, 'the text shows N/M landed, the target and past target');
@@ -132,7 +132,8 @@ test('[N26] a milestone ships what landed and moves the rest', async (t) => {
   assert.equal(milestone(after, 'A').shipped.commit, main, "the roadmap shows main's commit on the shipped milestone");
   assert.deepEqual(milestone(after, 'A').items.map(({ id }) => id), [landed], 'only the landed item stays in the shipped milestone');
   assert.equal(milestone(after, 'A').pastTarget, false, 'a shipped milestone is no longer past its target');
-  assert.deepEqual(milestone(after, 'B').items.map(({ id }) => id), [later, accepted, open], 'the unlanded items are now in B');
+  assert.deepEqual(store.milestones(box.board).find((entry) => entry.name === 'B').items, [later, accepted, open], 'the unlanded items are now in B, after its own');
+  assert.deepEqual(milestone(after, 'B').items.map(({ id }) => id), [later, open, accepted], 'and the roadmap lists them work to ship first');
 
   // The threads: each moved item records the move; the landed one records none.
   for (const id of [accepted, open]) {

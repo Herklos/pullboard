@@ -277,7 +277,10 @@ import {
   registerProjectAndLink,
   registeredProjectRootsSnapshot,
 } from './projects.js';
-import { milestoneRoadmap } from './roadmap.js';
+import {
+  milestoneRoadmap,
+  withdrawWithMilestones,
+} from './roadmap.js';
 import {
   rigorLines,
   rigorReport,
@@ -3725,12 +3728,8 @@ function workCommands(io, args) {
       io.say(`#${first} merged as ${commit.slice(0, 12)}`);
       return 0;
     }),
-    withdraw: () => act(async (ctx, board, me) => {
-      await ordered(ctx, board, 'withdraw', [idArg(first), { agentId: me.id, reason: [second, ...rest].filter(Boolean).join(' ') }]);
-      io.result?.({ id: idArg(first), reason: [second, ...rest].filter(Boolean).join(' ') });
-      io.say(`withdrew #${first}`);
-      return 0;
-    }),
+    withdraw: () => act((ctx, board, me) => withdrawWithMilestones(ctx, board, me, idArg(first),
+      [second, ...rest].filter(Boolean).join(' '), ordered)),
     refreeze: () => act(async (ctx, board, me) => {
       const result = await ordered(ctx, board, 'refreeze', [idArg(first), { agentId: me.id, freeze: freezer(ctx, { captureVerifyPolicy: true, board }) }]);
       io.result?.({ id: idArg(first), ...result });
