@@ -250,7 +250,6 @@ test('a child process listen denial reads as sandbox blocked [C7,B26]', (t) => {
   assert.match(barePython.err, /file access .*\(EACCES\)/u);
   assert.doesNotMatch(barePythonOutput, /GATE_RED/u);
 });
-
 /** A failed project command keeps its first diagnostic even when later output is unstructured. */
 test('a red gate on submit shows what the gate said [C7,V10]', (t) => {
   for (const stream of ['log', 'error']) {
