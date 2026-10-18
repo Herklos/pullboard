@@ -12,6 +12,15 @@ export function rigorTriggerCauses(event, person) {
   return eventCauses(event);
 }
 
+/** Ignore an unreadable historical row source; it cannot establish a person’s typed decline. */
+function declinedRigorSource(source) {
+  if (typeof source !== 'string') return null;
+  let rows;
+  try { rows = parseSpec(`## Source\n${source}\n`).rows; }
+  catch { return null; } // Historical metadata is optional; a parser refusal must never abort the original item move.
+  return rows.length === 1 ? readRigorSource(rows[0].source) : null;
+}
+
 /** Reconstruct notice and exact person-decline state from ordered receipts, never free text. */
 function noticeState(events, person) {
   const seen = new Map();
@@ -26,9 +35,7 @@ function noticeState(events, person) {
     if (event.event_kind === 'rigor-notice' && event.event_by === 'rigor' && detail.engine === RIGOR_NOTICE_ENGINE
       && typeof detail.cause === 'string' && !causeProblem(detail.cause)) notified.set(detail.cause, event.event_id);
     if (event.event_kind !== 'row_decision' || event.event_by !== person || detail.record?.decision !== 'decline') continue;
-    const row = parseSpec(`## Source\n${detail.record.source}\n`).rows;
-    if (row.length !== 1) continue;
-    const source = readRigorSource(row[0].source);
+    const source = declinedRigorSource(detail.record.source);
     if (source) declined.set(source.key, { event: event.event_id, items: new Set(seen.get(source.key) ?? []) });
   }
   return { notified, declined };

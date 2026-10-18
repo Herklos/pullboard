@@ -113,6 +113,8 @@ const CALLBACKS = { 'board.js': { freeze: 'cli.js#freezer' } };
 const CAUGHT = {
   'cli.js#submitHere': ['cli.js#freezer', 'main-red.js#compareMainFailures', 'main-red.js#matchingReworks', 'doctrine-checks.js#checkRulesAt'],
   'cli.js#verifyHere': ['cli.js#freezer'],
+  // Historical decline metadata is parsed inside a non-throwing boundary, covered by the Rigor history control.
+  'board.js#reopen': ['rigor-notices.js#declinedRigorSource'],
 };
 
 /**

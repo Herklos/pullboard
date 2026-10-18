@@ -16,6 +16,7 @@ import { main } from '../src/cli.js';
 import { refusePersonMove } from '../src/mcp.js';
 import { CAUSE_ENGINE, ENGINE_VERSION } from '../src/machine.js';
 import { rigorReport } from '../src/rigor.js';
+import { newRigorNotices, undraftedRigor } from '../src/rigor-notices.js';
 import { readRigorSource, rigorSource, RIGOR_NOTICE_ENGINE } from '../src/rigor-source.js';
 import { loadConfig } from '../src/config.js';
 import { loadDoctrine } from '../src/doctrine.js';
@@ -229,6 +230,31 @@ test('automatic Rigor notices retain old replay and include reopen and never-aga
   for (const id of conflicts) { historyBox.submit(id); historyBox.reject(id, 'refusal:MERGE_CONFLICT'); }
   assert.equal(store.allShouts(historyBox.board).filter(shout => shout.shout_from === 'rigor').length, 3);
   historyBox.close();
+});
+
+test('unreadable historical decline metadata cannot abort or silence a repeated cause [D1,H16,M1]', () => {
+  const box = freshBoard();
+  const recorded = history(box.file);
+  recorded.board.executionEngineVersion = RIGOR_NOTICE_ENGINE - 1;
+  for (const id of ['Historical first', 'Historical second'].map(recorded.add)) {
+    recorded.submit(id); recorded.reject(id, 'row:G1');
+  }
+  const events = store.events(recorded.board);
+  const trigger = events.at(-1);
+  const cause = rigorReport(events, { person: store.PERSON }).causes[0];
+  const proof = { check: 'test -f fixed', red: { commit: 'a'.repeat(40), exit: 1 }, green: { commit: 'b'.repeat(40), exit: 0 } };
+  const row = `- G9 [draft, must] A proved rule | source: ${rigorSource(cause, proof)}`;
+  const declined = source => [...events, { event_id: trigger.event_id + 1, event_kind: 'row_decision', event_by: store.PERSON,
+    item_id: null, event_detail: JSON.stringify({ record: { decision: 'decline', source } }) }];
+  const state = { spec: [], practice: [] };
+  assert.deepEqual(undraftedRigor(declined(row), state, { person: store.PERSON }), [], 'a valid typed decline still stays quiet');
+  for (const source of [undefined, 'ordinary prose', `<!-- pullboard-grammar 999 -->\n${row}`]) {
+    const historical = declined(source);
+    assert.deepEqual(newRigorNotices(historical, trigger, { person: store.PERSON }).map(entry => entry.key), ['row:G1'],
+      'unknown provenance neither refuses the item move nor suppresses the notice');
+    assert.deepEqual(undraftedRigor(historical, state, { person: store.PERSON }).map(entry => entry.key), ['row:G1']);
+  }
+  recorded.close();
 });
 
 test('a repeated failure cause is noticed [D1,V1]', () => {
