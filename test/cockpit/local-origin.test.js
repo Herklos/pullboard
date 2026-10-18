@@ -826,9 +826,13 @@ test('every hosted page state says what it is and what to do next [N26,H5]', { t
           const actions = [...document.querySelectorAll('#detail button[data-shout], #detail button[data-new]')]
             .filter((element) => element.getClientRects().length).map((element) => ({ text: element.textContent,
               style: signature(element), height: element.getBoundingClientRect().height }));
-          probe.remove(); return { baseline, actions };
+          // What the page showed, for a run where the actions do not appear (#829: Linux CI only, not reproduced here).
+          const detail = document.querySelector('#detail');
+          const seen = { innerWidth, detailShown: Boolean(detail && detail.getClientRects().length), item: view.item ?? null,
+            tab: view.tab ?? null, all: [...document.querySelectorAll('#detail button[data-shout], #detail button[data-new]')].map((element) => element.textContent + (element.getClientRects().length ? '' : ' (hidden)')) };
+          probe.remove(); return { baseline, actions, seen };
         })())`));
-        assert.equal(controls.actions.length, 2, `both next actions appear at ${width}px in ${theme}`);
+        assert.equal(controls.actions.length, 2, `both next actions appear at ${width}px in ${theme}: ${JSON.stringify(controls.seen)}`);
         for (const action of controls.actions) {
           assert.notDeepEqual(action.style, controls.baseline, `${action.text} uses the view styles at ${width}px in ${theme}`);
           if (width === 390) assert.ok(action.height >= 44, `${action.text} retains a phone touch target in ${theme}`);
