@@ -66,15 +66,6 @@ import {
 } from './seal.js';
 import { terminalQr } from './qr.js';
 import { Refused } from './refused.js';
-import {
-  baselinePauseLine,
-  expiredSignInMoveRefusal,
-  formatSnapshotLimit,
-  permanentBaselineRefusal,
-  safePauseCode,
-  safePauseMessage,
-  transportFailure,
-} from './relay-messages.js';
 import { refusalFromReceipt } from './recorded-refusal.js';
 import { relaySenderProblem } from './relay-sender.js';
 import {
@@ -334,6 +325,17 @@ function notices(document, io) {
   }
 }
 
+/**
+ * Name how a relay request failed before any response, from the error's own fields only.
+ * Why: a bare "did not answer" hid whether a request timed out, was refused or lost its socket,
+ * so load-dependent relay failures could not be attributed (#512).
+ */
+function transportFailure(error) {
+  if (error?.name === 'TimeoutError' || error?.name === 'AbortError') return 'timed out';
+  const code = error?.cause?.code ?? error?.code;
+  return typeof code === 'string' && /^[A-Z][A-Z0-9_]{1,40}$/u.test(code) ? code : 'no connection';
+}
+
 /** The sole outbound transport in the CLI: explicit sign-in or a saved, opted-in board link. */
 async function request(state, path, { method = 'GET', body, allowMissing = false, initialBaseline = false, signal } = {}, io) {
   const supplied = io?.ignoreRelayEnvironmentToken ? undefined : process.env.PULLBOARD_RELAY_TOKEN;
@@ -455,6 +457,24 @@ export function pendingSnapshotSize(root) {
   return snapshotSize(loadLink(linkFile(root)));
 }
 
+/** Format a shared status line for an oversized sealed snapshot. */
+export function formatSnapshotLimit(problem, { paused = false } = {}) {
+  const size = `${(problem.sealedBytes / 1_000_000).toFixed(1)} MB`;
+  const limit = `${(problem.limit / 1_000_000).toFixed(1)} MB`;
+  if (paused) return `relay paused for ${problem.board}: snapshot ${size} over the relay limit ${limit}; it resumes on its own once a snapshot fits`;
+  return `relay snapshot for ${problem.board}: sealed snapshot ${size} over the relay limit ${limit}`;
+}
+
+/** Keep a permanent refusal only as a bounded, credential-free diagnostic. */
+function safePauseMessage(error) {
+  const message = String(error.relayMessage ?? error.message ?? 'the relay refused the baseline upload')
+    .replace(/https?:\/\/[^\s]+/gu, '[relay]')
+    .replace(/\b(?:Bearer\s+)?(?:ps|pa|pm|pg)_[A-Za-z0-9_-]{20,}\b/gu, '[credential]')
+    .replace(/[\r\n\t\x00-\x1f\x7f]+/gu, ' ')
+    .replace(/\s+/gu, ' ').trim();
+  return message.slice(0, 240) || 'the relay refused the baseline upload';
+}
+
 /** Whether the CLI command will make an ordered move whose refusal should be reported at dispatch. */
 function orderedMoveCommand(io) {
   const command = io.relayCommand;
@@ -470,6 +490,21 @@ function reportExpiredSignIn(state, io) {
     ? 'unset PULLBOARD_RELAY_TOKEN to use this machine credential or supply a current PULLBOARD_RELAY_TOKEN'
     : 'run pullboard relay on to sign in again or pullboard relay off to stop syncing';
   io.err(`pullboard: [AUTH_REQUIRED] relay sign-in expired or was revoked for board ${state.board}; ${fix}`);
+}
+
+/** Preserve the ordered-move refusal while naming this board and both recovery choices. */
+function expiredSignInMoveRefusal(state, error) {
+  const reason = safePauseMessage(error);
+  if (process.env.PULLBOARD_RELAY_TOKEN !== undefined) {
+    return new Refused('AUTH_REQUIRED', `the supplied PULLBOARD_RELAY_TOKEN was refused for board ${state.board}: ${reason}; unset PULLBOARD_RELAY_TOKEN to use this machine credential or supply a current PULLBOARD_RELAY_TOKEN`);
+  }
+  return new Refused('AUTH_REQUIRED', `relay sign-in expired or was revoked for board ${state.board}: ${reason}; run pullboard relay on to give this machine a credential or pullboard relay off to stop syncing`);
+}
+
+/** Pause only definitive baseline 4xx refusals; throttling and transient errors retain retries. */
+function permanentBaselineRefusal(error) {
+  return Number.isInteger(error?.httpStatus) && error.httpStatus >= 400 && error.httpStatus < 500 &&
+    ![408, 425, 429].includes(error.httpStatus);
 }
 
 /** Explain a refused later checkpoint without changing the ordered-move recovery policy. */
@@ -500,6 +535,25 @@ function reportCheckpointRefusal(state, io) {
   const line = 'pullboard: ' + checkpointProblem(state).message;
   if (['status', 'doctor'].includes(io.relayCommand?.cliOperation) && io.relayJson === false) io.say(line);
   else io.err(line);
+}
+
+/** Name the safe next step for the saved permanent refusal. */
+function pauseFix(state) {
+  const pause = state.baselinePause;
+  if (pause.size || /(?:exceeds?|over|larger than|too large).{0,40}(?:bytes|snapshot|limit)|(?:snapshot|limit).{0,40}(?:exceeds?|over|too large)/iu.test(pause.message)) {
+    return 'it resumes automatically once a snapshot fits';
+  }
+  if ([401, 403].includes(pause.status) || pause.code === 'AUTH_REQUIRED') return 'run pullboard relay on to sign in again';
+  return 'upgrade Pullboard or run pullboard relay on again, then report the refusal if it persists';
+}
+
+/** Render one bounded line with board, safe refusal reason and recovery step. */
+function baselinePauseLine(state) {
+  const pause = state.baselinePause;
+  const code = /^[A-Z][A-Z0-9_]{0,63}$/.test(pause.code) ? pause.code : 'RELAY_REFUSED';
+  const size = pause.size && Number.isSafeInteger(pause.size.sealedBytes) && Number.isSafeInteger(pause.size.limit)
+    ? formatSnapshotLimit({ board: state.board, ...pause.size }, { paused: true }) : `relay paused for ${state.board} before its baseline upload`;
+  return `pullboard: [${code}] ${size}: ${pause.message}; ${pauseFix(state)}`;
 }
 
 /** Report the durable pause once across preflight, move and postflight in one command. */
@@ -534,6 +588,12 @@ async function remoteBaselineAbsent(state, io) {
     throw error;
   }
   return false;
+}
+
+/** Persist only a stable refusal code, never arbitrary relay text masquerading as a code. */
+function safePauseCode(error) {
+  const code = error.relayCode ?? error.code;
+  return typeof code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(code) ? code : 'RELAY_REFUSED';
 }
 
 /** Keep a conflicting remote baseline fenced across process restarts without discarding local work. */

@@ -28,9 +28,8 @@ import {
 } from 'node:path';
 import { Refused } from './refused.js';
 
-// The util ESM facade evaluates lazy exports, including diff, which opens stderr on Node 24.
-// A child may share that descriptor with stdout; keep its pipe mode unchanged when preloading us.
-const { promisify } = process.getBuiltinModule('node:util');
+// Node registers this symbol globally; looking it up needs no util facade or dynamic loader.
+const PROMISIFY_CUSTOM = Symbol.for('nodejs.util.promisify.custom');
 
 /** The marker the runner sets in a test file's process: held, none, or unset when the setting is off. */
 export const BROWSER_SLOT_ENV = 'PULLBOARD_TEST_BROWSER_SLOT';
@@ -169,10 +168,10 @@ export function installBrowserSlotGuard() {
       if (browser) throw browserSlotRefusal(browser);
       return original.apply(this, input);
     };
-    const custom = original[promisify.custom];
+    const custom = original[PROMISIFY_CUSTOM];
     if (custom) {
       /** The promisified form takes the same arguments, so it gets the same check. */
-      guarded[promisify.custom] = function guardedPromisified(...input) {
+      guarded[PROMISIFY_CUSTOM] = function guardedPromisified(...input) {
         const browser = browserInCall(method, input);
         if (browser) return Promise.reject(browserSlotRefusal(browser));
         return custom.apply(this, input);

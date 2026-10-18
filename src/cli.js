@@ -14,11 +14,16 @@ import {
   appendFileSync,
   existsSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   realpathSync,
+  renameSync,
   writeFileSync,
 } from 'node:fs';
-import { loadavg } from 'node:os';
+import {
+  hostname,
+  loadavg,
+} from 'node:os';
 import {
   basename,
   dirname,
@@ -28,10 +33,7 @@ import {
   resolve,
 } from 'node:path';
 import { performance } from 'node:perf_hooks';
-import {
-  fileURLToPath,
-  pathToFileURL,
-} from 'node:url';
+import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import * as store from './board.js';
 import {
@@ -90,6 +92,7 @@ import {
   timingDigest,
   withGateSlot,
 } from './gate.js';
+import { gateWaitReporter } from './gate-wait.js';
 import {
   checkNeedsBrowser,
   explicitCheckFiles,
@@ -126,6 +129,7 @@ import {
 } from './hooks.js';
 import {
   askedLaneNotes,
+  detectGate,
   initRepo,
   proposeLanes,
   starterLane,
@@ -198,6 +202,11 @@ import {
   repoAnswers,
   saveBlueprint,
 } from './blueprints.js';
+import { fitCommand } from './blueprint-fit-command.js';
+import {
+  fitSummary,
+  readFitBatch,
+} from './blueprint-fit.js';
 import {
   blueprintStarterNote,
   combinedSummary,
@@ -312,6 +321,12 @@ import {
   requireTrunkMerge,
   trunkRef,
 } from './trusted-policy.js';
+import {
+  captureVerdictReview,
+  staleVerdictRefusal,
+  verdictProjector,
+  verdictTrunk,
+} from './verdict-freshness.js';
 import { proofStats } from './stats.js';
 import {
   flowLines,
@@ -322,6 +337,7 @@ import {
   exportBoard,
   importBoard,
 } from './exchange.js';
+import { digestCommand } from './digest.js';
 import {
   addSigner,
   assertRequiredSigners,
@@ -329,13 +345,19 @@ import {
   hasSignerFile,
 } from './signature.js';
 import {
+  addRunner,
   browserFreeChecksEnabled,
   gateQueueSettings,
   gateShortSlots,
   loadMachineSettings,
   memoryFloorMB,
+  relayOfferEnabled,
+  setBrowserSlots,
+  setGateShortSlots,
+  setGateSlots,
 } from './settings.js';
 import {
+  formatSnapshotLimit,
   pendingSnapshotSize,
   pendingCheckpointProblem,
   relayCommandReceipt,
@@ -358,40 +380,25 @@ import {
   revokeRelayDevice,
   unlinkedRelayProjects,
 } from './relay-setup.js';
-import { digestCommand } from './digest.js';
 import { readRelayMachine } from './relay-machine.js';
 import {
   relayJoin,
   relayPair,
 } from './relay-pairing-client.js';
 import { executePersonRequests } from './relay-request-execution.js';
+import { engineReceipt } from './engine.js';
 import {
-  boardSetup,
-  recordSetupState,
-  recordViewBind,
-  recordViewReuse,
-  setupIdentity,
-  viewSetupComplete,
-} from './setup-card.js';
-import { formatSnapshotLimit } from './relay-messages.js';
-import { privateNames } from './private-names.js';
-import {
-  runnerCommand,
-  settingsCommand,
-} from './machine-commands.js';
-import {
-  filesSince,
-  recordedRecovery,
-  refuseUnverifiedStack,
-  reportSubmission,
-} from './submission.js';
-import {
+  accountedFailures,
   land,
   landingRemote,
   landingSubject,
+  liveWaiverProjection,
+  waivedFailures,
+  waiverLine,
 } from './land.js';
 import { installStep } from './worktree.js';
 
+export { gateWaitReporter };
 const CHECKOUT_LEASES = new WeakMap();
 const CHECKOUT_BOARD_ONLY = new WeakMap();
 let startupMainTraced = false;
@@ -1175,8 +1182,9 @@ function itemLine(item, name = (id) => id) {
   const after = item.item_after ? `  after ${item.item_after.split(',').map((id) => `#${id}`).join(',')}` : '';
   const rejected = item.item_status === 'open' && item.item_verdict === 'REJECT' ? ' (rejected)' : '';
   const light = item.item_route === 'strong' ? '' : `  ${item.item_route}`;
+  const staleVerdict = item.item_verdict_state ? `  ${item.item_verdict_state.code}` : '';
   const hold = item.item_hold_reason ? `  held by ${name(item.item_hold_by)}: ${item.item_hold_reason}` : '';
-  return `#${item.item_id}  ${item.item_status}${holder}${verifier}${rejected}  ${item.item_lane}  ${item.item_title}${specs}${parent}${after}${light}${hold}`;
+  return `#${item.item_id}  ${item.item_status}${holder}${verifier}${rejected}  ${item.item_lane}  ${item.item_title}${specs}${parent}${after}${light}${hold}${staleVerdict}`;
 }
 
 /** Format a stable agent id for human-facing CLI output. */
@@ -1263,6 +1271,60 @@ function dirtyFiles(root) {
 }
 
 /**
+ * The files an item's own commits changed since its claim (N21). First parents only, so main merged
+ * into a lane branch is not counted as the item's work; and nothing another item submitted, such as
+ * a verified dependency fast-forwarded in, which merges no commit to skip.
+ *
+ * @param {string} root
+ * @param {number} id
+ * @param {string | null} from
+ * @param {string} to
+ * @returns {string[]}
+ */
+function filesSince(root, id, from, to) {
+  if (!from) return [];
+  const others = [`--exclude=refs/pullboard/items/${id}/*`, '--glob=refs/pullboard/items/*'];
+  const result = tryGit(root, ['log', '--first-parent', '--no-merges', '--no-renames', '--format=', '--name-only', to, '--not', from, ...others]);
+  return result.status === 0 ? [...new Set(result.stdout.split('\n').filter(Boolean))].sort() : [];
+}
+
+/** Refuse a candidate containing another item's unverified submitted commit [V1].
+ *
+ * Trunk-reachable commits are already landed, including when the candidate is trunk itself.
+ * Inspect all remaining reachable commits, including merged topic parents.
+ *
+ * @param {string} root
+ * @param {any} board
+ * @param {any} item
+ * @param {string} commit
+ * @param {{ ref: string, commit: string } | null} trunk
+ * @returns {void}
+ */
+function refuseUnverifiedStack(root, board, item, commit, trunk) {
+  const trunkRange = trunk?.commit
+    ? tryGit(root, ['rev-list', `${trunk.commit}..${commit}`])
+    : { status: 1, stdout: '' };
+  if (trunkRange.status !== 0) {
+    throw new Refused('NO_POLICY', 'the current trunk range cannot be read; restore Git history and retry the submit or verification');
+  }
+  const commits = new Set(trunkRange.stdout.split('\n').filter(Boolean));
+  const stacked = store.unverifiedSubmissions(board)
+    .find((other) => other.item_id !== item.item_id && commits.has(other.item_commit));
+  if (stacked) {
+    throw new Refused(
+      'STACKED_ON_UNVERIFIED',
+      `#${item.item_id} includes unverified item #${stacked.item_id} at ${stacked.item_commit}; wait for #${stacked.item_id} to be accepted or rebuild without its commits before continuing`,
+    );
+  }
+}
+
+/** Return the durable outcome only when a recovered move exactly matches its original receipt. */
+function recordedRecovery(board, move) {
+  const receipt = engineReceipt(board, move.id);
+  return receipt?.move === JSON.stringify(move) ? receipt : null;
+}
+
+/**
  * How long ago an ISO time was, or how long until it, in the board's clock: 45m, 3h, 2d.
  *
  * @param {any} ctx
@@ -1313,7 +1375,11 @@ function coordinatorNext(card, rows) {
   if (card.toVerify.length) return 'pullboard next --verify --as coordinator, or a verifier that built nothing: pullboard worktree review --model "<model name>"';
   if (card.toMerge.length) {
     const [first] = card.toMerge;
-    return `merge #${first.item_id}: git merge --no-edit ${first.item_commit.slice(0, 12)}, run the gate, then pullboard merged ${first.item_id} <merge commit>`;
+    return `merge #${first.item_id}: git merge --no-edit ${(first.item_checked_commit ?? first.item_commit).slice(0, 12)}, run the gate, then pullboard merged ${first.item_id} <merge commit>`;
+  }
+  if (card.staleVerdicts?.length) {
+    const item = card.staleVerdicts[0];
+    return staleVerdictRefusal(item, item.item_verdict_state).message.replace(/^\[STALE_VERDICT\] /u, '');
   }
   if (card.open.length) {
     const lanes = [...new Set(card.open.map((item) => item.item_lane))];
@@ -1334,7 +1400,7 @@ function integrationClaims(root, item, shouts, now) {
     if (shout.shout_evidence_item !== item.item_id) continue;
     if (shout.shout_evidence_kind === 'receipt') actors.delete(shout.shout_from);
     else if (shout.shout_evidence_kind === 'attempt' && shout.shout_evidence_outcome === 'integrating'
-      && contains(root, item.item_commit, shout.shout_evidence_commit)) {
+      && contains(root, item.item_checked_commit ?? item.item_commit, shout.shout_evidence_commit)) {
       actors.set(shout.shout_from, shout);
     }
   }
@@ -1359,7 +1425,7 @@ function verifiedMergeGroups(root, items, shouts, now) {
     }
     if (claimed.expired) staleIntegrations.push({ item, ...claimed.expired });
     try {
-      requireTrunkMerge(root, item.item_commit);
+      requireTrunkMerge(root, item.item_checked_commit ?? item.item_commit);
       groups.clean.push(item);
     } catch (error) {
       if (error.code !== 'MERGE_CONFLICT') throw error;
@@ -1409,6 +1475,135 @@ function resumeReleaseNotes(info) {
   return releases.length ? { releases: releases.slice(0, 3), omitted: Math.max(0, releases.length - 3), notes: 'CHANGELOG.md' } : null;
 }
 
+/** Identify setup from this board's coordinator enrollment, independently of agent flags. */
+function setupIdentity(board) {
+  return { boardId: store.boardId(board),
+    setupStartedAt: store.listAgents(board).find(agent => agent.agent_id === COORDINATOR)?.agent_created_at };
+}
+
+/** Read only the view's typed successful-bind receipt for this board and setup. */
+function viewBindComplete(ctx, board) {
+  let receipt;
+  try { receipt = JSON.parse(readFileSync(join(ctx.info.commonDir, 'pullboard', 'view-bind.json'), 'utf8')); }
+  catch (error) { if (error.code === 'ENOENT' || error instanceof SyntaxError) return false; throw error; }
+  const identity = setupIdentity(board);
+  return receipt?.type === 'pullboard.view.bound' && receipt.version === 1
+    && receipt.boardId === identity.boardId && receipt.setupStartedAt === identity.setupStartedAt
+    && Number.isFinite(Date.parse(receipt.boundAt))
+    && Date.parse(receipt.boundAt) >= Date.parse(identity.setupStartedAt);
+}
+
+/** A separately typed, authenticated reuse also proves that this board's view was opened. */
+function viewSetupComplete(ctx, board) {
+  if (viewBindComplete(ctx, board)) return true;
+  let receipt;
+  try { receipt = JSON.parse(readFileSync(join(ctx.info.commonDir, 'pullboard', 'view-reuse.json'), 'utf8')); }
+  catch (error) { if (error.code === 'ENOENT' || error instanceof SyntaxError) return false; throw error; }
+  const identity = setupIdentity(board);
+  return receipt?.type === 'pullboard.view.reused' && receipt.version === 1
+    && receipt.boardId === identity.boardId && receipt.setupStartedAt === identity.setupStartedAt
+    && Number.isFinite(Date.parse(receipt.openedAt))
+    && Date.parse(receipt.openedAt) >= Date.parse(identity.setupStartedAt);
+}
+
+/** Atomically record a successful real view bind, scoped to this board's current setup. */
+function recordViewBind(ctx, board, boundAt) {
+  const file = join(ctx.info.commonDir, 'pullboard', 'view-bind.json');
+  const temporary = file + '.' + randomUUID() + '.tmp';
+  const receipt = { type: 'pullboard.view.bound', version: 1, ...setupIdentity(board), boundAt };
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(temporary, JSON.stringify(receipt) + '\n', { mode: 0o600 });
+  renameSync(temporary, file);
+}
+
+/** Record this board's authenticated reuse without claiming that its existing listener bound again. */
+function recordViewReuse(ctx, board, view) {
+  const file = join(ctx.info.commonDir, 'pullboard', 'view-reuse.json');
+  const temporary = file + '.' + randomUUID() + '.tmp';
+  const receipt = { type: 'pullboard.view.reused', version: 1, ...setupIdentity(board),
+    openedAt: new Date().toISOString(), boundAt: view.boundAt, port: view.port, pid: view.pid };
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(temporary, JSON.stringify(receipt) + '\n', { mode: 0o600 });
+  renameSync(temporary, file);
+}
+
+/** Read a typed setup receipt only for this board's current coordinator enrollment. */
+function setupReceiptMatches(ctx, identity, state) {
+  let receipt;
+  try { receipt = JSON.parse(readFileSync(join(ctx.info.commonDir, 'pullboard', `setup-${state}.json`), 'utf8')); }
+  catch (error) { if (error.code === 'ENOENT' || error instanceof SyntaxError) return false; throw error; }
+  return receipt?.type === `pullboard.setup.${state === 'complete' ? 'completed' : state}` && receipt.version === 1
+    && receipt.boardId === identity.boardId && receipt.setupStartedAt === identity.setupStartedAt;
+}
+
+/** Atomically record a setup transition, scoped to this board enrollment. */
+function recordSetupState(ctx, identity, state) {
+  const file = join(ctx.info.commonDir, 'pullboard', `setup-${state}.json`);
+  const temporary = file + '.' + randomUUID() + '.tmp';
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(temporary, JSON.stringify({ type: `pullboard.setup.${state === 'complete' ? 'completed' : state}`, version: 1, ...identity }) + '\n', { mode: 0o600 });
+  renameSync(temporary, file);
+}
+
+/** Derive the next setup question from the real requirements, config, items and view receipt. */
+function boardSetup(ctx, card, identity) {
+  const rows = loadSpec(ctx.info.root, ctx.config).rows;
+  const approved = rows.filter(row => row.status === 'approved');
+  const drafted = rows.filter(row => row.status === 'draft' || row.status === 'pending');
+  const recordedComplete = setupReceiptMatches(ctx, identity, 'complete');
+  const started = setupReceiptMatches(ctx, identity, 'started');
+  const lanes = laneNames(ctx.config).filter(lane => !['review', COORDINATOR].includes(lane));
+  const folders = readdirSync(ctx.info.root, { withFileTypes: true })
+    .filter(entry => entry.isDirectory() && !entry.name.startsWith('.') && entry.name !== 'node_modules')
+    .map(entry => entry.name).sort();
+  const lane = lanes[0] ?? folders[0] ?? 'app';
+  // Older installations had no setup marker. Preserve their completed five-step state on upgrade.
+  const legacyUnmarked = !existsSync(join(ctx.info.commonDir, 'pullboard', 'setup-started.json'))
+    && !existsSync(join(ctx.info.commonDir, 'pullboard', 'setup-complete.json'));
+  const legacyComplete = legacyUnmarked && approved.length > 0 && lanes.length > 0
+    && Boolean(ctx.config.gate?.trim()) && card.all.length > 0 && card.viewOpened;
+  const completed = recordedComplete || legacyComplete;
+  const detectedGate = detectGate(ctx.info.root);
+  /** Quote the exact suggested command safely for a shell. */
+  const quote = value => "'" + String(value).replaceAll("'", "'\\''") + "'";
+  /** Quote one shell word only when it needs it, so a plain lane command reads as typed. */
+  const word = value => /^[A-Za-z0-9._/-]+$/u.test(String(value)) ? String(value) : quote(value);
+  /** Preserve all existing configuration when recording one setup answer. */
+  const configure = patch => `node -e ${quote(`const fs=require('node:fs');const p='pullboard.json';const c=JSON.parse(fs.readFileSync(p,'utf8'));${patch};fs.writeFileSync(p,JSON.stringify(c,null,2)+${JSON.stringify('\n')})`)}`;
+  const steps = [
+    { number: 1, done: approved.length > 0 && (!drafted.length || completed), question: 'Ask the person: what are we building, and who will use it? Draft a few requirements, then ask the person to approve them.',
+      command: 'pullboard spec draft "<text>"',
+      afterAnswer: 'Record each answer with pullboard spec draft "<text>"; the person approves the returned ids in Pullboard View or runs pullboard spec approve <ids> in their own terminal; then the coordinator runs pullboard spec apply.' },
+    { number: 2, done: lanes.length > 0, question: `Ask the person: how should we divide the work? Suggested folders: ${folders.join(', ') || 'app/ (create it for the app)'}.`,
+      command: `pullboard lane add ${word(lane)} --owns ${word(lane + '/')}` },
+    { number: 3, done: Boolean(ctx.config.gate?.trim()),
+      question: detectedGate
+        ? `Ask the person: which command proves the build works? Suggested: ${detectedGate}.`
+        : 'Ask the person: if this board has no build, use `pullboard spec check` to check its spec and practice files; a second agent review checks the actual work. Or choose a custom gate command.',
+      command: configure(`c.gate=${JSON.stringify(detectedGate || 'pullboard spec check')}`) },
+    { number: 4, done: card.all.length > 0, question: 'Ask the person: what is the first small piece we should build?',
+      command: `pullboard add ${quote(lane)} 'First small piece' --specs ${quote(approved[0]?.id ?? 'G1')} --criterion 'Describe what the person will be able to do'` },
+    { number: 5, done: card.viewOpened,
+      question: 'Ask the person: shall we open the board so you can follow the work?', command: 'pullboard view',
+      afterAnswer: 'Run this in the person’s own terminal, or start it in the background as the agent so setup can continue. The view records its successful bind or authenticated reuse for this board.' },
+  ];
+  const current = steps.find(step => !step.done);
+  if (!current && !recordedComplete) recordSetupState(ctx, identity, 'complete');
+  else if (current && !completed && !started) recordSetupState(ctx, identity, 'started');
+  if (current?.number === 1 && drafted.length) {
+    const rowIds = drafted.map(row => row.id);
+    const names = rowIds.join(', ');
+    const command = `pullboard spec show ${rowIds[0]}`;
+    return { step: 1, total: 5, ...current, steps, waitingOn: 'person-approval', rowIds,
+      question: `Waiting for the person to approve ${names}.`, command,
+      personCommand: `pullboard spec approve ${rowIds.join(',')}`,
+      afterAnswer: 'The person approves these rows in Pullboard View or their own terminal; then the coordinator runs pullboard spec apply.',
+      meanwhile: 'While waiting, the agent may review independent approved work or prepare questions for the person.',
+      agentNext: `wait for the person to approve ${names}; meanwhile ${command}` };
+  }
+  return current ? { step: current.number, total: 5, ...current, steps } : null;
+}
+
 /**
  * `pullboard resume` (N19): one short card that puts an agent back to work after a fresh start,
  * a restart or a compaction, from the board rather than from a summary.
@@ -1428,15 +1623,19 @@ function resumeHere(io, view) {
     setupScope = setupIdentity(board);
     doctrine = agentDoctrine(ctx, board);
     const me = whoAmI(ctx, board);
-    const all = store.listItems(board, { all: true });
-    const toMerge = all.filter((item) => item.item_status === 'verified' && !item.item_merged_commit);
+    const projector = verdictProjector(root, board);
+    const all = store.listItems(board, { all: true }).map(projector.project);
+    const pendingMerges = all.filter((item) => item.item_status === 'verified' && !item.item_merged_commit)
+      .map(item => ({ ...item, item_checked_commit: store.checkedLandingCommit(board, item) }));
+    const toMerge = pendingMerges.filter(item => !item.item_verdict_state);
+    const staleVerdicts = pendingMerges.filter(item => item.item_verdict_state);
     const decisionSections = isMain ? coordinatorDecisionSections(board, ctx) : null;
     const { shouts = [], ...decisions } = decisionSections ?? {};
     return {
       me,
       all,
       needsYou: personNeeds(personNeedsState(root, { board })),
-      ...(decisionSections ? { ...decisions, ...verifiedMergeGroups(root, toMerge, shouts, ctx.clock.now().getTime()),
+      ...(decisionSections ? { ...decisions, ...verifiedMergeGroups(root, pendingMerges, shouts, ctx.clock.now().getTime()),
         flow: proofStats(board, { now: ctx.clock.now().getTime() }).flow } : {}),
       requests: me.id === COORDINATOR ? store.openRequests(board) : [],
       holding: all.filter((item) => item.item_status === 'claimed' && item.item_owner === me.id),
@@ -1448,6 +1647,7 @@ function resumeHere(io, view) {
       awaiting: all.filter((item) => item.item_status === 'submitted' && item.item_built_by === me.id),
       toVerify: all.filter((item) => item.item_status === 'submitted' && item.item_built_by !== me.id),
       toMerge,
+      staleVerdicts,
       ...(isMain ? { landingBatches: store.landingBatches(board) } : {}),
       open: all.filter((item) => item.item_status === 'open'),
       hold: store.laneHold(board, me.lane),
@@ -1528,6 +1728,7 @@ function resumeHere(io, view) {
   }
   if (isMain && card.staleFollowUps.count) say(`${plural(card.staleFollowUps.count, 'stale follow-up')}; list them with ${card.staleFollowUps.list}`);
   else if (!isMain) for (const item of card.stale) say(`stale: ${item.message}; next: ${item.next}`);
+  for (const item of card.staleVerdicts) say(staleVerdictRefusal(item, item.item_verdict_state).message);
   if (card.awaiting.length) say(`awaiting a verdict: ${card.awaiting.map((item) => `#${item.item_id} (${span(ctx, item.item_updated_at)})`).join(', ')}`);
   if (isMain) {
     for (const batch of card.landingBatches.filter((entry) => !['landed', 'blocked'].includes(entry.state))) say(`landing ${batch.id}: ${batch.state}, owner ${batch.owner}, tip ${batch.tip}; log ${batch.logPath}; next: pullboard land --adopt`);
@@ -1538,14 +1739,16 @@ function resumeHere(io, view) {
     };
     section(card.openDecisions, (ask) => `open decision #${ask.id} from ${name(ask.asker)} (${ask.age}): ${firstLine(ask.question)}`);
     section(card.recentAnswers, (answer) => `recent decision #${answer.id}: ${name(answer.answeredBy)} answered ${name(answer.asker)} (${answer.age} ago): ${firstLine(answer.answer)}`);
-    if (card.toMerge.length) {
+    if (card.toMerge.length || card.staleVerdicts.length) {
       const groups = card.verifiedNotMerged;
+      // Conflicts remain useful diagnostics even when the acceptance must be re-reviewed.
+      const freshness = item => item.item_verdict_state ? ' [STALE_VERDICT]' : '';
       /** Keep merge groups on one line while retaining all entries in JSON. */
       const listed = (entries, line) => entries.slice(0, 3).map(line).join(', ')
         + (entries.length > 3 ? `, +${entries.length - 3} more (pullboard resume --json)` : '') || 'none';
-      say(`verified, not merged — merges cleanly: ${listed(groups.clean, (item) => `#${item.item_id} ${firstLine(item.item_title)}`)}`);
-      say(`verified, not merged — conflicts: ${listed(groups.conflicts, ({ item, files }) => `#${item.item_id} ${firstLine(item.item_title)} (${files.join(', ') || 'files unavailable'})`)}`);
-      say(`verified, not merged — claimed for integration: ${listed(groups.integrating, ({ item, by, at, commit }) => `#${item.item_id} by ${name(by)} at ${at} (${commit.slice(0, 12)})`)}`);
+      say(`verified, not merged — merges cleanly: ${listed(groups.clean, (item) => `#${item.item_id} ${firstLine(item.item_title)}${freshness(item)}`)}`);
+      say(`verified, not merged — conflicts: ${listed(groups.conflicts, ({ item, files }) => `#${item.item_id} ${firstLine(item.item_title)} (${files.join(', ') || 'files unavailable'})${freshness(item)}`)}`);
+      say(`verified, not merged — claimed for integration: ${listed(groups.integrating, ({ item, by, at, commit }) => `#${item.item_id} by ${name(by)} at ${at} (${commit.slice(0, 12)})${freshness(item)}`)}`);
     }
     section(card.needsYou, (need) => need.kind === 'decision'
       ? `waiting on the person: #${need.id} from ${need.ref} (${span(ctx, need.at)}): ${firstLine(need.text)}`
@@ -2115,7 +2318,7 @@ function readCommands(io, { first, second, rest, values }) {
     list: () => {
       const ctx = context(io);
       const { items, agents } = withBoard(ctx, (board) => ({
-        items: store.listItems(board, { lane: first, all: values.all }),
+        items: store.listItems(board, { lane: first, all: values.all }).map(verdictProjector(ctx.info.root, board).project),
         agents: store.listAgents(board),
       }));
       const filtered = items.filter((item) => !values.route || item.item_route === values.route);
@@ -2154,7 +2357,7 @@ function readCommands(io, { first, second, rest, values }) {
       const ctx = context(io);
       const id = idArg(first);
       const { item, verdicts, moves, thread, related, reviewer, agents } = withBoard(ctx, (board) => ({
-        item: store.getItem(board, id),
+        item: verdictProjector(ctx.info.root, board).project(store.getItem(board, id)),
         verdicts: store.verdictsFor(board, id),
         moves: store.events(board, { itemId: id }).filter((event) => ['attempt', 'escalate'].includes(event.event_kind)),
         thread: store.itemThread(board, id),
@@ -2168,6 +2371,7 @@ function readCommands(io, { first, second, rest, values }) {
         return 0;
       }
       io.say(itemLine(item, agentName));
+      if (item.item_verdict_state) io.say(staleVerdictRefusal(item, item.item_verdict_state).message);
       if (item.item_criterion) io.say(`criterion: ${item.item_criterion}`);
       if (item.item_check) io.say(`check: ${item.item_check}`);
       sayCheckBaseline(io, item);
@@ -2440,7 +2644,9 @@ async function submitHere(ctx, id) {
     // The accepted project runner interprets its current invariant files; candidate config cannot replace it.
     ...(acceptedMain.config.submitInvariants.length ? { affectedTests: acceptedMain.config.affectedTests } : {}) };
   const gate = await runSubmitGate(root, submitConfig, { base: claimHead, trunk: acceptedMain.commit, check: frozenCheck(held), agent: me.id, item: String(id), onWait: queuedItemLease(ctx, held, me.id, 'build'), onBrowserFallback: browserAdmissionReporter(ctx.io, ctx.io.relayJson) });
-  if (!gate.isGreen) {
+  // Only the person's live waivers can pass a red proof, failure by failure; the item's own check is never waived [B3].
+  const waived = !gate.isGreen && gate.check?.green ? withBoard(ctx, (board) => waivedFailures(board, accountedFailures(gate, root))) : null;
+  if (!gate.isGreen && !waived) {
     const message = `the submission proof is red at ${commit.slice(0, 12)}; fix it, commit, submit again. ${submitGateReport(gate)}`;
     // No submission can follow this verdict. Read-only main comparisons must not retain the seat's write lease.
     CHECKOUT_LEASES.get(ctx.io)?.release();
@@ -2457,13 +2663,32 @@ async function submitHere(ctx, id) {
     );
   }
   const currentTrunk = requireTrunkMerge(root, commit); // The trunk may have moved while the gate ran.
+  const waivedLines = waived ? waived.map(waiverLine) : [];
   await withBoard(ctx, async (board) => {
     refuseUnverifiedStack(root, board, store.getItem(board, id), commit, currentTrunk);
+    // The waived run is written to the item's thread before the submission, so no waived proof reads as green.
+    if (waived) await ordered(ctx, board, 'appendFact', [id, { agentId: me.id, kind: 'measurement', text: `submission proof at ${commit.slice(0, 12)} was red and is recorded as waived, not green; every failure is covered by a live person waiver:\n${waivedLines.join('\n')}` }]);
     return await ordered(ctx, board, 'submit', [id, { agentId: me.id, commit, tree: headTree(root) ?? '', files: filesSince(root, id, claimHead, commit), policyCommit: acceptedMain.commit,
       ...(gate.deferred ? { note: 'full suite deferred to the landing gate' } : {}) }]);
   });
-  return reportSubmission(ctx, id, commit, { green: gate.isGreen, report: submitGateReport(gate), files: gate.files, full: gate.full, deferred: gate.deferred, deferFullFallback: gate.deferFullFallback, reason: gate.reason, check: gate.check,
-    log: gate.log, profile: gate.profile, profilePath: gate.profilePath, proofLog: gate.proofLog, proofProfilePath: gate.proofProfilePath }, doctrine);
+  const report = waived
+    ? `submission proof waived, not green: ${waived.length} failure(s), each covered by a live person waiver; the whole output is in ${gate.log}\n${waivedLines.join('\n')}`
+    : submitGateReport(gate);
+  return reportSubmission(ctx, id, commit, { green: gate.isGreen, report, files: gate.files, full: gate.full, deferred: gate.deferred, deferFullFallback: gate.deferFullFallback, reason: gate.reason, check: gate.check,
+    log: gate.log, profile: gate.profile, profilePath: gate.profilePath, proofLog: gate.proofLog, proofProfilePath: gate.proofProfilePath,
+    ...(waived ? { waived: waived.map(({ file, name, waiver }) => ({ file, name, waiver: waiver.id, reason: waiver.reason, until: waiver.until })) } : {}) }, doctrine);
+}
+
+/** Report and pin the original submitted commit, including a recovered acknowledged outcome. */
+function reportSubmission(ctx, id, commit, gate, doctrine = []) {
+  const { root } = ctx.info;
+  const pin = `refs/pullboard/items/${id}/${commit.slice(0, 12)}`;
+  git(root, ['update-ref', pin, commit]);
+  ctx.io.result?.({ id, commit, pin, gate, ...(doctrine.length ? { doctrine } : {}) });
+  ctx.io.say(`submitted #${id} at ${commit.slice(0, 12)}; ${gate.report}`);
+  ctx.io.say(`pinned as ${pin}, so this work can't be lost; keep your worktree until it is merged`);
+  ctx.io.say(`next: another agent checks out ${commit.slice(0, 12)} and runs: pullboard verify ${id} accept|reject`);
+  return 0;
 }
 
 /**
@@ -2614,6 +2839,7 @@ async function verifyHere(ctx, id, { second, values }) {
   const { root } = ctx.info;
   let verificationProfile = null;
   let accepted = null;
+  let acceptedLandingCommit = null;
   /** Record one verdict on the open board. */
   const decide = async (board) => {
     checkMainVerifier(ctx, board, values);
@@ -2633,7 +2859,9 @@ async function verifyHere(ctx, id, { second, values }) {
       return await ordered(ctx, board, 'verify', recovered.args);
     }
     const item = store.getItem(board, id);
-    if (item.item_status !== 'submitted') {
+    const reReview = item.item_status === 'verified' && !item.item_merged_commit;
+    const stale = reReview ? verdictProjector(root, board).state(item) : null;
+    if (item.item_status !== 'submitted' && !stale) {
       throw new Refused('NOT_SUBMITTED', `item #${id} is ${item.item_status}, not submitted`);
     }
     // Name an unknown implied item before the frozen check runs, not after it.
@@ -2647,6 +2875,7 @@ async function verifyHere(ctx, id, { second, values }) {
     }
     let digest = 'missing';
     let check;
+    let review;
     try {
       digest = freezer(ctx, { board })(item).digest;
     } catch (error) {
@@ -2654,17 +2883,26 @@ async function verifyHere(ctx, id, { second, values }) {
     }
     if (decision === 'ACCEPT') {
       if (digest !== item.item_frozen_digest) throw new Refused('CRITERIA_CHANGED', 'the criterion changed; ask the coordinator to refreeze this item before checking it');
-      const trunk = requireTrunkMerge(root, commit);
-      refuseUnverifiedStack(root, board, item, commit, trunk);
-      if (frozenCheck(item)) {
-        const browser = !browserFreeChecksEnabled() || await checkNeedsBrowser(root, frozenCheck(item), { commit, onFallback: browserAdmissionReporter(ctx.io, ctx.io.relayJson) });
-        // The private check runs here, in a private clone, under this machine's gate markers; a runner
-        // lease cannot carry those markers, so the review queues for a local slot only [C7,V4].
-        const shortEligible = Boolean(await explicitCheckFiles(root, frozenCheck(item), { commit }));
-        check = await withGateSlot(root, (lease) => checkAtCommit(root, item, { waitMs: lease.waitMs, gateLease: lease }), { browser, remote: false, agent: me.id, item: String(id), kind: 'review', itemCheck: true, shortEligible, onWait: queuedItemLease(ctx, item, me.id, 'review') });
-      } else {
-        check = checkAtCommit(root, item);
+      const checkedCommit = reReview ? head : commit;
+      const checkedLabel = reReview ? 'reviewed composition' : 'submitted commit';
+      const trunk = requireTrunkMerge(root, checkedCommit);
+      if (reReview) {
+        if (!isClean(root)) throw new Refused('DIRTY', 'commit the reviewed composition before re-reviewing the stale verdict');
+        if (untracked(root).length) throw new Refused('UNTRACKED', 'commit or ignore untracked files before re-reviewing the stale verdict');
+        if (!contains(root, trunk.commit, head)) throw staleVerdictRefusal(item, stale);
       }
+      review = captureVerdictReview(root, board, item, trunk.commit, checkedCommit);
+      refuseUnverifiedStack(root, board, item, checkedCommit, trunk);
+      const checkedItem = reReview ? { ...item, item_commit: checkedCommit } : item;
+      if (frozenCheck(item)) {
+        const browser = !browserFreeChecksEnabled() || await checkNeedsBrowser(root, frozenCheck(item), { commit: checkedCommit, onFallback: browserAdmissionReporter(ctx.io, ctx.io.relayJson) });
+        // A private checked composition needs this machine's live local gate markers [C7,V4].
+        const shortEligible = Boolean(await explicitCheckFiles(root, frozenCheck(item), { commit: checkedCommit }));
+        check = await withGateSlot(root, (lease) => checkAtCommit(root, checkedItem, { waitMs: lease.waitMs, gateLease: lease }), { browser, remote: false, agent: me.id, item: String(id), kind: 'review', itemCheck: true, shortEligible, onWait: queuedItemLease(ctx, item, me.id, 'review') });
+      } else {
+        check = checkAtCommit(root, checkedItem);
+      }
+      invalidateGitFacts(); // A private check can outlive changes in the reviewer's live checkout.
       refuseSandboxBlocked(check);
       verificationProfile = check.profile ?? null;
       const evidence = check.checked
@@ -2672,13 +2910,19 @@ async function verifyHere(ctx, id, { second, values }) {
         : '';
       const checkTimings = timingDigest(check.profile);
       const timingEvidence = check.profilePath ? `\n${checkTimings}\ntiming profile: ${check.profilePath}` : '';
-      if (check.state === 'unverified') throw new Refused('CHECK_UNVERIFIED', `the frozen ${check.stage} could not be verified at the submitted commit; restore the install or check environment, then retry verification; output digest:\n${check.report.replace(/^/gm, '  ')}${evidence}${timingEvidence}`);
-      if (check.state === 'red') throw new Refused('CHECK_RED', `the frozen item check is red at the submitted commit (${check.stage}); check.install may be needed for dependencies; reject with the failing behavior or ask the builder to fix and resubmit; output digest:\n${check.report.replace(/^/gm, '  ')}${evidence}${timingEvidence}`);
+      if (check.state === 'unverified') throw new Refused('CHECK_UNVERIFIED', `the frozen ${check.stage} could not be verified at the ${checkedLabel}; restore the install or check environment, then retry verification; output digest:\n${check.report.replace(/^/gm, '  ')}${evidence}${timingEvidence}`);
+      if (check.state === 'red') throw new Refused('CHECK_RED', `the frozen item check is red at the ${checkedLabel} (${check.stage}); check.install may be needed for dependencies; reject with the failing behavior or ask the builder to fix and resubmit; output digest:\n${check.report.replace(/^/gm, '  ')}${evidence}${timingEvidence}`);
       const receipt = store.events(board, { itemId: id }).filter(event => event.event_kind === 'submit').map(event => JSON.parse(event.event_detail)).find(event => event.commit === commit);
       submissionPaths(root, item, commit, { mainCommit: receipt?.policyCommit, dependencies: dependencySnapshots(board.db, item) });
-      const currentTrunk = requireTrunkMerge(root, commit); // Re-read after the frozen check, before accepting.
-      refuseUnverifiedStack(root, board, item, commit, currentTrunk);
+      const currentTrunk = requireTrunkMerge(root, checkedCommit); // Re-read after the frozen check, before accepting.
+      if (currentTrunk.commit !== trunk.commit) throw new Refused('VERDICT_TRUNK_MOVED', `main moved from ${trunk.commit} to ${currentTrunk.commit} during review; merge the latest main and re-review the clean composition`);
+      if (headCommit(root) !== head || (reReview && (!isClean(root) || untracked(root).length))) {
+        throw new Refused('NOT_AT_COMMIT', 'the reviewed checkout moved during its check; restore the clean reviewed HEAD and retry verification');
+      }
+      refuseUnverifiedStack(root, board, item, checkedCommit, currentTrunk);
     }
+    review ??= captureVerdictReview(root, board, item, verdictTrunk(root));
+    if (decision === 'ACCEPT') git(root, ['update-ref', `refs/pullboard/items/${id}/${review.head.slice(0, 12)}`, review.head]);
     return await ordered(ctx, board, 'verify', [id, {
       agentId: me.id,
       decision,
@@ -2689,13 +2933,17 @@ async function verifyHere(ctx, id, { second, values }) {
       digest,
       policy: ctx.config.verify.policy,
       familyPolicy: ctx.config.verify.family,
+      review,
       ...(decision === 'ACCEPT' ? { check: check.checked ? 'green' : 'none' } : {}),
       ...(implies ? { implies } : {}),
     }]);
   };
   const result = await withBoard(ctx, async (board) => {
     const verdict = await decide(board);
-    if (verdict.decision === 'ACCEPT') accepted = store.getItem(board, id);
+    if (verdict.decision === 'ACCEPT') {
+      accepted = store.getItem(board, id);
+      acceptedLandingCommit = store.checkedLandingCommit(board, accepted);
+    }
     return verdict;
   });
   ctx.io.result?.({ id, ...result });
@@ -2704,7 +2952,7 @@ async function verifyHere(ctx, id, { second, values }) {
   ctx.io.say(result.decision === 'ACCEPT'
     ? `verified #${id}: ${result.reason}${result.check === 'none' ? '; no frozen check ran' : ''}${verifiedTiming}`
     : `rejected #${id}: ${result.reason}; it is open again for rework`);
-  if (accepted) ctx.io.say(landNext(ctx.info, accepted));
+  if (accepted) ctx.io.say(landNext(ctx.info, accepted, acceptedLandingCommit));
   return 0;
 }
 
@@ -2715,15 +2963,16 @@ async function verifyHere(ctx, id, { second, values }) {
  *
  * @param {any} info
  * @param {any} item
+ * @param {string} [commit] - The exact checked composition the acceptance authorizes.
  * @returns {string}
  */
-function landNext(info, item) {
+function landNext(info, item, commit = item.item_commit) {
   const mainRoot = primaryCheckoutRoot(info);
   const branch = mainCheckout(info.root)?.branch ?? '';
   const remote = landingRemote(info.root, branch);
   const command = remote
     ? 'pullboard land'
-    : `git merge --no-ff ${item.item_commit} -m ${shellWord(landingSubject(item))} && pullboard merged ${item.item_id} HEAD`;
+    : `git merge --no-ff ${commit} -m ${shellWord(landingSubject(item))} && pullboard merged ${item.item_id} HEAD`;
   if (!mainRoot) return `next: could not safely locate the primary checkout; run from the main checkout: ${command}`;
   if (remote) return `next: the coordinator lands it: ${cdTo(mainRoot)} ${command}`;
   return `next: this repo has no remote for pullboard land to push to, so the coordinator merges it on ${branch.replace(/^refs\/heads\//u, '') || 'the trunk'}: ${cdTo(mainRoot)} ${command}`;
@@ -3046,6 +3295,7 @@ function workCommands(io, args) {
   };
   return {
     blueprint: () => act(async (ctx, board, me) => {
+      if (first === 'fit') return await fitCommand(ctx, board, me, 'propose', [second, ...rest].filter((value) => value !== undefined), values, { ordered, whoAmI });
       const references = [...(second ? [second] : []), ...(values.blueprint ?? [])];
       if (first !== 'add' || !references.length || rest.length) throw new Refused('USAGE', `pullboard blueprint add <name or file> [--blueprint <name or file>]... | save [file]; bundled: ${bundledBlueprints().join(', ')}`);
       // Several blueprints land in the order given, as one result; one lands exactly as before (#720).
@@ -3308,7 +3558,7 @@ function workCommands(io, args) {
         const waiver = await ordered(ctx, board, 'recordLandingWaiver', [{ agentId: store.PERSON, channel: io.personChannel ?? 'terminal',
           id: randomUUID(), test: values.waive, until: values.until, reason: values.reason }]);
         io.result?.({ batch: null, landed: [], conflicts: [], blocked: [], culprits: [], flakes: [], waiver });
-        io.say(`waived ${waiver.test} until ${waiver.until}: ${waiver.reason}`);
+        io.say(`waived ${waiver.kind ?? store.landingWaiverKind(waiver.test)} ${waiver.test} until ${waiver.until}: ${waiver.reason}`);
         return 0;
       }
       if (values.until !== undefined || values.reason !== undefined || values.max !== undefined && (!/^[1-9][0-9]*$/u.test(values.max) || !Number.isSafeInteger(Number(values.max)))) throw new Refused('USAGE', 'use --max with a positive item count, or --waive with --until and --reason');
@@ -3316,6 +3566,7 @@ function workCommands(io, args) {
         write: (operation, parameters) => ordered(ctx, board, operation, parameters), say: io.say, owner: agentSessionDigest() ?? `pid-${process.pid}`,
         maximum: values.max === undefined ? Infinity : Number(values.max), dryRun: Boolean(values['dry-run']), adopt: Boolean(values.adopt), onWait: gateWaitReporter(io) });
       io.result?.(result);
+      for (const blocked of result.blocked ?? []) if (blocked.code === 'STALE_VERDICT') io.say(staleVerdictRefusal({ item_id: blocked.id }, blocked).message);
       if (!result.batch) io.say(result.items ? `would land: ${result.items.map((id) => `#${id}`).join(', ') || 'none'}` : 'no verified items ready to land');
       return 0;
     }),
@@ -3435,7 +3686,8 @@ function queuedItemLease(ctx, initial, agentId, kind) {
   // Naming somebody else's check remains read-only; it never extends their build claim.
   if (kind === 'build' && (initial.item_status !== 'claimed' || initial.item_owner !== agentId)) return report;
   const review = kind === 'review';
-  if (review && initial.item_review_by !== agentId) return report;
+  // Accepted items retain their former reviewer as history, not a renewable reservation.
+  if (review && (initial.item_status !== 'submitted' || initial.item_review_by !== agentId)) return report;
   const field = review ? 'item_review_until' : 'item_lease_until';
   const owner = review ? 'item_review_by' : 'item_owner';
   const status = review ? 'submitted' : 'claimed';
@@ -3482,36 +3734,59 @@ function browserAdmissionReporter(io, jsonMode = false) {
   };
 }
 
-/** Build de-duplicated queue messages for a gate waiting on machine capacity or memory; exported so tests can read what a person sees. */
-export function gateWaitReporter(io) {
-  let last = '';
-  let warned = false;
-  let held = false;
-  return ({ holders, position, memory, runnerUnavailable }) => {
-    if (runnerUnavailable) {
-      io.say(`runner ${runnerUnavailable.host} unavailable: ${runnerUnavailable.reason}; until ${runnerUnavailable.until}; requeueing the run`);
-      return;
+/** Read or update machine-wide gate capacity. */
+function settingsCommand(io, { first, second, rest }) {
+  if (!first && !second && !rest.length) {
+    const settings = loadMachineSettings();
+    const queue = gateQueueSettings();
+    // The result names the queue order in effect, defaults included; the file keeps only what was set.
+    const offerAtInit = relayOfferEnabled();
+    const shortSlots = gateShortSlots();
+    io.result?.({ settings: { ...settings, gate: { ...settings.gate, queue: { ...settings.gate?.queue, ...queue }, shortSlots }, relay: { ...settings.relay, offerAtInit } }, memoryFloorMB: memoryFloorMB() });
+    io.say(`gateSlots: ${settings.gateSlots}`);
+    io.say(`browserSlots: ${settings.browserSlots}`);
+    io.say(`gate.queue.reviewsFirst: ${queue.reviewsFirst}${queue.reviewsFirst ? '' : ' (landings first, then arrival order)'}`);
+    io.say(`gate.queue.currentReleaseFirst: ${queue.currentReleaseFirst}${queue.currentReleaseFirst ? '' : ' (release priority is off)'}`);
+    io.say(`gate.queue.agingMinutes: ${queue.agingMinutes}${queue.reviewsFirst || queue.currentReleaseFirst ? '' : ' (used only while reviewsFirst or currentReleaseFirst is true)'}`);
+    io.say(`gate.memoryFloorMB: ${memoryFloorMB() ?? 'off (the gate queue does not wait for memory)'}`);
+    io.say(`view.background: ${settings.view?.background !== false}${settings.view?.background === false ? ' (init and resume leave the view to you)' : ' (init and resume keep pullboard view running for pullboard.dev)'}`);
+    io.say(`relay.offerAtInit: ${offerAtInit}${offerAtInit ? ' (init asks once to share your boards with your phone)' : ' (init stays quiet about sharing)'}`);
+    io.say(`gate.shortSlots: ${shortSlots}${shortSlots ? '' : ' (off; runs that name their test files wait for a gate slot)'}`);
+    return 0;
+  }
+  if (!['gateSlots', 'browserSlots', 'gate.shortSlots'].includes(first) || !second || rest.length) {
+    throw new Refused('USAGE', 'pullboard settings gateSlots <n> | browserSlots <n> | gate.shortSlots <n>');
+  }
+  if (first === 'gate.shortSlots') {
+    if (!/^(?:0|[1-9]\d*)$/u.test(second) || !Number.isSafeInteger(Number(second))) {
+      throw new Refused('BAD_SHORT_SLOTS', 'gate.shortSlots must be a whole number, 0 or more; run pullboard settings gate.shortSlots <n>');
     }
-    // Memory speaks once per state: one warning where it cannot be read, one line per hold.
-    if (memory && !memory.checked) {
-      if (!warned) io.say(memory.warning);
-      warned = true;
-      if (!position) return;
-    }
-    if (memory?.held) {
-      if (!held) io.say(memory.line);
-      held = true;
-      last = '';
-      return;
-    }
-    held = false;
-    const repos = holders.map(({ repo }) => repo).filter(Boolean);
-    const message = `gate waiting: ${holders.length} running${repos.length ? ` in ${repos.join(', ')}` : ''}; place ${position}`;
-    if (message !== last) {
-      io.say(message);
-      last = message;
-    }
-  };
+    const settings = setGateShortSlots(Number(second));
+    io.result?.({ settings });
+    io.say(`gate.shortSlots set to ${settings.gate.shortSlots}`);
+    return 0;
+  }
+  if (!/^[1-9]\d*$/u.test(second) || !Number.isSafeInteger(Number(second))) {
+    if (first === 'gateSlots') throw new Refused('USAGE', 'pullboard settings gateSlots <positive integer>');
+    throw new Refused(first === 'browserSlots' ? 'BAD_BROWSER_SLOTS' : 'BAD_GATE_SLOTS', `${first} must be a positive integer; run pullboard settings ${first} <n>`);
+  }
+  const settings = first === 'browserSlots' ? setBrowserSlots(Number(second)) : setGateSlots(Number(second));
+  io.result?.({ settings });
+  io.say(`${first} set to ${settings[first]}`);
+  return 0;
+}
+
+/** Register machine-level SSH capacity without requiring a board identity or a runner account. */
+function runnerCommand(io, { first, second, rest, values }) {
+  if (first !== 'add' || !second || rest.length || !/^[1-9]\d*$/u.test(values.slots ?? '')
+    || !/^(?:0|[1-9]\d*)$/u.test(values.browser ?? '')) {
+    throw new Refused('USAGE', 'pullboard runner add <ssh-host> --slots <positive integer> --browser <integer from zero through slots>');
+  }
+  const runner = addRunner({ host: second, slots: Number(values.slots), browser: Number(values.browser),
+    ...(values.node !== undefined ? { node: values.node } : {}), ...(values.root !== undefined ? { root: values.root } : {}) });
+  io.result?.({ runner });
+  io.say(`registered runner ${runner.host}: ${runner.slots} slots, ${runner.browser} browser`);
+  return 0;
 }
 
 /**
@@ -3570,6 +3845,7 @@ async function specCommand(io, { first, second, rest, values }) {
     decline: ['reason'],
     answer: [],
     apply: [],
+    fit: ['text', 'reason'],
   }[first ?? '--json'];
   if (!commandFlags) throw new Refused('USAGE', 'use pullboard spec --json | check | view | show <id> | unmet [--must] | draft "<text>" | signoff <ids> | approve <ids> | decline <ids> --reason "why" | answer <id> "<choice or text>" | apply');
   const allowedFlags = [...new Set([...commandFlags, 'json'])];
@@ -3578,6 +3854,9 @@ async function specCommand(io, { first, second, rest, values }) {
       const next = flag === 'must' ? 'use --must with spec unmet' : 'use a flag accepted by this spec command';
       throw new Refused('FLAG_NOT_ALLOWED', `spec ${first ?? '--json'} does not take --${flag}; ${next}`);
     }
+  }
+  if (first === 'fit') {
+    return await withBoard(ctx, async (board) => await fitCommand(ctx, board, null, second ?? 'list', rest, values, { ordered, whoAmI }));
   }
   const spec = loadSpec(ctx.info.root, ctx.config);
   if (!spec.exists) throw new Refused('NO_SPEC', `no ${ctx.config.spec}; run: pullboard init`);
@@ -3762,8 +4041,10 @@ async function specCommand(io, { first, second, rest, values }) {
         { id, status, tier, text, gate, serves, signers, section, line, file: source ?? file,
           ...(from === undefined ? {} : { source: from }), ...(origin ? { origin, version, reason } : {}) }
       )));
-      io.result({ rows });
+      const fit = readFitBatch(ctx.info.commonDir, { isMain: ctx.info.isMain, channel: io.personChannel });
+      io.result({ rows, ...(fit.proposals.length ? { fit: fit.proposals, fitBatch: fit.batch } : {}) });
     } else messages.forEach((message) => io.say(message));
+    if (!values.json) fitSummary(readFitBatch(ctx.info.commonDir, { isMain: ctx.info.isMain, channel: io.personChannel })).forEach((message) => io.say(message));
     return errors ? 1 : 0;
   }
   if (first === 'signers' && second === 'add') {
@@ -4133,7 +4414,17 @@ async function runCommand(argv, io) {
         }
         throw error;
       }
-      const gate = await runGate(ctx.info.root, config, { landing: values.landing, agent: resourceAgent(ctx), onWait: gateWaitReporter(io) });
+      const waivers = values.landing ? withBoard(ctx, (board) => liveWaiverProjection(board)) : [];
+      const gate = await runGate(ctx.info.root, config, { landing: values.landing, agent: resourceAgent(ctx), onWait: gateWaitReporter(io), stages: Boolean(values.landing), waivers });
+      // A landing gate honours the person's live waivers exactly as land does; a red run never stamps, so it stays waived, not green [B3,R3].
+      const waived = values.landing && !gate.isGreen ? withBoard(ctx, (board) => waivedFailures(board, accountedFailures(gate, ctx.info.root))) : null;
+      if (waived) {
+        const lines = waived.map(waiverLine);
+        const report = `landing gate waived, not green: ${waived.length} failure(s), each covered by a live person waiver; the whole output is in ${gate.log}\n${lines.join('\n')}`;
+        io.result?.({ green: false, waived: waived.map(({ file, name, waiver }) => ({ file, name, waiver: waiver.id, reason: waiver.reason, until: waiver.until })), report });
+        io.say(report);
+        return 0;
+      }
       io.result?.({ green: gate.isGreen, report: gateReport(gate) });
       io.say(gateReport(gate));
       return gate.isGreen ? 0 : 1;
@@ -4150,6 +4441,37 @@ async function runCommand(argv, io) {
     }
     throw error;
   }
+}
+
+/**
+ * Every private name a saved blueprint must never carry: each agent's id, display name, model
+ * and family, the person's Git name and email, everyone who signed off or signs rows, and this
+ * machine's host name, whole, plus the parts of each (a first name, an email's user) to match
+ * only as written. Missing sources add nothing; they never stop the save [S1].
+ */
+function privateNames(root, board, spec) {
+  const names = new Set();
+  const parts = new Set();
+  const add = (value) => {
+    const text = typeof value === 'string' ? value.trim() : '';
+    // "unknown" is the label for an undeclared model, not anyone's name.
+    if (!text || text === 'unknown') return;
+    names.add(text);
+    for (const part of text.split(/[\s@.<>()]+/u)) if (part.length >= 3 && part !== 'unknown' && part !== text) parts.add(part);
+  };
+  for (const agent of store.listAgents(board)) {
+    add(agent.agent_id); add(agent.agent_model); add(agent.agent_family); add(displayAgentName(agent)); add(displayAgentName(agent, 'prefix'));
+  }
+  for (const key of ['user.name', 'user.email']) add(tryGit(root, ['config', '--get', key]).stdout);
+  for (const ident of ['GIT_AUTHOR_IDENT', 'GIT_COMMITTER_IDENT']) {
+    const found = /^(.*?)\s*<([^>]*)>/u.exec(tryGit(root, ['var', ident]).stdout ?? '');
+    if (found) { add(found[1]); add(found[2]); }
+  }
+  try { for (const record of readSignoffs(root)) add(record.by); } catch { /* An unreadable sign-off file adds no names. */ }
+  for (const row of spec.rows) for (const signer of row.signers ?? []) add(signer);
+  add(hostname());
+  add(hostname().split('.')[0]);
+  return { names: [...names], parts: [...parts] };
 }
 
 /** Retain the primary branch on every command without creating a board for global help. */
@@ -4258,7 +4580,7 @@ export function resultCommands() {
   ])].sort();
 }
 
-/** The actual command maps supply help names, so adding a handler needs no parallel help-name edit. */
+/** Command help follows the same dispatch declarations as execution. */
 export const HELP = buildHelp(resultCommands());
 
 // This marker is emitted once when the actual CLI entrypoint finishes evaluating.

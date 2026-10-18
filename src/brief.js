@@ -3,9 +3,7 @@
  * followed by text on the same line or by lines below it, until the next label. Below the strong
  * route a brief must name its files and its test, because a lighter model works from the brief alone.
  */
-import { Refused } from './refused.js';
 
-const BRIEF_LIMIT = 8000;
 const LABEL_RE = /^(files|change|test|out of scope)\s*:\s*(.*)$/i;
 
 /** Remove closed parenthetical notes while leaving an unmatched note visible to path checks.
@@ -73,28 +71,4 @@ export function briefFiles(brief) {
     .filter((token) => !/^[\d.]+$/.test(token)
       && !/^[a-z]+:\/\//i.test(token)
       && (token.includes('/') || /\.[a-z0-9]+(?:\.[a-z0-9]+)*$/i.test(token)));
-}
-
-/**
- * Refuse an item a lighter model could not build cold (B10, B14). Any brief stays short enough to
- * read. Below the strong route the item needs all of it: a criterion, a check command that proves
- * it, and a brief naming the files and the test.
- *
- * @param {{ brief: string, route: string, criterion: string, check: string }} item
- */
-export function checkRouted({ brief, route, criterion, check }) {
-  if (brief.length > BRIEF_LIMIT) {
-    throw new Refused('BRIEF_TOO_LONG', `the brief is ${brief.length} characters; keep it under ${BRIEF_LIMIT} and point to longer docs by path`);
-  }
-  if (route === 'strong') return;
-  const sections = briefSections(brief);
-  const missing = [
-    ...(briefFiles(brief).length ? [] : ['a brief with a Files: section naming the paths to touch']),
-    ...(sections.test?.length ? [] : ['a Test: section saying what the test asserts']),
-    ...(criterion.trim() ? [] : ['--criterion, saying when it is done']),
-    ...(check.trim() ? [] : ['--check, the command that proves it']),
-  ];
-  if (missing.length) {
-    throw new Refused('NO_BRIEF', `an item routed ${route} must be buildable cold; it needs ${missing.join(', ')}`);
-  }
 }

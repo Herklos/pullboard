@@ -191,6 +191,8 @@ Spec
   pullboard blueprint add <name or file> [--blueprint <name or file>]...  add a blueprint's rules and questions as drafts, and its starter items
                                         bundled: web-app; nothing is approved, and a repeat adds nothing
                                         several land in order: one product, one architecture, any practice; a shared rule is drafted once
+  pullboard blueprint fit <name or file> <row id or #item> keep|adapt|drop|answer [--text "..."] [--reason "why"]  propose this repo's fit; nothing applies yet
+  pullboard spec fit [approve <batch>] | fit edit <row id or #item> keep|adapt|drop|answer [--text "..."] [--reason "why"]  the person's fit batch
   pullboard blueprint save [file] [--name <name>] [--title "<title>"]  write approved rules and answered questions as a blueprint
                                         never items, notes, paths, emails or names; file defaults to <project>.blueprint.json
   pullboard spec signers add [--key <path>] [--by <principal>]  opt into SSH-signed sign-offs
@@ -241,7 +243,6 @@ const HELP_EXAMPLES = {
   relay: 'pullboard relay on --all', 'relay recover': 'pullboard relay recover --skip 12',
   'lane add': 'pullboard lane add web --owns apps/web/', lane: 'pullboard lane add web --owns apps/web/',
   roadmap: 'pullboard roadmap', rigor: 'pullboard rigor', milestone: 'pullboard milestone add "0.7.0" --items 12,13',
-  'milestone items': 'pullboard milestone items "0.7.0" --add 14',
   runner: 'pullboard runner add studio --slots 2 --browser 1', 'runner add': 'pullboard runner add studio --slots 2 --browser 1',
   edit: 'pullboard edit 12 --brief "Add the upload page"', release: 'pullboard release 12',
   land: 'pullboard land --max 4',
@@ -252,14 +253,17 @@ const HELP_EXAMPLES = {
   'spec check': 'pullboard spec check',
   doctrine: 'pullboard doctrine check', 'doctrine check': 'pullboard doctrine check',
   'spec view': 'pullboard spec view', 'spec show': 'pullboard spec show G1',
-  'spec approve': 'pullboard spec approve G1', 'spec decline': 'pullboard spec decline G1 --reason "out of scope"',
   'spec draft': 'pullboard spec draft "Describe the first requirement"',
   'blueprint add': 'pullboard blueprint add web-app', 'blueprint save': 'pullboard blueprint save',
+  'blueprint fit': 'pullboard blueprint fit web-app G1 keep --reason "the repository already meets this row"',
+  'spec fit': 'pullboard spec fit',
   'spec unmet': 'pullboard spec unmet', 'spec signoff': 'pullboard spec signoff G1',
   'spec signers add': 'pullboard spec signers add', help: 'pullboard help claim', version: 'pullboard --version',
 };
 
 const HELP_ALIASES = {
+  help: { usage: 'pullboard help', source: null },
+  version: { usage: 'pullboard version', source: null },
   whoami: { usage: 'pullboard whoami', source: 'whoami' },
   lanes: { usage: 'pullboard lanes', source: 'whoami' },
   lane: { usage: 'pullboard lane add <name> --owns <path>[,<path>]', source: 'lane add' },
@@ -270,8 +274,10 @@ const HELP_ALIASES = {
   lifecycle: { usage: 'pullboard lifecycle', source: null },
   escalate: { usage: 'pullboard escalate <id> --note "..." [--note-file <file>]', source: 'escalate <id> --note "what was tried and how it failed"', extraFlags: ['--note-file <file>'] },
   'view export': { usage: 'pullboard view --export <dir>', source: 'view' },
-  blueprint: { usage: 'pullboard blueprint add <name or file> [--blueprint <name or file>]...', source: 'blueprint add' },
+  blueprint: { usage: 'pullboard blueprint add <name or file>, then a seat runs pullboard blueprint fit <name or file> <row id or #item> keep|adapt|drop|answer, then the person runs pullboard spec fit approve <batch>', source: 'blueprint add' },
   'blueprint add': { usage: 'pullboard blueprint add <name or file> [--blueprint <name or file>]...', source: 'blueprint add' },
+  'blueprint fit': { usage: 'pullboard blueprint fit <name or file> <row id or #item> keep|adapt|drop|answer [--text "..."] [--reason "why"]', source: null, onlyFlags: ['--text', '--reason'] },
+  'spec fit': { usage: 'pullboard spec fit [approve <batch>] | fit edit <row id or #item> keep|adapt|drop|answer [--text "..."] [--reason "why"]', source: null, onlyFlags: ['--text', '--reason'] },
   'spec check': { usage: 'pullboard spec check', source: 'spec check' },
   'spec view': { usage: 'pullboard spec view [--out file]', source: 'spec view' },
   'spec show': { usage: 'pullboard spec show <id>', source: 'spec show', onlyFlags: [] },
@@ -279,9 +285,6 @@ const HELP_ALIASES = {
   'spec signoff': { usage: 'pullboard spec signoff <ids> [--by <principal>] [--note "..."] [--note-file <file>]', source: 'spec show', onlyFlags: ['--by', '--note', '--note-file'], extraFlags: ['--note-file <file>'] },
   'spec signers': { usage: 'pullboard spec signers add [--key <path>] [--by <principal>]', source: 'spec signers add' },
   'spec signers add': { usage: 'pullboard spec signers add [--key <path>] [--by <principal>]', source: 'spec signers add' },
-  'spec approve': { usage: 'pullboard spec approve <ids> [--text "new wording"]', source: 'spec approve', onlyFlags: ['--text'] },
-  'spec decline': { usage: 'pullboard spec decline <ids> --reason "why"', source: 'spec approve', onlyFlags: ['--reason'] },
-  'milestone items': { usage: 'pullboard milestone items <name> [--add <ids> | --remove <ids>]', source: 'milestone items' },
   doctrine: { usage: 'pullboard doctrine check', source: 'doctrine check' },
   hook: { usage: 'pullboard hook pre-commit|pre-merge-commit|commit-msg|pre-push', source: 'hook' },
   'hook pre-commit': { usage: 'pullboard hook pre-commit', source: 'hook' },
@@ -326,8 +329,11 @@ function commandHelpRows(fullHelp, commandNames) {
     rows.push({ usage: lines[index].trim().slice('pullboard '.length).split(/\s{2,}/, 1)[0].trim(), details });
   }
   const phrases = rows.flatMap((row) => usagePhrases(row.usage));
-  const names = [...new Set([...commandNames, ...Object.keys(HELP_ALIASES),
-    ...phrases.flatMap((name) => [name.split(' ')[0], name])])];
+  const names = [...new Set([
+    ...commandNames,
+    ...Object.keys(HELP_ALIASES),
+    ...phrases.flatMap((name) => [name.split(' ')[0], name]),
+  ])];
   return Object.fromEntries(names.map((name) => {
     const parts = name.split(' ');
     const alias = HELP_ALIASES[name];
@@ -367,7 +373,7 @@ function overviewHelp(groups, firstRun = false) {
   return lines.join('\n');
 }
 
-/** Derive help names from live command declarations and the existing usage and alias declarations. */
+/** Build help from the actual command declarations, preserving the printed overview and full list. */
 export function buildHelp(commandNames = []) {
   return Object.freeze({
     overview: overviewHelp(HELP_GROUPS),
@@ -378,7 +384,7 @@ export function buildHelp(commandNames = []) {
   });
 }
 
-/** Browser command phrases use the same pure declarations without initializing the CLI or server. */
+/** Browser consumers read pure help declarations without initializing the CLI or server. */
 export const HELP = buildHelp();
 
 /** Replace help placeholders with ordinary values so every command receives a usable example. */

@@ -164,7 +164,11 @@ test('the lifecycle figure is drawn from the declaration, and refuses a state or
   assert.throws(() => drawLifecycle(unsupported), /no route for withdrawn > open/);
   const reopen = { ...MACHINE,
     states: MACHINE.states.map((state) => state.id === 'verified' ? { ...state, final: false } : state),
-    moves: [...MACHINE.moves, { verb: 'reopen', from: ['verified'], to: 'open', by: ['coordinator'], guards: [] }],
+    // Give this fixture one synthetic verified return even when the real declaration adds others.
+    // The original label geometry and collision assertions below still exercise that route.
+    moves: [...MACHINE.moves.map((move) => move.to === 'open'
+      ? { ...move, from: move.from.filter((state) => state !== 'verified') } : move).filter((move) => move.from.length),
+    { verb: 'reopen', from: ['verified'], to: 'open', by: ['coordinator'], guards: [] }],
   };
   let reopenedSvg;
   assert.doesNotThrow(() => { reopenedSvg = drawLifecycle(reopen); }, 'the synthetic verified reopen has a declared drawing route');

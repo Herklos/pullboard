@@ -17,6 +17,7 @@ import { CHECK_ACCEPT_ENGINE } from './check-accept.js';
 import {
   CAUSE_ENGINE,
   ENGINE_VERSION,
+  VERDICT_REVIEW_ENGINE,
 } from './machine.js';
 import { Refused } from './refused.js';
 import {
@@ -44,12 +45,18 @@ export const ENGINE_OPERATIONS = Object.freeze([
 /** Engine version at which each ordered operation first has stable replay semantics. */
 const OPERATION_ENGINE = Object.freeze({ reopen: 8, recordLandingBatch: 8, recordLandingWaiver: 8, recordLandingFlake: 8, finishLandingBatch: 8, acceptCheck: CHECK_ACCEPT_ENGINE });
 
-/** Dependency edits add engine-10 meaning, edit reasons engine-19, implied items engine-20, and a
- * cause key on a reject, reopen or person fact engine-30 (#713), without changing ordinary historical envelopes.
- */
-function minimumOperationEngine(operation, args) {
+/** Dependency edits, bar reasons and sealed review metadata retain their distinct recorded engine meanings. */
+function minimumOperationEngine(operation, args, board) {
   const options = args[1];
   const given = (name) => Boolean(options && typeof options === 'object' && Object.hasOwn(options, name) && options[name] !== undefined && options[name] !== null && options[name] !== false);
+  if (board && ['recordLandingBatch', 'finishLandingBatch'].includes(operation)) {
+    const id = operation === 'recordLandingBatch' ? args[0]?.batch?.id : args[0]?.id;
+    const prior = id && store.landingBatches(board).find(batch => batch.id === id);
+    if (prior && ['items', 'candidates'].some(key => Array.isArray(prior[key]) && prior[key].some(entry => entry && Object.hasOwn(entry, 'reviewedCommit')))) return VERDICT_REVIEW_ENGINE;
+  }
+  if (operation === 'verify' && options && Object.hasOwn(options, 'review')) return VERDICT_REVIEW_ENGINE;
+  if (operation === 'recordLandingBatch' && args[0]?.batch
+    && ['items', 'candidates'].some(key => Array.isArray(args[0].batch[key]) && args[0].batch[key].some(entry => entry && typeof entry === 'object' && Object.hasOwn(entry, 'reviewedCommit')))) return VERDICT_REVIEW_ENGINE;
   if (['verify', 'reopen', 'appendFact'].includes(operation) && (given('cause') || given('neverAgain') || given('asPerson'))) return CAUSE_ENGINE;
   if (carriesImplies(operation, args)) return IMPLIES_ENGINE;
   if (carriesBarReason(operation, args)) return BAR_ENGINE;
@@ -93,7 +100,7 @@ export function startRelayEpoch(board) {
 /** Turn caller-only callbacks into deterministic values before sealing an executable operation. */
 export function prepareEngineMove(board, operation, args, { id = randomUUID(), actor } = {}) {
   if (!ENGINE_OPERATIONS.includes(operation) || !Array.isArray(args)) throw new Refused('RELAY_MOVE', 'use a supported board-engine operation with its argument array');
-  const minimumEngine = minimumOperationEngine(operation, args);
+  const minimumEngine = minimumOperationEngine(operation, args, board);
   if (ENGINE_VERSION < minimumEngine) throw new Refused('ENGINE_VERSION', `${operation} requires engine version ${minimumEngine}; this pullboard uses engine ${ENGINE_VERSION}; upgrade before sending it`);
   const values = args.map((value) => value && typeof value === 'object' ? { ...value } : value);
   if (operation === 'release') {
@@ -237,6 +244,9 @@ export function applyEngineMove(board, move, { sequence, at }) {
     if (sequence !== cursor + 1) throw new Refused('RELAY_ORDER', `relay sequence ${sequence} does not follow applied sequence ${cursor}; fetch and apply the missing prefix first`);
     let outcome = previous?.outcome;
     if (!outcome) {
+      // Existing receipts replay before consulting newer snapshot semantics.
+      const minimumEngine = minimumOperationEngine(move.operation, move.args, board);
+      if (move.engine < minimumEngine) throw new Refused('RELAY_MOVE', `${move.operation} cannot act on a checked-composition snapshot from engine ${move.engine}; use engine ${minimumEngine} or newer`);
       const clock = board.clock;
       const engineVersion = board.executionEngineVersion;
       board.clock = { now: () => new Date(at) };

@@ -7,6 +7,13 @@
  * spec know: the commit, the verifier's checkout, the frozen criterion.
  */
 import {
+  verdictReviewProblem,
+  verdictsFor,
+  acceptedVerdict,
+  checkedLandingCommit,
+} from './verdict-reviews.js';
+export { verdictReviewProblem, verdictsFor, acceptedVerdict, checkedLandingCommit };
+import {
   randomBytes,
   randomUUID,
 } from 'node:crypto';
@@ -19,11 +26,12 @@ import { DatabaseSync } from 'node:sqlite';
 import { boardNotWritable } from './board-access.js';
 import {
   briefFiles,
-  checkRouted,
+  briefSections,
 } from './brief.js';
 import { COORDINATOR } from './config.js';
 import {
   ENGINE_VERSION,
+  VERDICT_REVIEW_ENGINE,
   GUARDS,
   IN_STATE,
   MOVES,
@@ -46,7 +54,13 @@ import {
   tellFactImplications,
   tellVerdictImplications,
 } from './implies.js';
+import {
+  landingFlakes,
+  landingWaiverCovers,
+  landingWaiverKind,
+} from './landing-exceptions.js';
 import { parseSpec } from './spec.js';
+export { landingFlakes, landingWaiverCovers, landingWaiverKind };
 export { acceptCheck } from './check-accept.js';
 
 export const ACCEPT_REASON = 'CRITERION_MET';
@@ -79,6 +93,7 @@ export function boardBusyError(file, startedAt, error) {
  * at its tier and below.
  */
 export const ROUTES = ['light', 'mid', 'strong'];
+const BRIEF_LIMIT = 8000;
 const REVIEW_RELEASE_COOLDOWN_MS = 60 * 60 * 1000;
 
 /**
@@ -648,6 +663,30 @@ export function listAgents(board) {
 function checkRoute(route) {
   if (!ROUTES.includes(route)) {
     throw new Refused('BAD_ROUTE', `route "${route}" is light (a small or local model can build it from the brief), mid (a capable model) or strong (a frontier model)`);
+  }
+}
+
+/**
+ * Refuse an item a lighter model could not build cold (B10, B14). Any brief stays short enough to
+ * read. Below the strong route the item needs all of it: a criterion, a check command that proves
+ * it, and a brief naming the files and the test.
+ *
+ * @param {{ brief: string, route: string, criterion: string, check: string }} item
+ */
+function checkRouted({ brief, route, criterion, check }) {
+  if (brief.length > BRIEF_LIMIT) {
+    throw new Refused('BRIEF_TOO_LONG', `the brief is ${brief.length} characters; keep it under ${BRIEF_LIMIT} and point to longer docs by path`);
+  }
+  if (route === 'strong') return;
+  const sections = briefSections(brief);
+  const missing = [
+    ...(briefFiles(brief).length ? [] : ['a brief with a Files: section naming the paths to touch']),
+    ...(sections.test?.length ? [] : ['a Test: section saying what the test asserts']),
+    ...(criterion.trim() ? [] : ['--criterion, saying when it is done']),
+    ...(check.trim() ? [] : ['--check, the command that proves it']),
+  ];
+  if (missing.length) {
+    throw new Refused('NO_BRIEF', `an item routed ${route} must be buildable cold; it needs ${missing.join(', ')}`);
   }
 }
 
@@ -1474,7 +1513,8 @@ function reserveWithin(board, id, { agentId, leaseMs, policy, familyPolicy = 'of
 }
 
 /**
- * Record a verdict on a submitted item (V1, V3, V5, V6, V8): an accept verifies it, a reject
+ * Record a verdict on submitted work, or a sealed re-review of unlanded work (E8,V1,V3,V8).
+ * An accept verifies it; a reject
  * reopens it for rework.
  *
  * The verdict binds the submitted commit and the digest frozen at claim. If the criterion's text
@@ -1486,21 +1526,32 @@ function reserveWithin(board, id, { agentId, leaseMs, policy, familyPolicy = 'of
  *
  * @param {any} board
  * @param {number} id
- * @param {{ agentId: string, decision: string, reason?: string, note?: string, cause?: string, head: string, digest: string, policy: string, familyPolicy?: string, check?: 'none' | 'green', implies?: number[], impliesId?: string }} verdict - implies: items this verdict changes (B29)
+ * @param {{ agentId: string, decision: string, reason?: string, note?: string, cause?: string, head: string, digest: string, policy: string, familyPolicy?: string, check?: 'none' | 'green', review?: {commit: string, head?: string, trunk: string, paths: string[]}, implies?: number[], impliesId?: string }} verdict - implies: items this verdict changes (B29)
  * @returns {{ decision: string, reason: string, check?: 'none' | 'green' }}
  */
-export function verify(board, id, { agentId, decision, reason, note = '', cause, head, digest, policy, familyPolicy = 'off', check, implies, impliesId }) {
+export function verify(board, id, { agentId, decision, reason, note = '', cause, head, digest, policy, familyPolicy = 'off', check, review, implies, impliesId }) {
   const verb = { ACCEPT: 'accept', REJECT: 'reject' }[decision];
   if (!verb) throw new Refused('BAD_DECISION', 'the decision is accept or reject');
   const isAccept = verb === 'accept';
   const code = isAccept ? ACCEPT_REASON : reason;
+  const engine = board.executionEngineVersion ?? ENGINE_VERSION;
+  const declaration = MOVES.find(move => move.verb === verb);
+  const newReview = engine >= VERDICT_REVIEW_ENGINE && review !== undefined;
+  // Without the new sealed metadata, old moves keep their exact submitted-only semantics.
+  const transition = newReview ? declaration : { ...declaration, from: ['submitted'],
+    guards: declaration.guards.filter(guard => !['notMerged', 'verdictReviewRecorded', 'reviewTreeCurrent'].includes(guard)) };
   return atomic(board, () => {
     const item = moveItem(board, id, verb, {
+      transition,
       checks: {
         coordinatorSaysAs: null,
         joined: null,
         [IN_STATE]: (found) => new Refused('NOT_SUBMITTED', `item #${id} is ${current(board, found).item_status}, not submitted`),
         atSubmittedCommit: null,
+        notMerged: found => !found.item_merged_commit ? null
+          : new Refused('ALREADY_MERGED', `item #${id} already landed; only unlanded acceptances can be re-reviewed`),
+        verdictReviewRecorded: found => verdictReviewProblem(review, found.item_commit, { checked: engine >= VERDICT_REVIEW_ENGINE }),
+        reviewTreeCurrent: null,
         ...reviewerChecks(board, { agentId, policy, familyPolicy }),
         criterionUnchanged: (found) =>
           digest === found.item_frozen_digest
@@ -1532,6 +1583,7 @@ export function verify(board, id, { agentId, decision, reason, note = '', cause,
     });
     const detail = { reason: code, commit: item.item_commit, ...(!isAccept && cause !== undefined && cause !== null ? { cause } : {}) };
     if (isAccept && check !== undefined) detail.check = check;
+    if (newReview) detail.review = { commit: review.commit, ...(Object.hasOwn(review, 'head') ? { head: review.head } : {}), trunk: review.trunk, paths: [...review.paths] };
     logEvent(board, agentId, verb, id, implies?.length ? { ...detail, implies } : detail);
     tellVerdictImplications(board, (by, itemId, fact) => logEvent(board, by, 'fact', itemId, fact), id, { seed: impliesId, implies });
     return { decision, reason: code, ...(isAccept && check !== undefined ? { check } : {}) };
@@ -1793,23 +1845,6 @@ export function getItem(board, id) {
   const item = current(board, itemById(board, id));
   const baseline = itemCheckBaseline(board, item);
   return baseline ? { ...item, item_check_baseline: baseline } : item;
-}
-
-/**
- * Every verdict on an item, oldest first.
- *
- * @param {any} board
- * @param {number} id
- * @returns {any[]}
- */
-export function verdictsFor(board, id) {
-  const verdicts = board.db.prepare('SELECT * FROM verdict WHERE item_id = ? ORDER BY verdict_id').all(id);
-  const receipts = board.db.prepare("SELECT event_kind, event_detail FROM event WHERE item_id = ? AND event_kind IN ('accept', 'reject') ORDER BY event_id").all(id);
-  return verdicts.map((verdict, index) => {
-    let detail = {};
-    try { detail = JSON.parse(receipts[index]?.event_detail ?? '{}'); } catch { /* Malformed legacy details remain unknown. */ }
-    return { ...verdict, check: detail.check ?? 'unknown' };
-  });
 }
 
 /**
@@ -2692,7 +2727,8 @@ export function recordLandingBatch(board, { agentId, batch, revision = 0 }) {
     || !['merging', 'gating', 'bisecting', 'flaky', 'blocked', 'ready', 'pushed', 'landed'].includes(batch.state)
     || !/^[a-f0-9]{40,64}$/u.test(batch.base ?? '') || !/^[a-f0-9]{40,64}$/u.test(batch.tip ?? '')
     || typeof batch.root !== 'string' || !batch.root || typeof batch.branch !== 'string' || !batch.branch.startsWith('refs/heads/')
-    || !Array.isArray(batch.items) || batch.items.some((entry) => !Number.isSafeInteger(entry?.id) || entry.id < 1 || !/^[a-f0-9]{40,64}$/u.test(entry.commit ?? ''))
+    || !Array.isArray(batch.items) || batch.items.some((entry) => !Number.isSafeInteger(entry?.id) || entry.id < 1 || !/^[a-f0-9]{40,64}$/u.test(entry.commit ?? '')
+      || ((board.executionEngineVersion ?? ENGINE_VERSION) >= VERDICT_REVIEW_ENGINE && Object.hasOwn(entry, 'reviewedCommit') && !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(entry.reviewedCommit ?? '')))
     || typeof batch.owner !== 'string' || !batch.owner || typeof batch.logPath !== 'string' || !batch.logPath
     || !Number.isSafeInteger(revision) || revision < 0) {
     throw new Refused('LAND_BATCH', 'a landing batch needs its exact base, tip, items, state, owner and log path; run pullboard land');
@@ -2721,6 +2757,8 @@ export function recordLandingWaiver(board, { agentId, channel, id, test, until, 
     throw new Refused('LAND_WAIVER', 'name a test, a future --until date and a nonempty --reason; run pullboard land --waive <test> --until <date> --reason "why"');
   }
   return atomic(board, () => {
+    // This ordered result and event retain their released shape on every replay engine.
+    // File/name classification belongs to a derived read, never immutable waiver history.
     const waiver = { id, test, until: new Date(until).toISOString(), reason: reason.trim(), by: PERSON, channel };
     logEvent(board, PERSON, 'landing_waiver', null, { waiver });
     return waiver;
@@ -2734,10 +2772,11 @@ export function landingWaivers(board) {
     .map((row) => JSON.parse(row.event_detail).waiver);
 }
 
-/** Find a live person's waiver covering the exact failing file or test name [B3,R3]. */
+/** Find a live person's waiver and derive its match kind without rewriting history [B3,R3,H16]. */
 export function landingWaiverFor(board, failure) {
-  return landingWaivers(board).findLast((waiver) => Date.parse(waiver.until) > board.clock.now().getTime()
-    && (waiver.test === failure.file || waiver.test === failure.name)) ?? null;
+  const waiver = landingWaivers(board).findLast((entry) => Date.parse(entry.until) > board.clock.now().getTime()
+    && landingWaiverCovers(entry, failure));
+  return waiver ? { ...waiver, kind: waiver.kind ?? landingWaiverKind(waiver.test) } : null;
 }
 
 /** File one durable defect per flaky test and retain its source digest [B3,R3]. */
@@ -2757,16 +2796,6 @@ export function recordLandingFlake(board, { agentId, test, hash, names, lane, ba
   });
 }
 
-/** Read the latest observation of each named flaky test [B3,R3]. */
-export function landingFlakes(board) {
-  const flakes = new Map();
-  for (const row of board.db.prepare("SELECT event_detail FROM event WHERE event_kind = 'landing_flake' ORDER BY event_id").all()) {
-    const { flake } = JSON.parse(row.event_detail);
-    flakes.set(flake.test, flake);
-  }
-  return [...flakes.values()];
-}
-
 /** Validate a distinct waived landing proof without creating an ordinary gate stamp [B3,R3]. */
 export function waivedLandingProof(board, tree) {
   return landingBatches(board).findLast((batch) => ['ready', 'pushed', 'landed'].includes(batch.state)
@@ -2774,7 +2803,7 @@ export function waivedLandingProof(board, tree) {
     && batch.proof.failures.every((failure) => {
       const waiver = landingWaivers(board).find((entry) => entry.id === failure.waiver);
       return waiver && Date.parse(waiver.until) > board.clock.now().getTime()
-        && (waiver.test === failure.file || waiver.test === failure.name);
+        && landingWaiverCovers(waiver, failure);
     })) ?? null;
 }
 
@@ -2791,8 +2820,22 @@ export function finishLandingBatch(board, { agentId, id, tip }) {
       if (item.item_commit !== entry.commit || item.item_status !== 'verified') {
         throw new Refused('LAND_ITEM_MOVED', `item #${entry.id} changed after the batch was gated; rebuild its landing`);
       }
+      if ((board.executionEngineVersion ?? ENGINE_VERSION) >= VERDICT_REVIEW_ENGINE
+        && (entry.reviewedCommit ?? entry.commit) !== checkedLandingCommit(board, item)) {
+        throw new Refused('LAND_ITEM_MOVED', `item #${entry.id} was re-reviewed after the batch was gated; rebuild its landing`);
+      }
       if (item.item_merged_commit && item.item_merged_commit !== entry.merge) {
         throw new Refused('LAND_ITEM_MOVED', `item #${entry.id} already has another landing receipt; read pullboard show ${entry.id}`);
+      }
+      const accepted = acceptedVerdict(board, item);
+      if ((board.executionEngineVersion ?? ENGINE_VERSION) < VERDICT_REVIEW_ENGINE
+        && accepted?.review?.head && accepted.review.head !== (entry.reviewedCommit ?? entry.commit)) {
+        // An old client may already have pushed B before a newer client checked C.
+        // Record physical history without lending C's proof to B or wedging replay.
+        logEvent(board, agentId, 'landing-review-moved', entry.id, {
+          code: 'LAND_ITEM_MOVED', batch: id, verdict: accepted.verdict_id,
+          checked: accepted.review.head, landed: entry.merge,
+        });
       }
       if (!item.item_merged_commit) merged(board, entry.id, { agentId, commit: entry.merge });
     }
