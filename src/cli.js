@@ -4611,7 +4611,7 @@ async function runMain(argv, streams) {
   if (parsed) {
     try {
       // Checkout identity supplies the display role even if a person-channel check refuses first.
-      try { const info = repoInfo(io.cwd); if (info.isMain) io.caller('coordinator', info.root); } catch { /* Unknown checkouts retain existing guidance. */ }
+      try { const info = needsRepo ? repoInfo(io.cwd) : null; if (info?.isMain) io.caller('coordinator', info.root); } catch { /* Unknown checkouts retain existing guidance. */ }
       const [command, verb] = parsed.positionals;
       const remoteRelayOn = command === 'relay' && verb === 'on' && !parsed.values.all;
       if (!parsed.values.help && !parsed.values.version &&
