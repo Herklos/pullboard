@@ -87,20 +87,23 @@ test('[N26] each milestone sums its items by state with an estimate', async t =>
   const building = box.item('building');
   const held = box.item('held');
   const waiting = box.item('waiting');
-  const ids = [landings.at(-1), landing, review, building, held, waiting];
+  const withdrawn = box.item('waiting');
+  store.withdraw(box.board, withdrawn, { agentId: 'coordinator', reason: 'No longer planned' });
+  const ids = [landings.at(-1), landing, review, building, held, waiting, withdrawn];
   store.addMilestone(box.board, { agentId: 'coordinator', name: 'A', items: ids });
   const ask = store.shout(box.board, { from: 'coordinator', to: store.PERSON, lanes: ['web'], decision: true,
-    text: `Choose for #${waiting}, #${waiting}; foreign#${review} and https://example.invalid/#${landing} are outside`,
+    text: `Choose for #${waiting}, #${waiting}, #${withdrawn}; foreign#${review} and https://example.invalid/#${landing} are outside`,
     evidence: { kind: 'attempt', outcome: 'Needs judgment', item: held, commit: box.commit } });
   const expected = { total: 6, left: 5, landed: 1, landing: 1, review: 1, building: 1, held: 1, waiting: 1,
     needsYou: [held, waiting], pace: { last6h: 5, last2h: 3 }, estimate: { low: 3.5, high: 6 } };
   assert.deepEqual((await box.run()).milestones[0].summary, expected);
   assert.match(await box.run(false), /^  5 left of 6: 1 landed, 1 landing, 1 in review, 1 building, 1 waiting, 1 held; about 3.5 to 6 h at today's pace\.$/m);
   const direct = milestoneRoadmap(box.repo, box.board, { projects: () => [] })[0];
-  assert.equal(direct.total, 6);
+  assert.equal(direct.total, 7, 'legacy milestone membership still includes withdrawn work');
+  assert.equal(direct.items.at(-1).status, 'withdrawn');
   assert.equal(direct.done, 1);
   assert.deepEqual(direct.items.map(entry => entry.id), ids, 'existing roadmap fields stay intact');
-  assert.equal(['landed', 'landing', 'review', 'building', 'held', 'waiting'].reduce((sum, key) => sum + direct.summary[key], 0), direct.total);
+  assert.equal(['landed', 'landing', 'review', 'building', 'held', 'waiting'].reduce((sum, key) => sum + direct.summary[key], 0), direct.summary.total);
   store.shout(box.board, { from: store.PERSON, to: 'coordinator', lanes: ['web'], answers: ask, text: 'Choose it' });
   assert.deepEqual((await box.run()).milestones[0].summary.needsYou, [], 'answered questions no longer need the person');
   box.at(now + 2 * HOUR);

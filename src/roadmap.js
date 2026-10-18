@@ -62,11 +62,12 @@ export function milestoneRoadmap(root, board, options = {}) {
   const pace = landingPace(board, items, now);
   const needsYou = personDecisionItems(board);
   return milestones.map(milestone => {
-    const summary = { total: milestone.total, left: milestone.total - milestone.landed,
+    const active = milestone.items.filter(entry => entry.status !== 'withdrawn');
+    const summary = { total: active.length, left: active.length - milestone.landed,
       landed: 0, landing: 0, review: 0, building: 0, held: 0, waiting: 0,
-      needsYou: milestone.items.filter(entry => typeof entry.id === 'number' && needsYou.has(entry.id)).map(entry => entry.id),
+      needsYou: active.filter(entry => typeof entry.id === 'number' && needsYou.has(entry.id)).map(entry => entry.id),
       pace: { ...pace }, estimate: null };
-    for (const entry of milestone.items) {
+    for (const entry of active) {
       const local = typeof entry.id === 'number' ? items.get(entry.id) : null;
       const external = externalItems.get(entry.id);
       const item = local ?? external?.item;
