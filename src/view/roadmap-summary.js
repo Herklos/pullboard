@@ -7,7 +7,10 @@ export function roadmapSummary(milestone, context = {}) {
   if (!summary || !number(summary.total) || !number(summary.left) || states.some(([key]) => !number(summary[key]))) return null;
   const count = '<span class="roadmap-left"><b>'+escape(summary.left)+' left</b><span aria-label="'+escape(summary.landed)+'/'+escape(summary.total)+' landed">'+escape(summary.landed)+' of '+escape(summary.total)+' landed</span></span>';
   const description = states.map(([key,label]) => summary[key]+' '+label).join(', ');
-  const bar = '<div class="milestone-progress roadmap-summary-bar" role="img" aria-label="'+escape(milestone.name+': '+description)+'" data-total="'+escape(summary.total)+'">'+states.map(([key]) => '<span class="roadmap-summary-segment '+key+'" data-summary-segment="'+key+'" data-count="'+escape(summary[key])+'" style="flex-grow:'+summary[key]+'"></span>').join('')+'</div>';
+  let offset = 0;
+  const segments = states.map(([key]) => { const x = offset; offset += summary[key]; return '<rect class="roadmap-summary-segment ' + key + '" data-summary-segment="' + key + '" data-count="' + summary[key] + '" x="' + x + '" width="' + summary[key] + '" height="1"/>'; }).join('');
+  // Geometry uses the supplied counts as SVG units; inline CSS is disallowed by the view's policy.
+  const bar = '<svg class="milestone-progress roadmap-summary-bar" viewBox="0 0 ' + (summary.total || 1) + ' 1" preserveAspectRatio="none" role="img" aria-label="' + escape(milestone.name+': '+description) + '" data-total="' + summary.total + '">' + segments + '</svg>';
   const legend = '<div class="roadmap-summary-legend">'+states.map(([key,label]) => '<span data-summary-state="'+key+'"><i class="roadmap-summary-swatch '+key+'" aria-hidden="true"></i><b>'+escape(summary[key])+'</b> '+label+'</span>').join('')+'</div>';
   const target = milestone.target ? '<span class="roadmap-target">Target <time datetime="'+escape(milestone.target)+'">'+escape(context.time ? context.time(milestone.target) : milestone.target)+'</time>'+(milestone.pastTarget?' <span class="chip warn">past target</span>':'')+'</span>' : '';
   const estimate = summary.estimate, pace = summary.pace;

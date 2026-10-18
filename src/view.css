@@ -918,15 +918,14 @@ code.inline.long { white-space: break-spaces; overflow-wrap: anywhere; }
 .roadmap-left > b { font-size: 22px; font-weight: 600; line-height: 1.1; }
 .roadmap-left > span { color: var(--ink-muted); font: 12px var(--mono); }
 .roadmap-summary { margin: 0 14px 14px; min-width: 0; }
-.roadmap-summary-bar { display: flex; height: 10px; margin: 10px 0; border-radius: 5px; }
-.roadmap-summary-segment { flex-basis: 0; min-width: 0; }
+.roadmap-summary-bar { display: block; height: 10px; margin: 10px 0; border-radius: 5px; }
 .roadmap-summary-swatch { display: inline-block; width: 8px; height: 8px; margin-right: 6px; border-radius: 50%; }
-.roadmap-summary .landed { background: var(--accent); }
-.roadmap-summary .landing { background: var(--accent-strong); }
-.roadmap-summary .review { background: var(--violet); }
-.roadmap-summary .building { background: var(--blue); }
-.roadmap-summary .waiting { background: var(--ink-faint); }
-.roadmap-summary .held { background: var(--warn); }
+.roadmap-summary .landed { background: var(--accent); fill: var(--accent); }
+.roadmap-summary .landing { background: var(--accent-strong); fill: var(--accent-strong); }
+.roadmap-summary .review { background: var(--violet); fill: var(--violet); }
+.roadmap-summary .building { background: var(--blue); fill: var(--blue); }
+.roadmap-summary .waiting { background: var(--ink-faint); fill: var(--ink-faint); }
+.roadmap-summary .held { background: var(--warn); fill: var(--warn); }
 .roadmap-summary-legend { display: flex; flex-wrap: wrap; gap: 6px 16px; color: var(--ink-muted); font-size: 13px; }
 .roadmap-summary-legend b { font-weight: 600; color: var(--ink); }
 .roadmap-summary-meta { display: flex; flex-wrap: wrap; gap: 8px 20px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); color: var(--ink-muted); font-size: 13px; }
