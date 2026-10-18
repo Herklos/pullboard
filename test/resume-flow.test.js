@@ -143,7 +143,7 @@ test('resume asks the coordinator to commit an applied row file [I1,L3]', t => {
   // Both at once: each owner gets exactly its own files, and an unrelated dirty file is never setup.
   const mixed = applied();
   const config = JSON.parse(readFileSync(join(mixed.repo, 'pullboard.json'), 'utf8'));
-  writeFileSync(join(mixed.repo, 'pullboard.json'), JSON.stringify({ ...config, gate: 'pullboard spec check' }, null, 2) + '\n');
+  writeFileSync(join(mixed.repo, 'pullboard.json'), JSON.stringify({ ...config, gate: 'npm test' }, null, 2) + '\n');
   const both = resume(mixed);
   assert.ok(both.lines.includes(`${ROW_LINE}${commit(mixed, ['SPEC.md'])}`), both.lines.join('\n'));
   assert.ok(both.lines.includes(`${PERSON_LINE}${add(mixed, ['pullboard.json'])}`), both.lines.join('\n'));
@@ -750,6 +750,10 @@ test('a reused authenticated view completes setup for its new board [N26,N32]', 
 
 /** Drive the same actual commands a newcomer receives, with a private fixture person approval. */
 async function finishSetup(box, observe = () => {}) {
+  // Exercise an explicitly unconfigured gate even when init supplies a safe starter default.
+  const configFile = join(box.repo, 'pullboard.json');
+  const config = JSON.parse(readFileSync(configFile, 'utf8'));
+  writeFileSync(configFile, JSON.stringify({ ...config, gate: '' }));
   /** Assert the next setup block in both the actual text and JSON CLI output. */
   function step(number) {
     const text = box.run(box.repo, 'resume');
@@ -816,6 +820,9 @@ test('resume walks a new board through setup one step at a time [N32,N19]', asyn
 
 test('resume names lane add to make a lane [I1,N32]', t => {
   const box = releaseFixture(t, { freshSetup: true });
+  const configFile = join(box.repo, 'pullboard.json');
+  const config = JSON.parse(readFileSync(configFile, 'utf8'));
+  writeFileSync(configFile, JSON.stringify({ ...config, gate: '' }, null, 2));
   mkdirSync(join(box.repo, 'app'));
   const drafted = box.run(box.repo, 'spec', 'draft', 'Describe the first thing the person wants.', '--json');
   assert.equal(drafted.status, 0, drafted.failure || drafted.stderr || drafted.stdout);

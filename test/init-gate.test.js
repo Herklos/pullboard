@@ -1,6 +1,6 @@
 /** Check that init only resolves the detected gate executable and never runs it [I1, I2]. */
 import assert from 'node:assert/strict';
-import { accessSync, chmodSync, constants as fsConstants, existsSync, mkdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { accessSync, chmodSync, constants as fsConstants, existsSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { delimiter, join } from 'node:path';
 import { after, test } from 'node:test';
 import { createE2eHelpers } from './e2e-helpers.js';
@@ -114,4 +114,91 @@ test('init says when its gate command cannot run [I1, I2]', () => {
   assert.doesNotMatch(inPoetryEnvironment.out, /gate command "pytest" is not available/u,
     'an explicitly active Poetry environment is checked');
   assert.equal(existsSync(poetryMarker), false, 'init does not execute a gate found in the active Poetry environment');
+});
+
+test('a repo without package.json is told a gate that fits it [C7,B26]', () => {
+  const box = e2e.sandbox();
+  const root = join(box.dir, 'no-package');
+  mkdirSync(root);
+  box.git(root, 'init', '-q', '-b', 'main');
+  mkdirSync(join(root, 'app'));
+  const marker = join(box.dir, 'project-gate-ran');
+  writeFileSync(join(root, 'app', 'project-check.mjs'),
+    `import { writeFileSync } from 'node:fs';\nwriteFileSync(${JSON.stringify(marker)}, 'tested\\n');\n`);
+
+  const initialized = box.run(root, 'init');
+  assert.equal(initialized.code, 0, initialized.err || initialized.out);
+  assert.equal(existsSync(join(root, 'package.json')), false, 'the newcomer repo has no package manifest');
+  assert.equal(existsSync(marker), false, 'init does not execute a project command it has not detected');
+  assert.match(initialized.out, /ask the person which command tests this project/u);
+  const initializedGate = JSON.parse(readFileSync(join(root, 'pullboard.json'), 'utf8')).gate;
+  const pending = box.run(root, 'resume', '--json');
+  assert.equal(pending.code, 0, pending.err || pending.out);
+  assert.equal(JSON.parse(pending.out).setup.steps.find(step => step.number === 3).done, false,
+    'an unknown project keeps its gate choice unanswered');
+
+  // Keep a legacy empty-gate board to exercise the real NO_GATE refusal after init.
+  const config = JSON.parse(readFileSync(join(root, 'pullboard.json'), 'utf8'));
+  config.gate = '';
+  writeFileSync(join(root, 'pullboard.json'), JSON.stringify(config, null, 2));
+  const lane = box.run(root, 'lane', 'add', 'app', '--owns', 'app/');
+  assert.equal(lane.code, 0, lane.err || lane.out);
+  box.git(root, 'add', '-A');
+  box.git(root, 'commit', '-q', '-m', 'chore: set up the no-manifest board');
+
+  const added = box.run(root, 'add', 'app', 'No-manifest newcomer change',
+    '--criterion', 'the result file is present', '--check', 'test -f app/result.txt', '--json');
+  assert.equal(added.code, 0, added.err || added.out);
+  const id = String(JSON.parse(added.out).item.item_id);
+  const worktree = join(box.dir, 'app-agent');
+  box.git(root, 'worktree', 'add', '-q', '-b', 'app/one', worktree);
+  const joined = box.run(worktree, 'join', 'app');
+  assert.equal(joined.code, 0, joined.err || joined.out);
+  const claimed = box.run(worktree, 'claim', id, '--json');
+  assert.equal(claimed.code, 0, claimed.err || claimed.out);
+  mkdirSync(join(worktree, 'app'), { recursive: true });
+  writeFileSync(join(worktree, 'app', 'result.txt'), 'done\n');
+  box.git(worktree, 'add', 'app/result.txt');
+  box.git(worktree, 'commit', '-q', '-m', 'chore: finish the newcomer change');
+
+  const submitted = box.run(worktree, 'submit', id, '--json');
+  assert.equal(submitted.code, 1, submitted.err || submitted.out);
+  const refusal = JSON.parse(submitted.out).error;
+  assert.equal(refusal.code, 'NO_GATE', submitted.out);
+  assert.deepEqual({
+    initializedGate,
+    refusalCode: refusal.code,
+    nextNamesInitCommand: /pullboard spec check/u.test(refusal.next),
+    nextNamesUnavailableNpm: /\bnpm test\b/u.test(refusal.next),
+  }, {
+    initializedGate: '',
+    refusalCode: 'NO_GATE',
+    nextNamesInitCommand: true,
+    nextNamesUnavailableNpm: false,
+  });
+
+  const chosenConfig = JSON.parse(readFileSync(join(root, 'pullboard.json'), 'utf8'));
+  chosenConfig.gate = 'node app/project-check.mjs';
+  writeFileSync(join(root, 'pullboard.json'), JSON.stringify(chosenConfig, null, 2));
+  box.git(root, 'add', 'pullboard.json');
+  box.git(root, 'commit', '-q', '-m', 'chore: choose the project test command');
+  const chosen = box.run(root, 'resume', '--json');
+  assert.equal(chosen.code, 0, chosen.err || chosen.out);
+  assert.equal(JSON.parse(chosen.out).setup.steps.find(step => step.number === 3).done, true,
+    'the person choosing an actual project command completes the gate step');
+  assert.equal(existsSync(marker), false, 'choosing a gate does not run it');
+  const released = box.run(worktree, 'release', id, '--json');
+  assert.equal(released.code, 0, released.err || released.out);
+  const configuredWorktree = join(box.dir, 'configured-app-agent');
+  box.git(root, 'worktree', 'add', '-q', '-b', 'app/chosen', configuredWorktree, 'main');
+  const configuredJoin = box.run(configuredWorktree, 'join', 'app');
+  assert.equal(configuredJoin.code, 0, configuredJoin.err || configuredJoin.out);
+  const configuredClaim = box.run(configuredWorktree, 'claim', id, '--json');
+  assert.equal(configuredClaim.code, 0, configuredClaim.err || configuredClaim.out);
+  writeFileSync(join(configuredWorktree, 'app', 'result.txt'), 'done\n');
+  box.git(configuredWorktree, 'add', 'app/result.txt');
+  box.git(configuredWorktree, 'commit', '-q', '-m', 'chore: finish with the chosen project test');
+  const completed = box.run(configuredWorktree, 'submit', id, '--json');
+  assert.equal(completed.code, 0, completed.err || completed.out);
+  assert.equal(readFileSync(marker, 'utf8'), 'tested\n', 'submit runs the chosen project test');
 });

@@ -528,7 +528,7 @@ export async function withGateSlot(root, action, { landing = false, itemCheck = 
  */
 export async function runGate(root, config, { trustStamp = true, onWait, landing = false, agent, item = '', stages = false, waivers = [] } = {}) {
   if (!config.gate.trim()) {
-    throw new Refused('NO_GATE', 'no gate configured; set "gate" in pullboard.json, e.g. "npm test"');
+    throw new Refused('NO_GATE', 'no gate configured; set "gate" in pullboard.json to "pullboard spec check"', 'set "gate" in pullboard.json to "pullboard spec check", then commit it');
   }
   if (trustStamp && isStampedGreen(root)) return { isGreen: true, isCached: true, output: '', seconds: 0, log: '' };
   return await withGateSlot(root, (lease) => fullGateRun(root, config, trustStamp, { waitMs: lease.waitMs, gateLease: lease, landing, stages, waivers }), {
@@ -576,7 +576,7 @@ export async function runStaticChecks(root, config, { agent, item = '', onWait, 
  * @returns {Promise<any>}
  */
 export async function runSubmitGate(root, config, { base, trunk, changed, check, agent, item = '', kind = 'submit', onWait, onBrowserFallback }) {
-  if (!config.gate.trim()) throw new Refused('NO_GATE', 'no gate configured; set "gate" in pullboard.json, e.g. "npm test"');
+  if (!config.gate.trim()) throw new Refused('NO_GATE', 'no gate configured; set "gate" in pullboard.json to "pullboard spec check"', 'set "gate" in pullboard.json to "pullboard spec check", then commit it');
   await runStaticChecks(root, config, { agent, item, onWait, onBrowserFallback });
   const selection = config.affectedTests
     ? selectAffectedTests(root, { base, trunk, changed })
