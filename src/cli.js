@@ -1582,12 +1582,12 @@ function recordSetupState(ctx, identity, state) {
 function boardSetup(ctx, card, identity) {
   const rows = loadSpec(ctx.info.root, ctx.config).rows;
   const approved = rows.filter(row => row.status === 'approved');
-  const open = rows.filter(row => row.status === 'draft' || row.status === 'pending');
-  // A row the person has already decided waits for the coordinator's spec apply, not for the person (#848):
-  // telling her to approve it again is the loop a newcomer's agents fell into.
-  const decided = new Set(withBoard(ctx, (board) => store.rowDecisions(board)).filter(record => record.kind === 'spec' && !record.applied).map(record => record.id));
-  const toApply = open.filter(row => decided.has(row.id));
-  const drafted = open.filter(row => !decided.has(row.id));
+  const decisions = withBoard(ctx, (board) => store.rowDecisions(board));
+  // Match the current row's decision projection, not a bare id: a changed draft needs a new person decision (#848).
+  const open = rows.filter(row => row.status === 'draft' || row.status === 'pending')
+    .map(row => decisionProjection(decisions, row, 'spec'));
+  const toApply = open.filter(row => row.decision);
+  const drafted = open.filter(row => !row.decision);
   const recordedComplete = setupReceiptMatches(ctx, identity, 'complete');
   const started = setupReceiptMatches(ctx, identity, 'started');
   const lanes = laneNames(ctx.config).filter(lane => !['review', COORDINATOR].includes(lane));

@@ -991,3 +991,28 @@ test('a joined seat requests answers for pending questions [S1,I1,P6]', t => {
       'the draft still gets approval while the question gets its answer');
   }
 });
+
+
+test('a changed approved draft needs a new decision before apply [S1,I1,P6]', t => {
+  const box = specBox(t, { specSource: '# Spec\n\n## A · Setup\n- A1 [draft, must] Every page works at phone width. | gate: review\n' });
+  assert.equal(box.run('approve', 'A1').status, 0);
+  const path = join(box.root, box.specName);
+  writeFileSync(path, readFileSync(path, 'utf8').replace('phone width', 'desktop width'));
+  const staleApply = box.run('apply');
+  assert.equal(staleApply.status, 1, staleApply.stdout + staleApply.stderr);
+  assert.match(staleApply.stderr, /STALE_ROW_DECISION/u);
+  const read = runIn(box, box.root, ['resume', '--json']);
+  assert.equal(read.status, 0, read.stderr + read.stdout);
+  const card = JSON.parse(read.stdout);
+  assert.equal(card.setup.waitingOn, 'person-approval', 'the old decision does not approve the changed text');
+  assert.deepEqual(card.setup.rowIds, ['A1']);
+  assert.equal(card.setup.personCommand, 'pullboard spec approve A1');
+  assert.doesNotMatch(card.next, /spec apply/u, 'applying the stale receipt would loop');
+  assert.equal(box.run('approve', 'A1').status, 0, 'the person can approve the current text');
+  const decided = JSON.parse(runIn(box, box.root, ['resume', '--json']).stdout);
+  assert.equal(decided.setup.waitingOn, 'coordinator-apply');
+  assert.equal(box.run('apply').status, 0);
+  runFixtureGit(['commit', '-q', '-m', 'docs(spec): apply current row decision', '--', box.specName], { cwd: box.root, env: box.env, encoding: 'utf8' });
+  const applied = JSON.parse(runIn(box, box.root, ['resume', '--json']).stdout);
+  assert.doesNotMatch(applied.next, /spec apply|approve A1/u);
+});
