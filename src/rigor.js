@@ -88,16 +88,17 @@ export function causeReading(key) {
 }
 
 /**
- * The cause keys one recorded reject or reopen carries. A move recorded with --cause names its key;
+ * The cause keys a reject, reopen or allocated sentinel failure receipt carries. A move recorded with --cause names its key;
  * a reopen after a red landing names its failing tests in structured fields, so those give keys
  * even for events recorded before cause keys existed. A note is never parsed.
  *
- * @param {{ event_kind: string, event_detail: string }} event
+ * @param {{ event_kind: string, event_detail: string, event_by?: string }} event
  * @returns {string[]}
  */
 export function eventCauses(event) {
-  if (!['reject', 'reopen'].includes(event.event_kind)) return [];
+  if (!['reject', 'reopen', 'health-failure'].includes(event.event_kind)) return [];
   const detail = JSON.parse(event.event_detail);
+  if (event.event_kind === 'health-failure' && (event.event_by !== 'sentinel' || detail.engine !== HEALTH_SENTINEL_ENGINE)) return [];
   const keys = [];
   if (typeof detail.cause === 'string' && !causeProblem(detail.cause)) keys.push(detail.cause);
   const tests = Array.isArray(detail.landingFailure?.tests) ? detail.landingFailure.tests : [];

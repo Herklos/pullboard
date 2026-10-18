@@ -12,7 +12,7 @@ import { applyRelayMove, appliedSequence, prepareEngineMove } from '../src/engin
 import { exportBoard } from '../src/exchange.js';
 import { HEALTH_SENTINEL_ENGINE } from '../src/health-receipts.js';
 import { scanHealthSentinel } from '../src/health-sentinel.js';
-import { rigorReport } from '../src/rigor.js';
+import { eventCauses, rigorReport } from '../src/rigor.js';
 import { startServeSentinel, HEALTH_SENTINEL_INTERVAL_MS } from '../src/serve-sentinel.js';
 import { machineSettingsFile } from '../src/settings.js';
 import { frozenCriterion, loadSpec } from '../src/spec.js';
@@ -137,6 +137,25 @@ test('sentinel replay refuses older engines and stale observations without a fal
   assert.equal(store.events(box.board).length, eventCount);
   assert.equal(store.allShouts(box.board).filter(notice => notice.shout_from === 'sentinel').length, 0);
   assert.equal(box.scan().added.length, 1, 'a fresh observation succeeds after the stale one');
+});
+
+test('a recurring health episode needs no changed code commit and legacy lookalikes are ignored [A6,H16]', t => {
+  const box = fixture(t);
+  const id = box.claimed(0);
+  box.clock.offset += 2 * HOUR; box.scan();
+  store.claim(box.board, id, { agentId: box.builders[0], lane: 'core', leaseMs: HOUR, freeze: box.freeze });
+  store.release(box.board, id, box.builders[0]); box.scan();
+  store.claim(box.board, id, { agentId: box.builders[0], lane: 'core', leaseMs: HOUR, freeze: box.freeze });
+  box.clock.offset += 2 * HOUR; box.scan();
+  const report = rigorReport(store.events(box.board), { person: store.PERSON });
+  assert.equal(report.causes[0].key, 'refusal:CLAIM_LAPSED');
+  assert.equal(report.causes[0].occurrences, 2);
+  assert.deepEqual(report.causes[0].items, [{ id, commits: [] }]);
+  const event = store.events(box.board).find(value => value.event_kind === 'health-failure');
+  const old = { ...event, event_detail: JSON.stringify({ ...JSON.parse(event.event_detail), engine: HEALTH_SENTINEL_ENGINE - 1 }) };
+  assert.deepEqual(eventCauses(old), []);
+  assert.deepEqual(eventCauses({ ...event, event_by: 'coordinator' }), []);
+  assert.deepEqual(eventCauses({ ...event, event_kind: 'shout' }), []);
 });
 
 test('resume publishes health and the board and machine off switches suppress it [A6]', async t => {
