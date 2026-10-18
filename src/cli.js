@@ -2745,8 +2745,8 @@ async function submitHere(ctx, id) {
     : [];
   for (const rule of doctrine) ctx.io.say(`doctrine: ${ruleLine(rule)}`);
   // Every submit proves its frozen check and reachable tests anew on this exact commit (V4,V16).
-  // A full-gate stamp never substitutes for either proof; only an actual full fallback may stamp.
-  const submitConfig = { ...ctx.config, submitGate: acceptedMain.config.submitGate, staticChecks: acceptedMain.config.staticChecks,
+  // Empty frozen gates adopt accepted main setup; only a full fallback may stamp its tree.
+  const submitConfig = { ...ctx.config, gate: ctx.config.gate.trim() ? ctx.config.gate : acceptedMain.config.gate, submitGate: acceptedMain.config.submitGate, staticChecks: acceptedMain.config.staticChecks,
     submitInvariants: acceptedMain.config.submitInvariants,
     // The accepted project runner interprets its current invariant files; candidate config cannot replace it.
     ...(acceptedMain.config.submitInvariants.length ? { affectedTests: acceptedMain.config.affectedTests } : {}) };
