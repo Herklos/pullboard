@@ -405,3 +405,92 @@ test('the page moves on by itself when the view starts [N26,H5]', { timeout: 120
     }
   }
 });
+
+
+test('the link invitation closes, stays closed and comes back [N26,H5]', async t => {
+  const executable = chromeExecutable();
+  if (!executable) return t.skip('Install Chrome for the real link invitation check.');
+  const box = machine();
+  const demo = project(box, 'link-invitation');
+  box.run(demo.repo, 'milestone', 'add', 'Delivery');
+  const profile = mkdtempSync(join(tmpdir(), 'pullboard-link-invitation-'));
+  let view; let chrome; let available = true;
+  const failures = [];
+  try {
+    view = await startView(box);
+    chrome = await openSnapshotChrome(executable, 'about:blank', profile);
+    // Only availability is supplied; the board, rendering, storage and all clicks are real.
+    chrome.socket.addEventListener('message', ({ data }) => {
+      const message = JSON.parse(String(data));
+      if (message.method !== 'Fetch.requestPaused') return;
+      chrome.send('Fetch.fulfillRequest', { requestId: message.params.requestId, responseCode: 200,
+        responseHeaders: [{ name: 'Content-Type', value: 'application/json' }],
+        body: Buffer.from(JSON.stringify({ version: 1, available })).toString('base64') }).catch(error => failures.push(error.message));
+    });
+    await chrome.send('Fetch.enable', { patterns: [{ urlPattern: view.base + '/api/v1/view-link', requestStage: 'Request' }] });
+    await chrome.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
+    await chrome.send('Page.navigate', { url: view.link.href });
+    await chrome.waitFor("data?.project?.root && !document.body.classList.contains('loading')");
+    await chrome.stable('sharingReady');
+    assert.equal(await chrome.stable("document.querySelector('#share-note b')?.textContent"), 'See these boards from any device');
+    assert.equal(await chrome.stable("document.querySelector('#share-note .share-txt > span')?.textContent"), 'Link them to pullboard.dev with your GitHub account.');
+    assert.equal(await chrome.stable("document.querySelector('#share-start').textContent.trim()"), 'Sign in with GitHub');
+    assert.equal(await chrome.stable("Boolean(document.querySelector('#share-start svg') && document.querySelector('#share-note .share-ic svg'))"), true);
+    assert.equal(await chrome.stable("document.querySelector('#share-hide')?.getAttribute('aria-label')"), 'Hide this; bring it back from the projects list');
+    assert.equal(await chrome.stable("document.querySelector('#share-again')?.hidden"), true, 'no redundant entry while the card shows');
+    await press(chrome, "document.querySelector('#share-hide')");
+    assert.equal(await chrome.stable("document.querySelector('#share-note').hidden"), true);
+    assert.equal(await chrome.stable("document.querySelector('#share-again').hidden"), false);
+    await chrome.send('Page.reload');
+    await chrome.waitFor("data?.project?.root && !document.body.classList.contains('loading')");
+    await chrome.stable('sharingReady');
+    assert.equal(await chrome.stable("document.querySelector('#share-note').hidden"), true, 'the machine remembers dismissal after reload');
+    assert.equal(await chrome.stable("document.querySelector('#share-again').textContent"), 'Link boards to pullboard.dev…');
+    await press(chrome, "document.querySelector('#share-again')");
+    assert.equal(await chrome.stable("document.querySelector('#share-note').hidden"), false);
+    assert.equal(await chrome.stable("document.querySelector('#share-again').hidden"), true);
+    const backgrounds = new Set();
+    for (const width of [1280, 390]) {
+      await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
+      await press(chrome, "document.querySelector('[data-tab=roadmap]')");
+      await chrome.waitFor("document.querySelector('.roadmap-list') && document.querySelector('.roadmap-panel')");
+      for (const theme of ['light', 'dark']) {
+        await chrome.stable(`document.documentElement.dataset.theme = '${theme}'`);
+        const measured = JSON.parse(await chrome.stable(`JSON.stringify((() => {
+          const card = document.querySelector('#share-note'), rect = card.getBoundingClientRect();
+          const parts = [...document.querySelectorAll('.roadmap-list, .roadmap-panel')].map(part => part.getBoundingClientRect());
+          const button = document.querySelector('#share-start');
+          return { left: rect.left, right: rect.right, columnsLeft: Math.min(...parts.map(part => part.left)),
+            columnsRight: Math.max(...parts.map(part => part.right)), background: getComputedStyle(card).backgroundColor,
+            githubBackground: getComputedStyle(button).backgroundColor, overflow: document.documentElement.scrollWidth > innerWidth,
+            buttonFits: button.getBoundingClientRect().right <= rect.right,
+            closeWidth: document.querySelector('#share-hide').getBoundingClientRect().width,
+            closeHeight: document.querySelector('#share-hide').getBoundingClientRect().height,
+            buttonHeight: button.getBoundingClientRect().height };
+        })())`));
+        assert.ok(Math.abs(measured.left - measured.columnsLeft) < 1 && Math.abs(measured.right - measured.columnsRight) < 1,
+          `${width}/${theme}: the full card spans both Roadmap and Releases columns`);
+        assert.equal(measured.githubBackground, 'rgb(31, 35, 40)', 'the existing GitHub style stays dark');
+        assert.equal(measured.overflow, false, `${width}/${theme}: no horizontal overflow`);
+        assert.equal(measured.buttonFits, true);
+        const target = width < 900 ? 44 : 32;
+        assert.ok(measured.closeWidth >= target && measured.closeHeight >= target && measured.buttonHeight >= target,
+          `${width}/${theme}: close and sign-in retain the view's existing tap target`);
+        backgrounds.add(measured.background);
+      }
+      await proofShot(chrome, 'link-invitation', width);
+    }
+    assert.equal(backgrounds.size, 2, 'the card uses the light and dark surface tokens');
+    available = false;
+    await chrome.send('Page.reload');
+    await chrome.waitFor("data?.project?.root && !document.body.classList.contains('loading')");
+    await chrome.stable('sharingReady');
+    assert.equal(await chrome.stable("document.querySelector('#share-note').hidden"), true);
+    assert.equal(await chrome.stable("document.querySelector('#share-again').hidden"), true, 'no entry when sharing is unavailable');
+    assert.deepEqual(failures, []);
+  } finally {
+    if (chrome) await closeSnapshotChrome(chrome);
+    if (view) await view.stop();
+    rmSync(profile, { recursive: true, force: true });
+  }
+});
