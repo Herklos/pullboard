@@ -20,7 +20,8 @@ for (const row of importStyleViolations(sources)) {
 const declared = [...declaredProseCommands(HELP)].sort();
 const actual = [...PULLBOARD_COMMANDS].sort();
 if (JSON.stringify(declared) !== JSON.stringify(actual)) {
-  console.error('src/cockpit.js: prose command declaration differs from the CLI help catalog');
+  const line = readFileSync(join(root, 'src/cockpit.js'), 'utf8').split('\n').findIndex(row => row.includes('export const PULLBOARD_COMMANDS')) + 1;
+  console.error(`src/cockpit.js:${Math.max(1, line)}: prose command declaration differs from the CLI help catalog`);
   failed = true;
 }
 const clock = spawnSync(process.execPath, ['test/wall-clock-budgets.js'], { cwd: root, encoding: 'utf8' });
