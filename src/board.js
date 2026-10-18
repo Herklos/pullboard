@@ -46,6 +46,7 @@ import { Refused } from './refused.js';
 import {
   agentAt,
   agentModel,
+  listAgents,
   newSeatId,
   routeOf,
   saveAgentModel,
