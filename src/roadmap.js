@@ -7,6 +7,11 @@ import {
 import {
   closeBoard,
   getItem,
+  events,
+  laneHolds,
+  listItems,
+  openDecisions,
+  PERSON,
   openBoard,
   roadmap,
 } from './board.js';
@@ -25,6 +30,7 @@ import { listApiProjects } from './projects.js';
 export function milestoneRoadmap(root, board, options = {}) {
   const projects = (options.projects ?? listApiProjects)();
   let hiddenExternal = 0;
+  const externalItems = new Map();
   const hidden = () => ({ id: `external-${++hiddenExternal}`, title: 'External item', status: 'unavailable' });
   const resolveExternal = (reference) => {
     const match = /^(.+)#([1-9]\d*)$/.exec(reference);
@@ -39,6 +45,8 @@ export function milestoneRoadmap(root, board, options = {}) {
         : openBoard(join(info.commonDir, 'pullboard', 'board.sqlite'), undefined, { isMain: codeIsFromMain() });
       try {
         const item = getItem(other, Number(number));
+        externalItems.set(reference, { item, held: Boolean(item.item_hold_reason)
+          || laneHolds(other).some(hold => hold.hold_lane === item.item_lane) });
         return { id: reference, title: item.item_title, status: item.item_status, landed: Boolean(item.item_merged_commit) };
       } finally {
         if (other !== board) closeBoard(other);
@@ -47,5 +55,65 @@ export function milestoneRoadmap(root, board, options = {}) {
       return options.hideOutOfScope ? hidden() : { id: reference, title: `#${number} (${repo})`, status: 'unavailable' };
     }
   };
-  return roadmap(board, resolveExternal);
+  const milestones = roadmap(board, resolveExternal);
+  const items = new Map(listItems(board, { all: true }).map(item => [item.item_id, item]));
+  const holds = new Set(laneHolds(board).map(hold => hold.hold_lane));
+  const now = board.clock.now().getTime();
+  const pace = landingPace(board, items, now);
+  const needsYou = personDecisionItems(board);
+  return milestones.map(milestone => {
+    const active = milestone.items.filter(entry => entry.status !== 'withdrawn');
+    const summary = { total: active.length, left: active.length - milestone.landed,
+      landed: 0, landing: 0, review: 0, building: 0, held: 0, waiting: 0,
+      needsYou: active.filter(entry => typeof entry.id === 'number' && needsYou.has(entry.id)).map(entry => entry.id),
+      pace: { ...pace }, estimate: null };
+    for (const entry of active) {
+      const local = typeof entry.id === 'number' ? items.get(entry.id) : null;
+      const external = externalItems.get(entry.id);
+      const item = local ?? external?.item;
+      const held = local ? Boolean(local.item_hold_reason) || holds.has(local.item_lane) : external?.held;
+      const state = entry.state === 'landed' ? 'landed'
+        : entry.state === 'accepted' ? 'landing'
+          : entry.status === 'submitted' ? 'review'
+            : item?.item_status === 'claimed' && Date.parse(item.item_lease_until) > now ? 'building'
+              : held ? 'held' : 'waiting';
+      summary[state]++;
+    }
+    if (!milestone.shipped && pace.last6h >= 3) {
+      const six = summary.left / (pace.last6h / 6);
+      const two = pace.last2h ? summary.left / (pace.last2h / 2) : six;
+      summary.estimate = { low: Math.round(Math.min(six, two) * 2) / 2,
+        high: Math.round(Math.max(six, two) * 2) / 2 };
+    }
+    return { ...milestone, summary };
+  });
+}
+
+/** Count distinct currently landed local items at their first recording of the current merge. */
+function landingPace(board, items, now) {
+  const first = new Map();
+  for (const event of events(board)) {
+    if (event.event_kind !== 'merged') continue;
+    const item = items.get(event.item_id);
+    if (item?.item_status !== 'verified' || !item.item_merged_commit || first.has(event.item_id)) continue;
+    if (JSON.parse(event.event_detail).commit !== item.item_merged_commit) continue;
+    first.set(event.item_id, Date.parse(event.event_at));
+  }
+  const times = [...first.values()].filter(at => at <= now);
+  return { last6h: times.filter(at => at > now - 6 * 3_600_000).length,
+    last2h: times.filter(at => at > now - 2 * 3_600_000).length };
+}
+
+/** Associate open person questions with typed item evidence and explicit local item references. */
+function personDecisionItems(board) {
+  const ids = new Set();
+  for (const question of openDecisions(board, PERSON)) {
+    if (question.shout_evidence_item) ids.add(question.shout_evidence_item);
+    // A local token is separate from a URL or repo-qualified reference.
+    for (const match of question.shout_text.matchAll(/(?:^|[\s([{"'`,;:!?])#([1-9]\d*)\b/gu)) {
+      const id = Number(match[1]);
+      if (Number.isSafeInteger(id)) ids.add(id);
+    }
+  }
+  return ids;
 }

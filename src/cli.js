@@ -2384,6 +2384,12 @@ function readCommands(io, { first, second, rest, values }) {
         const when = milestone.shipped ? ` · shipped at ${milestone.shipped.commit.slice(0, 12)} on ${milestone.shipped.at}`
           : milestone.target ? ` · target ${milestone.target}${milestone.pastTarget ? ', past target' : ''}` : '';
         io.say(`${milestone.name}: ${milestone.landed}/${milestone.total} landed${when}`);
+        if (!milestone.shipped) {
+          const summary = milestone.summary;
+          const estimate = summary.estimate
+            ? `; about ${summary.estimate.low} to ${summary.estimate.high} h at today's pace.` : '; estimate unavailable.';
+          io.say(`  ${summary.left} left of ${summary.total}: ${summary.landed} landed, ${summary.landing} landing, ${summary.review} in review, ${summary.building} building, ${summary.waiting} waiting, ${summary.held} held${estimate}`);
+        }
         if (milestone.note) io.say(`  ${milestone.note}`);
         for (const item of milestone.items) {
           const id = typeof item.id === 'number' ? `#${item.id}` : item.id;
