@@ -8,6 +8,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { createRelayAuth } from '../relay/auth.js';
 import { createGitHubClient } from '../relay/github.js';
 import { githubFixture } from './relay-fixture.js';
+import { VERIFIER_STANDING_ENGINE } from '../src/machine.js';
 
 /** Create an actual signed-in account against the loopback GitHub protocol fixture. */
 async function signedPerson(box, auth) {
@@ -58,7 +59,7 @@ test('machine credentials mint and list same-board agents but cannot link, revok
   assert.equal(tokens.some(value => Object.hasOwn(value, 'token') || Object.hasOwn(value, 'hash')), false);
   await assert.rejects(auth.listTokens(machine.token, beta), { code: 'TOKEN_BOARD' });
   await assert.rejects(auth.issueToken(machine.token, { board: beta, agent: 'cross-board' }), { code: 'TOKEN_BOARD' });
-  assert.equal(auth.minimumEngineVersion(alpha), 6);
+  assert.equal(auth.minimumEngineVersion(alpha), VERIFIER_STANDING_ENGINE, `machine and agent credentials require engine ${VERIFIER_STANDING_ENGINE} (#579)`);
   await assert.rejects(auth.listTokens(agent.token, alpha), { code: 'HUMAN_REQUIRED' });
   await assert.rejects(auth.revoke(machine.token, agent.id), { code: 'TOKEN_NOT_OWNED' });
 
