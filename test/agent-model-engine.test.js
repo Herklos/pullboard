@@ -1,3 +1,4 @@
+import { HEALTH_SENTINEL_ENGINE } from '../src/health-receipts.js';
 /** Declared models replay with their recorded engine and survive board exchange [O8,O3,H16]. */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
@@ -11,7 +12,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 test('model declarations and event snapshots retain engines 1 through 34 semantics [O8,O3,H16]', (t) => {
-  assert.ok(ENGINE_VERSION >= AUTO_ESCALATE_ENGINE, 'the current writer includes automatic escalation and preserves historical model snapshots');
+  assert.equal(ENGINE_VERSION, 44, 'engine 44 is the current writer');
+  assert.ok(ENGINE_VERSION >= HEALTH_SENTINEL_ENGINE, 'the current writer retains the sentinel minimum and historical behavior');
+  assert.equal(AUTO_ESCALATE_ENGINE, ENGINE_VERSION, 'the current writer includes automatic escalation and preserves historical model snapshots');
   for (const version of Array.from({ length: ENGINE_VERSION }, (_, index) => index + 1)) {
     const board = store.openBoard(':memory:');
     t.after(() => store.closeBoard(board));

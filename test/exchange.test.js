@@ -1,6 +1,7 @@
 /**
  * The v1 board exchange keeps each SQLite row, including lifecycle history and sequence counters.
  */
+import { submitFixture } from './board-submit-fixture.js';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { runFixtureChild, runFixtureGit } from './fixture-child.js';
@@ -32,14 +33,14 @@ function populatedBoard(file) {
   store.claim(board, claimed, { agentId: 'web-1', lane: 'web', leaseMs: 3_600_000, freeze: FREEZE });
   const submitted = add('submitted');
   store.claim(board, submitted, { agentId: 'web-2', lane: 'web', leaseMs: 3_600_000, freeze: FREEZE });
-  store.submit(board, submitted, { agentId: 'web-2', commit: SHA, tree: 'tree:submitted' });
+  submitFixture(board, submitted, { agentId: 'web-2', commit: SHA, tree: 'tree:submitted' });
   const verified = add('verified');
   store.claim(board, verified, { agentId: 'web-3', lane: 'web', leaseMs: 3_600_000, freeze: FREEZE });
-  store.submit(board, verified, { agentId: 'web-3', commit: SHA, tree: 'tree:verified' });
+  submitFixture(board, verified, { agentId: 'web-3', commit: SHA, tree: 'tree:verified' });
   store.verify(board, verified, { agentId: 'web-4', decision: 'ACCEPT', note: 'removed the proof; its test failed', head: SHA, digest: `digest:verified`, policy: 'any' });
   const rejected = add('rejected then reopened');
   store.claim(board, rejected, { agentId: 'web-5', lane: 'web', leaseMs: 3_600_000, freeze: FREEZE });
-  store.submit(board, rejected, { agentId: 'web-5', commit: SHA, tree: 'tree:rejected' });
+  submitFixture(board, rejected, { agentId: 'web-5', commit: SHA, tree: 'tree:rejected' });
   store.verify(board, rejected, { agentId: 'web-2', decision: 'REJECT', reason: 'TEST_FAILURE', note: 'the check fails', head: SHA, digest: `digest:rejected then reopened`, policy: 'any' });
   const withdrawn = add('withdrawn');
   store.withdraw(board, withdrawn, { agentId: 'coordinator', reason: 'no longer needed' });
@@ -170,7 +171,7 @@ function writeAcceptedItem(board) {
   const item = store.addItem(board, { by: 'coordinator', lane: 'web', title: 'written during export' });
   const freeze = (row) => ({ text: row.item_title, digest: `digest:${row.item_title}` });
   store.claim(board, item, { agentId: 'web-1', lane: 'web', leaseMs: 3_600_000, freeze });
-  store.submit(board, item, { agentId: 'web-1', commit: 'b'.repeat(40), tree: 'tree:concurrent' });
+  submitFixture(board, item, { agentId: 'web-1', commit: 'b'.repeat(40), tree: 'tree:concurrent' });
   store.verify(board, item, { agentId: 'web-2', decision: 'ACCEPT', note: 'the check passed', head: 'b'.repeat(40), digest: 'digest:written during export', policy: 'any' });
 }
 

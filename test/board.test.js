@@ -2,6 +2,7 @@
  * The board's rules on an in-memory board with a hand-turned clock (B4–B7, V1, V2, V5, V6, V8, R1,
  * R2). The git-facing rules (V3, V4, V7) run against real repos in e2e.test.js.
  */
+import { submitFixture } from './board-submit-fixture.js';
 import assert from 'node:assert/strict';
 import { runFixtureExecFile as execFileSync, runFixtureGit } from './fixture-child.js';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -193,7 +194,7 @@ test('[N26,A2] milestones stay ordered and only the coordinator can edit them', 
     { name: 'Release', done: 0, total: 1 },
   ]);
   assert.equal(current[0].items[0].status, 'claimed', "roadmap reads the item's current state");
-  store.submit(board, second, { agentId: 'api-1', commit: SHA_A, tree: 'tree-a' });
+  submitFixture(board, second, { agentId: 'api-1', commit: SHA_A, tree: 'tree-a' });
   store.verify(board, second, {
     agentId: 'web-2', decision: 'ACCEPT', reason: 'CRITERION_MET', note: 'checked the expected result',
     head: SHA_A, digest: 'digest:Publish', policy: 'any',
@@ -288,11 +289,11 @@ test('the first claim freezes the criterion; later claims keep it [V2]', () => {
 test('submit needs your claim and finished children', () => {
   const id = store.addItem(board, { by: 'coordinator', lane: 'web', title: 'Page' });
   const child = store.addItem(board, { by: 'web-1', lane: 'web', title: 'Part', parentId: id });
-  assert.throws(() => store.submit(board, id, { agentId: 'web-1', commit: SHA_A, tree: 't' }), /NOT_YOURS/);
+  assert.throws(() => submitFixture(board, id, { agentId: 'web-1', commit: SHA_A, tree: 't' }), /NOT_YOURS/);
   claimAs(id, 'web-1', 'web');
-  assert.throws(() => store.submit(board, id, { agentId: 'web-1', commit: SHA_A, tree: 't' }), /CHILDREN_OPEN/);
+  assert.throws(() => submitFixture(board, id, { agentId: 'web-1', commit: SHA_A, tree: 't' }), /CHILDREN_OPEN/);
   store.withdraw(board, child, { agentId: 'coordinator', reason: 'folded into the parent' });
-  store.submit(board, id, { agentId: 'web-1', commit: SHA_A, tree: 't' });
+  submitFixture(board, id, { agentId: 'web-1', commit: SHA_A, tree: 't' });
   assert.equal(store.getItem(board, id).item_status, 'submitted');
 });
 
@@ -302,7 +303,7 @@ test('submit needs your claim and finished children', () => {
 function submitted() {
   const id = store.addItem(board, { by: 'coordinator', lane: 'web', title: 'Page' });
   claimAs(id, 'web-1', 'web');
-  store.submit(board, id, { agentId: 'web-1', commit: SHA_A, tree: 'tree-a' });
+  submitFixture(board, id, { agentId: 'web-1', commit: SHA_A, tree: 'tree-a' });
   return id;
 }
 
@@ -321,7 +322,7 @@ const verdict = (id, fields) =>
 function rejectRevision(id, commit, note) {
   if (store.getItem(board, id).item_status === 'open') claimAs(id, 'web-1', 'web');
   const item = store.getItem(board, id);
-  store.submit(board, id, { agentId: 'web-1', commit, tree: `tree-${commit[0]}` });
+  submitFixture(board, id, { agentId: 'web-1', commit, tree: `tree-${commit[0]}` });
   verdict(id, {
     agentId: 'web-2', decision: 'REJECT', reason: 'TEST_FAILURE', note,
     head: commit, digest: `digest:${item.item_title}`,
@@ -346,7 +347,7 @@ test('a verifier releases its reserved review; another verifier can take it, and
     const third = store.register(durable, { lane: 'web', path: '/repo-web-4' });
     const id = store.addItem(durable, { by: 'coordinator', lane: 'web', title: 'Page' });
     store.claim(durable, id, { agentId: builder, lane: 'web', leaseMs: HOUR, freeze });
-    store.submit(durable, id, { agentId: builder, commit: SHA_A, tree: 'tree-a' });
+    submitFixture(durable, id, { agentId: builder, commit: SHA_A, tree: 'tree-a' });
     store.reserveReview(durable, id, { agentId: reviewer, leaseMs: HOUR, policy: 'any' });
 
     assert.equal(store.release(durable, id, reviewer, 'wrong tree'), true);
@@ -402,8 +403,8 @@ test('REJECT reopens the item; resubmitting a rejected head is refused [V6]', ()
   assert.equal(item.item_status, 'open');
   assert.equal(item.item_verdict, 'REJECT');
   claimAs(id, 'web-1', 'web');
-  assert.throws(() => store.submit(board, id, { agentId: 'web-1', commit: SHA_A, tree: 'tree-a' }), /HEAD_NOT_NEW/);
-  store.submit(board, id, { agentId: 'web-1', commit: SHA_B, tree: 'tree-b' });
+  assert.throws(() => submitFixture(board, id, { agentId: 'web-1', commit: SHA_A, tree: 'tree-a' }), /HEAD_NOT_NEW/);
+  submitFixture(board, id, { agentId: 'web-1', commit: SHA_B, tree: 'tree-b' });
   verdict(id, { agentId: 'web-2', decision: 'ACCEPT' });
   assert.equal(store.getItem(board, id).item_status, 'verified');
 });
@@ -438,7 +439,7 @@ test('a rejected commit resubmits after its bar is corrected [V4,B3]', async (t)
     by: 'coordinator', lane: 'web', title: 'Page', criterion: 'the page renders its heading',
   });
   const originalClaim = store.claim(durable, id, { agentId: builder, lane: 'web', leaseMs: HOUR, freeze: criterionFreeze });
-  store.submit(durable, id, { agentId: builder, commit, tree });
+  submitFixture(durable, id, { agentId: builder, commit, tree });
   store.verify(durable, id, {
     agentId: reviewer, decision: 'REJECT', reason: 'BEHAVIOR_MISMATCH',
     note: 'the heading is missing', head: commit, digest: originalClaim.digest, policy: 'any',
@@ -446,7 +447,7 @@ test('a rejected commit resubmits after its bar is corrected [V4,B3]', async (t)
 
   store.claim(durable, id, { agentId: builder, lane: 'web', leaseMs: HOUR, freeze: criterionFreeze });
   assert.throws(
-    () => store.submit(durable, id, { agentId: builder, commit, tree }),
+    () => submitFixture(durable, id, { agentId: builder, commit, tree }),
     (error) => error.code === 'HEAD_NOT_NEW',
     'the same rejected head is still refused while its criterion is unchanged',
   );
@@ -456,7 +457,7 @@ test('a rejected commit resubmits after its bar is corrected [V4,B3]', async (t)
   assert.equal(store.getItem(durable, id).item_owner, builder, 'refreeze keeps the builder claim for the corrected bar');
 
   assert.doesNotThrow(
-    () => store.submit(durable, id, { agentId: builder, commit, tree }),
+    () => submitFixture(durable, id, { agentId: builder, commit, tree }),
     'the rejected commit is resubmitted unchanged after the coordinator corrects the criterion',
   );
   const item = store.getItem(durable, id);
@@ -477,7 +478,7 @@ test('a rejected commit resubmits after its bar is corrected [V4,B3]', async (t)
   });
   store.claim(durable, id, { agentId: builder, lane: 'web', leaseMs: HOUR, freeze: criterionFreeze });
   assert.throws(
-    () => store.submit(durable, id, { agentId: builder, commit, tree }),
+    () => submitFixture(durable, id, { agentId: builder, commit, tree }),
     (error) => error.code === 'HEAD_NOT_NEW',
     'engine 9 refuses the same commit after a rejection at the unchanged corrected digest',
   );
@@ -684,7 +685,7 @@ test('an item can wait on others: claiming it is refused until they are verified
   const user = store.addItem(board, { by: 'coordinator', lane: 'api', title: 'Uses the store', after: [contract] });
   assert.throws(() => claimAs(user, 'api-1', 'api'), /BLOCKED.*#2 waits on #1 \(open, web lane\)/);
   claimAs(contract, 'web-1', 'web');
-  store.submit(board, contract, { agentId: 'web-1', commit: SHA_A, tree: 't' });
+  submitFixture(board, contract, { agentId: 'web-1', commit: SHA_A, tree: 't' });
   assert.throws(() => claimAs(user, 'api-1', 'api'), /BLOCKED.*\(submitted/);
   store.verify(board, contract, { agentId: 'web-2', decision: 'ACCEPT', head: SHA_A, digest: 'digest:Store module', policy: 'any', note: 'reverted the module; its test failed' });
   assert.equal(claimAs(user, 'api-1', 'api').renewed, false);
@@ -726,7 +727,7 @@ test('next finds the oldest free item in your lane, or says what everything wait
   assert.equal(store.nextFor(board, { agentId: 'web-1', lane: 'web' }).item.item_id, contract);
   claimAs(contract, 'web-1', 'web');
   assert.equal(store.nextFor(board, { agentId: 'web-1', lane: 'web' }).item.item_status, 'claimed');
-  store.submit(board, contract, { agentId: 'web-1', commit: SHA_A, tree: 't' });
+  submitFixture(board, contract, { agentId: 'web-1', commit: SHA_A, tree: 't' });
   assert.equal(store.nextFor(board, { agentId: 'web-1', lane: 'web', verify: true }).item, null);
   assert.equal(store.nextFor(board, { agentId: 'web-2', lane: 'web', verify: true }).item.item_id, contract);
   assert.deepEqual(store.nextFor(board, { agentId: 'web-1', lane: 'web' }).reasons, [
@@ -749,7 +750,7 @@ test('an item carries a brief; editing it changes how to build, never what [B10]
   assert.throws(() => store.editItem(board, id, { agentId: 'coordinator' }), /USAGE/);
   assert.throws(() => store.addItem(board, { by: 'coordinator', lane: 'web', title: 'Huge', brief: 'x'.repeat(8001) }), /BRIEF_TOO_LONG/);
   assert.deepEqual(JSON.parse(store.events(board, { itemId: id }).find((event) => event.event_kind === 'edit').event_detail), { brief: '38 characters', model: 'unknown' });
-  store.submit(board, id, { agentId: 'web-1', commit: SHA_A, tree: 't' });
+  submitFixture(board, id, { agentId: 'web-1', commit: SHA_A, tree: 't' });
   store.verify(board, id, { agentId: 'web-2', decision: 'ACCEPT', head: SHA_A, digest, policy: 'any', note: 'removed the help case; its test failed' });
   assert.throws(() => store.editItem(board, id, { agentId: 'coordinator', brief: 'late' }), /CLOSED/);
 });
@@ -779,7 +780,7 @@ test('routes are tiers: an agent claims and verifies its tier and below, its own
   assert.equal(store.nextFor(board, { agentId: 'web-4', lane: 'web', routes: ['light'] }).item.item_id, light);
   claimAs(strong, 'web-1', 'web');
   assert.throws(() => store.editItem(board, strong, { agentId: 'coordinator', route: 'mid' }), /HELD.*only while it is open/);
-  store.submit(board, strong, { agentId: 'web-1', commit: SHA_A, tree: 't' });
+  submitFixture(board, strong, { agentId: 'web-1', commit: SHA_A, tree: 't' });
   assert.equal(store.nextFor(board, { agentId: 'web-4', lane: 'web', verify: true }).item, null);
   const verdict = { agentId: 'web-4', decision: 'ACCEPT', head: SHA_A, digest: 'digest:Design the cache', policy: 'any', note: 'tried it' };
   assert.throws(() => store.verify(board, strong, verdict), /ROUTE.*needs a strong verifier; you joined on the mid route/);
@@ -951,19 +952,54 @@ test('engine 40 reject moves replay without automatic escalation [B15,H16]', () 
     }),
     digest: `digest:${item.item_title}`,
   });
+  const submissionProof = {
+    version: 1, files: [], full: false, deferred: true,
+    reason: 'synthetic board-state fixture; no gate execution',
+  };
   let sequence = 0;
   const applyLegacyMove = (operation, args) => {
     sequence += 1;
     const move = prepareEngineMove(board, operation, args, { id: `engine-40-auto-escalation-${sequence}` });
-    move.engine = AUTO_ESCALATE_ENGINE - 1;
+    move.engine = 40;
     const result = applyEngineMove(board, move, { sequence, at: `2026-10-18T00:00:0${sequence}.000Z` });
     assert.equal(result.error, undefined, `${operation} replays on engine 40`);
   };
   applyLegacyMove('claim', [id, { agentId: 'web-1', lane: 'web', leaseMs: HOUR, freeze: legacyFreeze }]);
-  applyLegacyMove('submit', [id, { agentId: 'web-1', commit: SHA_A, tree: 'tree-a' }]);
+  applyLegacyMove('submit', [id, { agentId: 'web-1', commit: SHA_A, tree: 'tree-a', submissionProof }]);
   applyLegacyMove('verify', [id, { agentId: 'web-2', decision: 'REJECT', reason: 'TEST_FAILURE', note: 'legacy reject one', head: SHA_A, digest: `digest:${store.getItem(board, id).item_title}`, policy: 'any' }]);
   applyLegacyMove('claim', [id, { agentId: 'web-1', lane: 'web', leaseMs: HOUR, freeze: legacyFreeze }]);
-  applyLegacyMove('submit', [id, { agentId: 'web-1', commit: SHA_B, tree: 'tree-b' }]);
+  applyLegacyMove('submit', [id, { agentId: 'web-1', commit: SHA_B, tree: 'tree-b', submissionProof }]);
+  applyLegacyMove('verify', [id, { agentId: 'web-2', decision: 'REJECT', reason: 'TEST_FAILURE', note: 'legacy reject two', head: SHA_B, digest: `digest:${store.getItem(board, id).item_title}`, policy: 'any' }]);
+  assert.equal(store.getItem(board, id).item_route, 'light');
+  assert.equal(store.events(board, { itemId: id }).filter((event) => event.event_kind === 'escalate').length, 0);
+});
+
+test('engine 43 reject moves replay without automatic escalation [B15,H16]', () => {
+  const id = routed('Legacy engine', 'light');
+  const legacyFreeze = (item) => ({
+    text: JSON.stringify({
+      criterion: item.item_criterion,
+      policy: { version: 1, commit: SHA_A, verify: { policy: 'any', family: 'off' } },
+    }),
+    digest: `digest:${item.item_title}`,
+  });
+  const submissionProof = {
+    version: 1, files: [], full: false, deferred: true,
+    reason: 'synthetic board-state fixture; no gate execution',
+  };
+  let sequence = 0;
+  const applyLegacyMove = (operation, args) => {
+    sequence += 1;
+    const move = prepareEngineMove(board, operation, args, { id: `engine-43-auto-escalation-${sequence}` });
+    move.engine = 43;
+    const result = applyEngineMove(board, move, { sequence, at: `2026-10-18T00:00:0${sequence}.000Z` });
+    assert.equal(result.error, undefined, `${operation} replays on engine 43`);
+  };
+  applyLegacyMove('claim', [id, { agentId: 'web-1', lane: 'web', leaseMs: HOUR, freeze: legacyFreeze }]);
+  applyLegacyMove('submit', [id, { agentId: 'web-1', commit: SHA_A, tree: 'tree-a', submissionProof }]);
+  applyLegacyMove('verify', [id, { agentId: 'web-2', decision: 'REJECT', reason: 'TEST_FAILURE', note: 'legacy reject one', head: SHA_A, digest: `digest:${store.getItem(board, id).item_title}`, policy: 'any' }]);
+  applyLegacyMove('claim', [id, { agentId: 'web-1', lane: 'web', leaseMs: HOUR, freeze: legacyFreeze }]);
+  applyLegacyMove('submit', [id, { agentId: 'web-1', commit: SHA_B, tree: 'tree-b', submissionProof }]);
   applyLegacyMove('verify', [id, { agentId: 'web-2', decision: 'REJECT', reason: 'TEST_FAILURE', note: 'legacy reject two', head: SHA_B, digest: `digest:${store.getItem(board, id).item_title}`, policy: 'any' }]);
   assert.equal(store.getItem(board, id).item_route, 'light');
   assert.equal(store.events(board, { itemId: id }).filter((event) => event.event_kind === 'escalate').length, 0);
@@ -975,11 +1011,11 @@ test('a fresh claim records where the work started; submit records what it chang
   claimAt(SHA_A);
   claimAt(SHA_B);
   assert.equal(store.getItem(board, id).item_claim_head, SHA_A, 'a renewal keeps the first head');
-  store.submit(board, id, { agentId: 'web-1', commit: SHA_B, tree: 't', files: ['web/page.js', 'web/page.test.js'] });
+  submitFixture(board, id, { agentId: 'web-1', commit: SHA_B, tree: 't', files: ['web/page.js', 'web/page.test.js'] });
   verdict(id, { agentId: 'web-2', decision: 'REJECT', reason: 'TEST_FAILURE', note: 'an empty page throws' });
   claimAt(SHA_B);
   assert.equal(store.getItem(board, id).item_claim_head, SHA_B, 'the rework starts from the rejected head');
-  store.submit(board, id, { agentId: 'web-1', commit: 'c'.repeat(40), tree: 't2', files: ['web/page.js', 'web/empty.js'] });
+  submitFixture(board, id, { agentId: 'web-1', commit: 'c'.repeat(40), tree: 't2', files: ['web/page.js', 'web/empty.js'] });
   assert.deepEqual(store.itemFiles(store.getItem(board, id)), ['web/page.js', 'web/page.test.js', 'web/empty.js']);
 });
 
@@ -987,7 +1023,7 @@ test('related items: verified work that touched the same files, the most shared 
   const build = (title, files) => {
     const id = store.addItem(board, { by: 'coordinator', lane: 'web', title });
     claimAs(id, 'web-1', 'web');
-    store.submit(board, id, { agentId: 'web-1', commit: SHA_A, tree: 't', files });
+    submitFixture(board, id, { agentId: 'web-1', commit: SHA_A, tree: 't', files });
     return id;
   };
   const header = build('Header', ['web/layout.js', 'web/header.js']);
@@ -1064,7 +1100,7 @@ test('a builder reworks its own rejected item beside its one claim; nothing else
   const rejected = (title) => {
     const id = store.addItem(board, { by: 'coordinator', lane: 'web', title });
     claimAs(id, 'web-1', 'web');
-    store.submit(board, id, { agentId: 'web-1', commit: SHA_A, tree: 't' });
+    submitFixture(board, id, { agentId: 'web-1', commit: SHA_A, tree: 't' });
     verdict(id, { agentId: 'web-2', decision: 'REJECT', reason: 'TEST_FAILURE', note: 'fails', digest: `digest:${title}` });
     return id;
   };
@@ -1077,7 +1113,7 @@ test('a builder reworks its own rejected item beside its one claim; nothing else
   assert.equal(claimAs(header, 'web-1', 'web').renewed, false, 'holding only a rework, one new claim is still free');
   assert.equal(claimAs(footer, 'web-1', 'web').renewed, false, 'a second rework of its own, beside its claim');
   assert.throws(() => claimAs(nav, 'web-1', 'web'), new RegExp(`ONE_CLAIM.*you already hold #${header}`));
-  store.submit(board, page, { agentId: 'web-1', commit: SHA_B, tree: 't2' });
+  submitFixture(board, page, { agentId: 'web-1', commit: SHA_B, tree: 't2' });
   assert.equal(store.getItem(board, page).item_status, 'submitted');
   claimAs(nav, 'web-2', 'web');
   assert.throws(() => claimAs(aside, 'web-2', 'web'), /ONE_CLAIM/, "another agent's rejected item is no rework of web-2's");
@@ -1177,7 +1213,7 @@ test('[O3] declared families travel from join through submit and verdict, and ab
 
   const id = store.addItem(persistent, { by: 'coordinator', lane: 'web', title: 'Family feature' });
   store.claim(persistent, id, { agentId: 'web-1', lane: 'web', leaseMs: 2 * HOUR, freeze: familyFreeze });
-  store.submit(persistent, id, { agentId: 'web-1', commit: SHA_A, tree: 'tree-a' });
+  submitFixture(persistent, id, { agentId: 'web-1', commit: SHA_A, tree: 'tree-a' });
   assert.equal(store.getItem(persistent, id).item_builder_family, 'Family Alpha');
   store.verify(persistent, id, {
     agentId: 'review-1', decision: 'ACCEPT', note: 'checked the saved family fields',
@@ -1217,7 +1253,7 @@ test('[O3] declared families travel from join through submit and verdict, and ab
 
   const unverified = store.addItem(persistent, { by: 'coordinator', lane: 'review', title: 'No-family verdict' });
   store.claim(persistent, unverified, { agentId: 'review-1', lane: 'review', leaseMs: 2 * HOUR, freeze: familyFreeze });
-  store.submit(persistent, unverified, { agentId: 'review-1', commit: SHA_B, tree: 'tree-b' });
+  submitFixture(persistent, unverified, { agentId: 'review-1', commit: SHA_B, tree: 'tree-b' });
   store.verify(persistent, unverified, {
     agentId: 'web-2', decision: 'ACCEPT', note: 'checked without a family declaration',
     head: SHA_B, digest: 'digest:family', policy: 'any',
@@ -1227,12 +1263,12 @@ test('[O3] declared families travel from join through submit and verdict, and ab
 
   const unclaimed = store.addItem(persistent, { by: 'coordinator', lane: 'web', title: 'No-family submission' });
   store.claim(persistent, unclaimed, { agentId: 'web-2', lane: 'web', leaseMs: 2 * HOUR, freeze: familyFreeze });
-  store.submit(persistent, unclaimed, { agentId: 'web-2', commit: SHA_A, tree: 'tree-c' });
+  submitFixture(persistent, unclaimed, { agentId: 'web-2', commit: SHA_A, tree: 'tree-c' });
   assert.equal(store.getItem(persistent, unclaimed).item_builder_family, null);
 
   const differentFamily = store.addItem(persistent, { by: 'coordinator', lane: 'web', title: 'CLI family review' });
   store.claim(persistent, differentFamily, { agentId: 'web-1', lane: 'web', leaseMs: 2 * HOUR, freeze: familyFreeze });
-  store.submit(persistent, differentFamily, { agentId: 'web-1', commit: SHA_A, tree: 'tree-d' });
+  submitFixture(persistent, differentFamily, { agentId: 'web-1', commit: SHA_A, tree: 'tree-d' });
   assert.equal(store.agentAt(persistent, reviewerRoot).agent_family, 'Family Gamma');
   assert.equal(store.getItem(persistent, unclaimed).item_builder_family, null);
   assert.equal(store.nextFor(persistent, { agentId: 'review-1', lane: 'review', verify: true, familyPolicy: 'require' }).item.item_id, differentFamily);
@@ -1270,7 +1306,7 @@ test('[O2,O3] family policy controls review order and refuses unknown or matchin
   const submitAs = (agentId, title) => {
     const id = store.addItem(board, { by: 'coordinator', lane: 'web', title });
     store.claim(board, id, { agentId, lane: 'web', leaseMs: HOUR, freeze: () => ({ text: title, digest: 'digest:Page' }) });
-    store.submit(board, id, { agentId, commit: SHA_A, tree: `tree-${title}` });
+    submitFixture(board, id, { agentId, commit: SHA_A, tree: `tree-${title}` });
     return id;
   };
   const beta = submitAs('web-2', 'Beta build');

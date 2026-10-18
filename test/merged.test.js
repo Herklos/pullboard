@@ -1,4 +1,5 @@
 /** Merged receipts only record item work on the primary trunk, unless noted [R3,R1]. */
+import { submitFixture } from './board-submit-fixture.js';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
@@ -73,7 +74,7 @@ async function fixture(t) {
   execFileSync('git', ['add', 'web/work.txt'], { cwd: builder, env });
   execFileSync('git', ['commit', '-q', '-m', 'feat(web): retain item work [G1]'], { cwd: builder, env });
   const itemCommit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: builder, env, encoding: 'utf8' }).trim();
-  store.submit(board, id, { agentId, commit: itemCommit, tree: execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { cwd: builder, env, encoding: 'utf8' }).trim() });
+  submitFixture(board, id, { agentId, commit: itemCommit, tree: execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { cwd: builder, env, encoding: 'utf8' }).trim() });
   store.verify(board, id, { agentId: 'coordinator', decision: 'ACCEPT', note: 'confirmed the committed file', head: itemCommit, digest, policy: 'any' });
   return { dir, repo, builder, env, git, board, id, base, itemCommit };
 }

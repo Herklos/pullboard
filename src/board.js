@@ -48,6 +48,12 @@ import {
   requireNeverAgain,
 } from './rigor.js';
 import { barCorrectionFields } from './bar-corrections.js';
+import {
+  HEALTH_SENTINEL_ENGINE,
+  healthFindingIdentity,
+  healthFindingNotice,
+  normalizedHealthFindings,
+} from './health-receipts.js';
 import { factReference } from './fact-reference.js';
 import {
   factFromEvent,
@@ -62,6 +68,12 @@ import {
   landingWaiverKind,
 } from './landing-exceptions.js';
 import { parseSpec } from './spec.js';
+import { invariantEvidence } from './submit-invariants.js';
+import { preserveInvariantEvidence } from './submit-invariants.js';
+import { validateLandingBatch } from './submit-invariants.js';
+import { validateLandingRevision } from './submit-invariants.js';
+import { submissionProof } from './submit-invariants.js';
+import { SUBMISSION_PROOF_ENGINE } from './submit-invariants.js';
 export { landingFlakes, landingWaiverCovers, landingWaiverKind };
 export { acceptCheck } from './check-accept.js';
 
@@ -1232,7 +1244,8 @@ export function release(board, id, agentId, note = '') {
  * @param {{ agentId: string, commit: string, tree: string, files?: string[], policyCommit?: string, note?: string }} at - `files`: what the
  *   item's own commits changed since its claim; a rework adds to what the first attempt changed.
  */
-export function submit(board, id, { agentId, commit, tree, files = [], policyCommit = null, note }) {
+export function submit(board, id, { agentId, commit, tree, files = [], policyCommit = null, note, submissionProof: proof }) {
+  let recordedProof;
   if (note !== undefined && (typeof note !== 'string' || !note.trim() || /[\r\n\u2028\u2029]/u.test(note))) {
     throw new Refused('USAGE', 'a submission note, when present, is one nonempty line');
   }
@@ -1255,6 +1268,10 @@ export function submit(board, id, { agentId, commit, tree, files = [], policyCom
         gateConfigured: null, queuedItemLease: null,
         gateGreen: null,
         treeStillDuringGate: null,
+        submissionProofValid: () => {
+          if ((board.executionEngineVersion ?? ENGINE_VERSION) >= SUBMISSION_PROOF_ENGINE) recordedProof = submissionProof(proof);
+          return null;
+        },
         childrenDone: () => {
           const { total } = board.db
             .prepare("SELECT COUNT(*) AS total FROM item WHERE item_parent_id = ? AND item_status IN ('open', 'claimed', 'submitted')")
@@ -1292,6 +1309,7 @@ export function submit(board, id, { agentId, commit, tree, files = [], policyCom
       ...(policyCommit ? { policyCommit } : {}),
       ...(criterionDigest ? { criterionDigest } : {}),
       ...(note === undefined ? {} : { note: note.trim() }),
+      ...(recordedProof ? { submissionProof: recordedProof } : {}),
     });
   });
 }
@@ -1970,6 +1988,48 @@ function insertShout(board, { from, to, text, lanes, decision = false, answers =
  */
 export function shout(board, message) {
   return atomic(board, () => insertShout(board, message));
+}
+
+/** Record one current health snapshot atomically, notifying each new or resolved episode once [A6]. */
+export function recordHealthFindings(board, { agentId, observedRevision, findings }) {
+  return atomic(board, () => {
+    if ((board.executionEngineVersion ?? ENGINE_VERSION) < HEALTH_SENTINEL_ENGINE) {
+      throw new Refused('ENGINE_VERSION', `sentinel receipts require engine ${HEALTH_SENTINEL_ENGINE}; upgrade Pullboard before scanning`);
+    }
+    if (!board.db.prepare('SELECT 1 FROM agent WHERE agent_id = ?').get(agentId)) {
+      throw new Refused('NOT_JOINED', 'join this board before recording a health scan: pullboard join <lane>');
+    }
+    const revision = board.db.prepare('SELECT COALESCE(MAX(event_id), 0) AS revision FROM event').get().revision;
+    if (!Number.isSafeInteger(observedRevision) || observedRevision !== revision) {
+      throw new Refused('HEALTH_SCAN_STALE', 'the board changed while health was scanning; run pullboard resume again');
+    }
+    const active = normalizedHealthFindings(findings);
+    const last = board.db.prepare("SELECT event_detail FROM event WHERE event_kind = 'health-scan' ORDER BY event_id DESC LIMIT 1").get();
+    const previous = last ? JSON.parse(last.event_detail).active : [];
+    const before = new Map(previous.map(finding => [healthFindingIdentity(finding), finding]));
+    const after = new Map(active.map(finding => [healthFindingIdentity(finding), finding]));
+    const added = active.filter(finding => !before.has(healthFindingIdentity(finding)));
+    const resolved = previous.filter(finding => !after.has(healthFindingIdentity(finding)));
+    if (!added.length && !resolved.length) return { added: [], resolved: [] };
+    const agents = listAgents(board);
+    const lanes = [...new Set(agents.map(agent => agent.agent_lane))];
+    /** Deliver through ordinary feed/inbox records without registering a synthetic worktree seat. */
+    const notify = (finding, cleared) => {
+      const owner = finding.owner;
+      const targets = new Set([COORDINATOR]);
+      if (owner && (owner === PERSON || lanes.includes(owner) || agents.some(agent => agent.agent_id === owner))) targets.add(owner);
+      for (const to of targets) insertShout(board, { from: 'sentinel', to, text: healthFindingNotice(finding, cleared), lanes });
+      const item = finding.item === null ? null : itemById(board, finding.item);
+      logEvent(board, 'sentinel', cleared ? 'health-resolved' : 'health-failure', finding.item, {
+        key: finding.key, cause: `refusal:${finding.cause}`, since: finding.since, subject: finding.subject,
+        owner, commit: item?.item_commit ?? null, engine: HEALTH_SENTINEL_ENGINE,
+      });
+    };
+    for (const finding of resolved) notify(finding, true);
+    for (const finding of added) notify(finding, false);
+    logEvent(board, agentId, 'health-scan', null, { active, engine: HEALTH_SENTINEL_ENGINE });
+    return { added: added.map(finding => finding.key), resolved: resolved.map(finding => finding.key) };
+  });
 }
 
 /**
@@ -2829,25 +2889,19 @@ export function landingBatches(board) {
 /** Append one coordinator-owned batch revision without changing the board schema [B3,R3]. */
 export function recordLandingBatch(board, { agentId, batch, revision = 0 }) {
   coordinatorOnly(agentId, 'records landing batches');
-  if (!batch || batch.version !== 1 || typeof batch.id !== 'string' || !/^[a-zA-Z0-9_-]{1,80}$/u.test(batch.id)
-    || !['merging', 'gating', 'bisecting', 'flaky', 'blocked', 'ready', 'pushed', 'landed'].includes(batch.state)
-    || !/^[a-f0-9]{40,64}$/u.test(batch.base ?? '') || !/^[a-f0-9]{40,64}$/u.test(batch.tip ?? '')
-    || typeof batch.root !== 'string' || !batch.root || typeof batch.branch !== 'string' || !batch.branch.startsWith('refs/heads/')
-    || !Array.isArray(batch.items) || batch.items.some((entry) => !Number.isSafeInteger(entry?.id) || entry.id < 1 || !/^[a-f0-9]{40,64}$/u.test(entry.commit ?? '')
-      || ((board.executionEngineVersion ?? ENGINE_VERSION) >= VERDICT_REVIEW_ENGINE && Object.hasOwn(entry, 'reviewedCommit') && !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(entry.reviewedCommit ?? '')))
-    || typeof batch.owner !== 'string' || !batch.owner || typeof batch.logPath !== 'string' || !batch.logPath
-    || !Number.isSafeInteger(revision) || revision < 0) {
+  const evidence = (board.executionEngineVersion ?? ENGINE_VERSION) >= SUBMISSION_PROOF_ENGINE ? invariantEvidence(batch?.invariantEvidence) : undefined;
+  validateLandingBatch(batch, revision);
+  if ((board.executionEngineVersion ?? ENGINE_VERSION) >= VERDICT_REVIEW_ENGINE
+    && batch.items.some(entry => Object.hasOwn(entry, 'reviewedCommit') && !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(entry.reviewedCommit ?? ''))) {
     throw new Refused('LAND_BATCH', 'a landing batch needs its exact base, tip, items, state, owner and log path; run pullboard land');
   }
   return atomic(board, () => {
     const previous = landingBatches(board).find((entry) => entry.id === batch.id);
-    if ((previous?.revision ?? 0) !== revision || previous?.state === 'landed') {
-      throw new Refused('LAND_MOVED', 'the landing batch changed; read pullboard resume and adopt its current revision');
-    }
-    if (previous && (previous.base !== batch.base || previous.root !== batch.root || previous.branch !== batch.branch)) {
-      throw new Refused('LAND_BATCH', 'a batch keeps its original base and landing worktree; adopt it with pullboard land --adopt');
-    }
+    preserveInvariantEvidence(previous, evidence, board.executionEngineVersion ?? ENGINE_VERSION);
+    validateLandingRevision(previous, batch, revision);
     const recorded = { ...batch, revision: revision + 1, updatedAt: now(board) };
+    delete recorded.invariantEvidence;
+    if (evidence) recorded.invariantEvidence = evidence;
     logEvent(board, agentId, 'landing_batch', null, { batch: recorded });
     return recorded;
   });
