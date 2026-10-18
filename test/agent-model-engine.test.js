@@ -1,4 +1,3 @@
-import { HEALTH_SENTINEL_ENGINE } from '../src/health-receipts.js';
 /** Declared models replay with their recorded engine and survive board exchange [O8,O3,H16]. */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
