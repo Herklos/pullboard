@@ -235,3 +235,36 @@ test('[N26,H16] engine 38 cannot ship a milestone or set its target', async (t) 
     assert.equal(engineReceipt(box.board, move.id), null, 'pre-validation refusal creates no move receipt');
   }
 });
+
+/** Supported older clients can add before shipment, then obey the receiver's shipped state. */
+test('[N26,H16] an older-engine client cannot add work after a milestone ships', async (t) => {
+  const { applyRelayMove, prepareEngineMove } = await import('../src/engine.js');
+  const dir = mkdtempSync(join(tmpdir(), 'pullboard-milestone-legacy-'));
+  const board = store.openBoard(join(dir, 'board.sqlite'));
+  t.after(() => { store.closeBoard(board); rmSync(dir, { recursive: true, force: true }); });
+  store.ensureCoordinator(board, dir);
+  const id = store.addItem(board, { by: 'coordinator', lane: 'core', title: 'Still owed',
+    criterion: 'An obligation remains recorded', specIds: [] });
+  store.addMilestone(board, { agentId: 'coordinator', name: 'A', items: [] });
+  store.addMilestone(board, { agentId: 'coordinator', name: 'B', items: [] });
+  const sender = { kind: 'person', userId: 'milestone-fixture-user' };
+  const before = prepareEngineMove(board, 'editMilestoneItems',
+    ['B', { agentId: 'coordinator', add: [id], remove: [] }], { id: 'before38', actor: 'coordinator' });
+  before.engine = 38;
+  const added = applyRelayMove(board, before, { sequence: 1, at: '2026-10-18T01:00:00.000Z', sender, kind: 'move' });
+  assert.equal(added.error, undefined, 'an engine38 addition to an unshipped milestone stays replayable');
+  assert.deepEqual(store.milestones(board)[1].items, [id]);
+  const ship = prepareEngineMove(board, 'shipMilestone',
+    ['A', { agentId: 'coordinator', commit: '1'.repeat(40) }], { id: 'ship39', actor: 'coordinator' });
+  assert.equal(ship.engine, 39, 'the current milestone writer is exercised');
+  const shipped = applyRelayMove(board, ship, { sequence: 2, at: '2026-10-18T01:00:01.000Z', sender, kind: 'move' });
+  assert.equal(shipped.error, undefined, JSON.stringify(shipped));
+  assert.equal(store.milestones(board)[0].shipped.commit, '1'.repeat(40));
+  const after = prepareEngineMove(board, 'editMilestoneItems',
+    ['A', { agentId: 'coordinator', add: [id], remove: [] }], { id: 'after38', actor: 'coordinator' });
+  after.engine = 38;
+  const outcome = applyRelayMove(board, after, { sequence: 3, at: '2026-10-18T01:00:02.000Z', sender, kind: 'move' });
+  assert.equal(outcome.error?.code, 'MILESTONE_SHIPPED', 'a supported older client cannot add work after shipment');
+  assert.deepEqual(store.milestones(board)[0].items, [], 'refusal preserves the shipped milestone membership');
+  assert.deepEqual(store.milestones(board)[1].items, [id], 'the legacy addition before shipment remains');
+});

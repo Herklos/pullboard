@@ -163,8 +163,8 @@ export function addMilestone(board, { agentId, name, note = null, items = [] }) 
 }
 
 /**
- * Add or remove item references while preserving the remaining order. From engine 39 a shipped
- * milestone takes no new items; removing one is still allowed.
+ * Add or remove item references while preserving the remaining order. Shipment is receiver state,
+ * so a shipped milestone takes no new items even from older clients; removing one is still allowed.
  */
 export function editMilestoneItems(board, name, { agentId, add = [], remove = [] }) {
   requireCoordinator(agentId);
@@ -178,7 +178,7 @@ export function editMilestoneItems(board, name, { agentId, add = [], remove = []
     const index = entries.findIndex((entry) => entry.name === name);
     if (index < 0) throw new Refused('NO_MILESTONE', `no milestone named ${name}; list them with pullboard roadmap`);
     const current = entries[index];
-    if (additions.length && current.shipped && engineOf(board) >= MILESTONE_SHIP_ENGINE) throw shippedRefusal(current);
+    if (additions.length && current.shipped) throw shippedRefusal(current);
     const nextItems = additions.length
       ? [...current.items, ...additions]
       : current.items.filter((id) => !removals.some((removeId) => JSON.stringify(removeId) === JSON.stringify(id)));
