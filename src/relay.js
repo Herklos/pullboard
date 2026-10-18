@@ -357,17 +357,23 @@ export async function request(state, path, { method = 'GET', body, allowMissing 
   // Validate first: a refusal below repeats this address, so it must already be credential-free.
   const origin = relayOrigin(state.url);
   const startedAt = Date.now();
-  try {
-    response = await fetch(origin + path, {
-      method, redirect: 'error', signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(10000)]) : AbortSignal.timeout(10000),
-      headers: { 'x-pullboard-engine': String(ENGINE_VERSION), ...(token ? { authorization: 'Bearer ' + token } : {}), ...(body === undefined ? {} : { 'content-type': 'application/json' }), ...(initialBaseline ? { 'if-none-match': '*' } : {}) },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    });
-  } catch (error) {
-    if (signal?.aborted) throw new Refused('OAUTH_CANCELLED', 'GitHub device sign-in was cancelled; no board was linked');
-    const refusal = new Refused('RELAY_UNAVAILABLE', `the relay ${state.url} did not answer (${transportFailure(error)} after ${Date.now() - startedAt} ms on ${method} ${path.split('?')[0]}); read the local board offline, then retry this move when the relay is reachable`);
-    refusal.transportFailure = transportFailure(error);
-    throw refusal;
+  const requestSignal = signal ? AbortSignal.any([signal, AbortSignal.timeout(10000)]) : AbortSignal.timeout(10000); // budget: original per-request transport ceiling, shared by a replacement GET.
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      response = await fetch(origin + path, {
+        method, redirect: 'error', signal: requestSignal,
+        headers: { 'x-pullboard-engine': String(ENGINE_VERSION), ...(token ? { authorization: 'Bearer ' + token } : {}), ...(body === undefined ? {} : { 'content-type': 'application/json' }), ...(initialBaseline ? { 'if-none-match': '*' } : {}) },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      });
+      break;
+    } catch (error) {
+      if (signal?.aborted) throw new Refused('OAUTH_CANCELLED', 'GitHub device sign-in was cancelled; no board was linked');
+      // A cached connection can reset before its closure reaches the client loop. Only a read may try once more.
+      if (method === 'GET' && attempt === 0 && !requestSignal.aborted && transportFailure(error) === 'ECONNRESET') continue;
+      const refusal = new Refused('RELAY_UNAVAILABLE', `the relay ${state.url} did not answer (${transportFailure(error)} after ${Date.now() - startedAt} ms on ${method} ${path.split('?')[0]}); read the local board offline, then retry this move when the relay is reachable`);
+      refusal.transportFailure = transportFailure(error);
+      throw refusal;
+    }
   }
   let document;
   try { document = await response.json(); }
