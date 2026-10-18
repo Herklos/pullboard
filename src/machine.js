@@ -20,12 +20,16 @@ export const AUTO_ESCALATE_ENGINE = 50;
 /** The first engine that records a spec row a lane agent drafts on the board, not in SPEC.md (#878). */
 export const ROW_DRAFT_ENGINE = 55;
 
+/** First engine replacing an automatic ceiling escalation with a paired notice [B15,H16]. */
+export const STRONG_REJECTION_NOTICE_ENGINE = 54;
+
 /** Executable move semantics, carried by every sealed move and retained during replay [H16]. */
 export const ENGINE_VERSION = Math.max(
   ROW_DRAFT_ENGINE,
   AUTO_ESCALATE_ENGINE,
   RIGOR_NOTICE_ENGINE,
   WITHDRAW_MILESTONE_ENGINE,
+  STRONG_REJECTION_NOTICE_ENGINE,
   52,
 );
 

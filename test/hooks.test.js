@@ -225,7 +225,9 @@ test('a spec-less feature commit is told a path that works [S1,B26]', () => {
   const missing = box.tryGit(root, 'commit', '-q', '-m', 'feat(app): build the first useful thing');
   assert.notEqual(missing.status, 0);
   assert.match(missing.stderr, /pullboard spec draft "<text>"/u, 'the actual installed hook names a supported command');
-  assert.match(missing.stderr, /person.*approv/iu, 'the next step honestly names the person approval');
+  assert.match(missing.stderr, /cite the returned id now/iu, 'a draft id is usable immediately');
+  assert.match(missing.stderr, /the person approves it in parallel/iu, 'approval happens alongside useful work');
+  assert.doesNotMatch(missing.stderr, /then cite it|wait for (?:the person )?approval/iu, 'the refusal does not tell the agent to wait');
   assert.doesNotMatch(missing.stderr, /like \[G1,G2\]|as a chore|use chore/iu, 'the hook neither invents ids nor mislabels the feature');
   const malformed = box.tryGit(root, 'commit', '-q', '-m', 'Added the first useful thing');
   assert.notEqual(malformed.status, 0);
@@ -237,10 +239,13 @@ test('a spec-less feature commit is told a path that works [S1,B26]', () => {
   const drafted = box.run(root, 'spec', 'draft', 'The first useful thing works.', '--json');
   assert.equal(drafted.code, 0, drafted.err || drafted.out);
   const id = JSON.parse(drafted.out).id;
+  const citedBeforeApproval = box.tryGit(root, 'commit', '-q', '-m', `feat(app): build the first useful thing [${id}]`);
+  assert.equal(citedBeforeApproval.status, 0, citedBeforeApproval.failure || citedBeforeApproval.stderr || citedBeforeApproval.stdout);
   for (const args of [['spec', 'approve', id], ['spec', 'apply']]) {
     const result = box.run(root, ...args);
     assert.equal(result.code, 0, result.err || result.out);
   }
+  writeFileSync(join(root, 'app/first.txt'), 'first useful thing, approved\n');
   box.git(root, 'add', '-A');
   const committed = box.tryGit(root, 'commit', '-q', '-m', `feat(app): build the first useful thing [${id}]`);
   assert.equal(committed.status, 0, committed.failure || committed.stderr || committed.stdout);

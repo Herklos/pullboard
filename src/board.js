@@ -46,7 +46,7 @@ import { Refused } from './refused.js';
 import {
   ROUTES,
   canTake,
-  rejectedItemEscalation,
+  recordRejectedItemRoute,
 } from './route-escalation.js';
 export { ROUTES, canTake };
 import {
@@ -1595,8 +1595,7 @@ export function verify(board, id, { agentId, decision, reason, note = '', cause,
     if (newReview) detail.review = { commit: review.commit, ...(Object.hasOwn(review, 'head') ? { head: review.head } : {}), trunk: review.trunk, paths: [...review.paths] };
     logEvent(board, agentId, verb, id, implies?.length ? { ...detail, implies } : detail);
     const trigger = board.lastEvent;
-    const escalation = !isAccept && rejectedItemEscalation(board, id, engine, item.item_route);
-    if (escalation) escalate(board, id, escalation);
+    if (!isAccept) recordRejectedItemRoute(board, id, engine, item, { escalate, shout, logEvent });
     tellVerdictImplications(board, (by, itemId, fact) => logEvent(board, by, 'fact', itemId, fact), id, { seed: impliesId, implies });
     if (!isAccept) postRigorNotices(board, trigger);
     return { decision, reason: code, ...(isAccept && check !== undefined ? { check } : {}) };
