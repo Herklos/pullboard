@@ -87,11 +87,15 @@ function addItem(box, title, specId = 'G1') {
   return JSON.parse(result.stdout).item.item_id;
 }
 
-/** Run a CLI command and require its successful result; a killed child names its signal and elapsed time [S19]. */
-function succeeds(box, cwd, ...args) {
-  const result = box.pullboard(cwd, ...args);
+/** Require a fixture child's success; a killed child names its signal and elapsed time, never a bare null [S19]. */
+function requireSuccess(result) {
   assert.equal(result.status, 0, `${result.stdout}${result.context}`);
   return result;
+}
+
+/** Run a CLI command and require its successful result. */
+function succeeds(box, cwd, ...args) {
+  return requireSuccess(box.pullboard(cwd, ...args));
 }
 
 /** Freeze an item's cited text by claiming it in the real agent worktree. */
@@ -258,4 +262,9 @@ test('[A5,S19,V3] doctor and resume distinguish unchanged doctrine citations fro
   assert.equal(findings.length, 1);
   assert.match(findings[0].message, /old text of doctrine:PB1/);
   assert.deepEqual(receiptSnapshot(box), baseline, 'diagnostics preserve frozen evidence and unrelated SPEC citations');
+});
+
+test('[S19] a killed fixture child names its signal and elapsed time', () => {
+  const killed = runFixtureChild('sh', ['-c', 'kill -KILL $$'], { encoding: 'utf8' });
+  assert.throws(() => requireSuccess(killed), (error) => /status: null\nsignal: SIGKILL\nelapsed: \d+ms/u.test(error.message));
 });
