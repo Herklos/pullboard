@@ -57,7 +57,7 @@ Close each finding with its next step in the same cycle. When the step belongs t
 
 After `blueprint add` or `init --blueprint`, record a fit proposal for each drafted row with `pullboard spec fit edit <row id or #item> keep|adapt|drop|answer [--text "..."] [--reason "why"]`; the person reviews them together in `pullboard spec fit` and approves the batch, and a seat that recorded a proposal never approves it.
 
-`pullboard roadmap` lists the milestones in order. Work the current release's open items first. Within it, take repairs before new work: rework a verifier sent back, and anything health reports, comes ahead of a new build. Reviews come before new builds, so a submission never waits while a builder starts something else. `pullboard health` sets rework planned for a later release apart under `waiting for a later release`.
+`pullboard roadmap` lists the milestones in order. `pullboard milestone order <name> <ids>` ranks those items inside their milestone, so `pullboard next` hands them out in that order; an unranked item follows the ranked ones, oldest first. Work the current release's open items first. Within it, take repairs before new work: rework a verifier sent back, and anything health reports, comes ahead of a new build. Reviews come before new builds, so a submission never waits while a builder starts something else. `pullboard health` sets rework planned for a later release apart under `waiting for a later release`.
 
 ## Write a ruling into the bar
 
