@@ -91,6 +91,7 @@ import { watchCommand } from './watch.js';
 import { serveMcp } from './mcp.js';
 import { doctorProblems, doctrineProblems } from './doctor.js';
 import { boardHealth, healthLines } from './health.js';
+import { scanHealthSentinel } from './health-sentinel.js';
 import { staleFrozenItems, staleItemFinding } from './approved-rows.js';
 import { mainPolicy, policyAt, itemPolicy, submissionPaths, frozenCheck, checkAtCommit, dependencySnapshots, requireTrunkMerge, trunkRef } from './trusted-policy.js';
 import { captureVerdictReview, staleVerdictRefusal, verdictProjector, verdictTrunk } from './verdict-freshness.js';
@@ -1326,8 +1327,16 @@ function boardSetup(ctx, card, identity) {
  * @param {Awaited<ReturnType<typeof keepViewRunning>>} view what keeping the background view running did
  * @returns {number}
  */
-function resumeHere(io, view) {
+async function resumeHere(io, view) {
   const ctx = context(io);
+  await withBoard(ctx, async board => {
+    const me = whoAmI(ctx, board);
+    const observation = scanHealthSentinel(ctx.file, { root: ctx.info.root, config: ctx.config, now: ctx.clock.now() });
+    if (observation) {
+      try { await ordered(ctx, board, 'recordHealthFindings', [{ agentId: me.id, ...observation }]); }
+      catch (error) { if (!(error instanceof Refused) || error.code !== 'HEALTH_SCAN_STALE') throw error; }
+    }
+  });
   const { root, isMain } = ctx.info;
   const mainRoot = primaryCheckoutRoot(ctx.info);
   const worktreeConfig = mainRoot ? (isMain ? ctx.config : loadConfig(mainRoot)) : null;

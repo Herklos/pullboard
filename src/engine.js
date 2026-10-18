@@ -5,6 +5,7 @@ import { recordedRefusal } from './recorded-refusal.js';
 import { BAR_ENGINE, carriesBarReason } from './bar-corrections.js';
 import { carriesImplies, IMPLIES_ENGINE } from './implies.js';
 import { CHECK_ACCEPT_ENGINE } from './check-accept.js';
+import { HEALTH_SENTINEL_ENGINE } from './health-receipts.js';
 import { CAUSE_ENGINE, ENGINE_VERSION, VERDICT_REVIEW_ENGINE } from './machine.js';
 import { Refused } from './refused.js';
 import { requestMoveProblem, recordRequestMove } from './relay-requests.js';
@@ -20,6 +21,7 @@ export const ENGINE_OPERATIONS = Object.freeze([
   'addMilestone', 'editMilestoneItems', 'moveMilestone', 'editMilestone', 'removeMilestone',
   'recordRowDecisions', 'applyRowDecisions', 'appendFact',
   'recordLandingBatch', 'recordLandingWaiver', 'recordLandingFlake', 'finishLandingBatch', 'acceptCheck',
+  'recordHealthFindings',
 ]);
 
 /** Engine version at which each ordered operation first has stable replay semantics. */
@@ -27,6 +29,7 @@ const OPERATION_ENGINE = Object.freeze({ reopen: 8, recordLandingBatch: 8, recor
 
 /** Dependency edits, bar reasons and sealed review metadata retain their distinct recorded engine meanings. */
 function minimumOperationEngine(operation, args, board) {
+  if (operation === 'recordHealthFindings') return HEALTH_SENTINEL_ENGINE;
   const options = args[1];
   const given = (name) => Boolean(options && typeof options === 'object' && Object.hasOwn(options, name) && options[name] !== undefined && options[name] !== null && options[name] !== false);
   if (board && ['recordLandingBatch', 'finishLandingBatch'].includes(operation)) {

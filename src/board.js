@@ -19,6 +19,7 @@ import { ENGINE_VERSION, VERDICT_REVIEW_ENGINE, GUARDS, IN_STATE, MOVES, STATES,
 import { Refused } from './refused.js';
 import { causeProblem, requireNeverAgain } from './rigor.js';
 import { barCorrectionFields } from './bar-corrections.js';
+import { HEALTH_SENTINEL_ENGINE, healthFindingIdentity, healthFindingNotice, normalizedHealthFindings } from './health-receipts.js';
 import { factReference } from './fact-reference.js';
 import { factFromEvent, requestAnswerRefusal, tellAnswerImplications, tellFactImplications, tellVerdictImplications } from './implies.js';
 import { landingFlakes, landingWaiverCovers, landingWaiverKind } from './landing-exceptions.js';
@@ -1873,6 +1874,48 @@ function insertShout(board, { from, to, text, lanes, decision = false, answers =
  */
 export function shout(board, message) {
   return atomic(board, () => insertShout(board, message));
+}
+
+/** Record one current health snapshot atomically, notifying each new or resolved episode once [A6]. */
+export function recordHealthFindings(board, { agentId, observedRevision, findings }) {
+  return atomic(board, () => {
+    if ((board.executionEngineVersion ?? ENGINE_VERSION) < HEALTH_SENTINEL_ENGINE) {
+      throw new Refused('ENGINE_VERSION', `sentinel receipts require engine ${HEALTH_SENTINEL_ENGINE}; upgrade Pullboard before scanning`);
+    }
+    if (!board.db.prepare('SELECT 1 FROM agent WHERE agent_id = ?').get(agentId)) {
+      throw new Refused('NOT_JOINED', 'join this board before recording a health scan: pullboard join <lane>');
+    }
+    const revision = board.db.prepare('SELECT COALESCE(MAX(event_id), 0) AS revision FROM event').get().revision;
+    if (!Number.isSafeInteger(observedRevision) || observedRevision !== revision) {
+      throw new Refused('HEALTH_SCAN_STALE', 'the board changed while health was scanning; run pullboard resume again');
+    }
+    const active = normalizedHealthFindings(findings);
+    const last = board.db.prepare("SELECT event_detail FROM event WHERE event_kind = 'health-scan' ORDER BY event_id DESC LIMIT 1").get();
+    const previous = last ? JSON.parse(last.event_detail).active : [];
+    const before = new Map(previous.map(finding => [healthFindingIdentity(finding), finding]));
+    const after = new Map(active.map(finding => [healthFindingIdentity(finding), finding]));
+    const added = active.filter(finding => !before.has(healthFindingIdentity(finding)));
+    const resolved = previous.filter(finding => !after.has(healthFindingIdentity(finding)));
+    if (!added.length && !resolved.length) return { added: [], resolved: [] };
+    const agents = listAgents(board);
+    const lanes = [...new Set(agents.map(agent => agent.agent_lane))];
+    /** Deliver through ordinary feed/inbox records without registering a synthetic worktree seat. */
+    const notify = (finding, cleared) => {
+      const owner = finding.owner;
+      const targets = new Set([COORDINATOR]);
+      if (owner && (owner === PERSON || lanes.includes(owner) || agents.some(agent => agent.agent_id === owner))) targets.add(owner);
+      for (const to of targets) insertShout(board, { from: 'sentinel', to, text: healthFindingNotice(finding, cleared), lanes });
+      const item = finding.item === null ? null : itemById(board, finding.item);
+      logEvent(board, 'sentinel', cleared ? 'health-resolved' : 'health-failure', finding.item, {
+        key: finding.key, cause: `refusal:${finding.cause}`, since: finding.since, subject: finding.subject,
+        owner, commit: item?.item_commit ?? null, engine: HEALTH_SENTINEL_ENGINE,
+      });
+    };
+    for (const finding of resolved) notify(finding, true);
+    for (const finding of added) notify(finding, false);
+    logEvent(board, agentId, 'health-scan', null, { active, engine: HEALTH_SENTINEL_ENGINE });
+    return { added: added.map(finding => finding.key), resolved: resolved.map(finding => finding.key) };
+  });
 }
 
 /**
