@@ -897,7 +897,7 @@ test('the roadmap panel counts the next release by stage [N26]', {
 test('the roadmap shows landed, accepted and past target [N26]', { timeout: 90_000 }, async () => {
   const executable = chromeExecutable(); assert.ok(executable, 'Chrome is required for the roadmap header check.');
   const box=machine(), alpha=project(box,'roadmap-truth',SPEC,{lanes:{web:{owns:['web/'],specs:['G']},ops:{owns:['ops/'],specs:['G']}}});
-  const names=['Landed A','Accepted A','Waiting A','Shipped B','Landed C','Accepted C','In review C','Building C','Approve the release','Held C','Withdrawn C'];
+  const names=['Landed A','Accepted A','Waiting A','Shipped B','Landed C','Accepted C','In review C','Building C','Approve the release','Held C','Withdrawn C','Landed D','Withdrawn D'];
   names.forEach((name,index)=>box.run(alpha.repo,'add',index===9?'ops':'web',name,'--specs','G1','--criterion','The page renders.'));
   /** Land through real Git and the ordinary board receipt; acceptance alone stays unlanded. */
   function land(id) {
@@ -906,6 +906,9 @@ test('the roadmap shows landed, accepted and past target [N26]', { timeout: 90_0
   }
   for(const id of [1,2,4,5,6]) {build(box,alpha,id,`item-${id}.txt`);accept(box,alpha,id);if([1,4,5].includes(id))land(id);}
   box.run(alpha.repo,'withdraw','11','Removed from this release');
+  // A release that finished, every item landed or withdrawn, without milestone ship (the person, 18 Oct).
+  build(box,alpha,12,'item-12.txt');accept(box,alpha,12);land(12);box.run(alpha.repo,'withdraw','13','Not needed after all');
+  box.run(alpha.repo,'milestone','add','Finished unshipped','--items','12,13');
   build(box,alpha,7,'item-7.txt');box.run(alpha.web,'claim','8');box.run(alpha.repo,'hold','ops','--reason','Waiting for the person');
   box.run(alpha.repo,'shout','person','#9 Approve the release','--decision');
   box.run(alpha.repo,'milestone','add','Past target','--items','1,2,3');
@@ -918,11 +921,11 @@ test('the roadmap shows landed, accepted and past target [N26]', { timeout: 90_0
   const shipped=box.git(alpha.repo,'rev-parse','HEAD');
   const rawRoadmap=JSON.parse(box.run(alpha.repo,'roadmap','--json'));
   assert.equal(rawRoadmap.milestones.find(m=>m.name==='State summary').total,7,'692 total retains the withdrawn member; the summary excludes it');
-  assert.deepEqual(rawRoadmap.milestones.find(m=>m.name==='State summary').summary,{total:6,left:5,landed:1,landing:1,review:1,building:1,waiting:1,held:1,needsYou:[9],pace:{last6h:3,last2h:3},estimate:{low:3.5,high:10}},'real roadmap JSON owns every header field');
+  assert.deepEqual(rawRoadmap.milestones.find(m=>m.name==='State summary').summary,{total:6,left:5,landed:1,landing:1,review:1,building:1,waiting:1,held:1,needsYou:[9],pace:{last6h:4,last2h:4},estimate:{low:2.5,high:7.5}},'real roadmap JSON owns every header field');
   const view=await startView(box),profile=mkdtempSync(join(tmpdir(),'pullboard-roadmap-truth-'));let chrome;
   const milestone=name=>`document.querySelector('[data-key="m:${name}"]')`;
   try {
-    chrome=await openSnapshotChrome(executable,view.link.href,profile);await chrome.waitFor('data?.project?.milestones?.length===4');
+    chrome=await openSnapshotChrome(executable,view.link.href,profile);await chrome.waitFor('data?.project?.milestones?.length===5');
     const apiSummary=JSON.parse(await chrome.stable("JSON.stringify(data.project.milestones.find(m=>m.name==='State summary').summary)"));
     assert.deepEqual(apiSummary,rawRoadmap.milestones.find(m=>m.name==='State summary').summary,'the live API carries the real CLI summary unchanged');
     await press(chrome,"document.querySelector('[data-tab=roadmap]')");
@@ -936,18 +939,30 @@ test('the roadmap shows landed, accepted and past target [N26]', { timeout: 90_0
     assert.match(await chrome.stable(`${milestone('Shipped release')}.textContent`),new RegExp(shipped.slice(0,12)),'the shipped release names its actual commit');
     assert.equal(await chrome.stable(`${milestone('Empty shipped')}.closest('.shipped')!==null`),true,'an empty shipped milestone appears only under Shipped');
     assert.equal(await chrome.stable("document.querySelectorAll('[data-key=\"m:Empty shipped\"]').length"),1,'an empty shipment is not repeated among upcoming releases');
+    // Finished without milestone ship: under Shipped, no summary header, never among upcoming releases; the page opens on the
+    // first release with work left (Past target), and the Releases list starts with it.
+    const finished=JSON.parse(await chrome.stable(`JSON.stringify({shipped:${milestone('Finished unshipped')}?.closest('.shipped')!==null,copies:document.querySelectorAll('[data-key="m:Finished unshipped"]').length,summary:Boolean(${milestone('Finished unshipped')}?.querySelector('.roadmap-summary,.roadmap-left')),zero:/0 (left|remaining)|About 0/u.test(${milestone('Finished unshipped')}?.textContent||''),releases:[...document.querySelectorAll('#roadmap-releases [data-roadmap-jump]')].map(b=>b.querySelector('span').textContent),status:document.querySelector('[data-status=release]')?.textContent.trim()||''})`));
+    assert.deepEqual([finished.shipped,finished.copies,finished.summary,finished.zero],[true,1,false,false],`a finished release sits once under Shipped with no summary: ${JSON.stringify(finished)}`);
+    assert.equal(finished.releases[0],'Past target','the Releases list starts with the first release with work left');
+    assert.ok(!finished.releases.includes('Finished unshipped'),'a finished release is not listed as coming');
+    assert.match(finished.status,/^Past target/u,'the page opens on the first release with work left');
     for(const width of [375,1280]) {
       await chrome.send('Emulation.setDeviceMetricsOverride',{width,height:950,deviceScaleFactor:1,mobile:false});
       for(const scheme of ['light','dark']) {
         await chrome.send('Emulation.setEmulatedMedia',{features:[{name:'prefers-color-scheme',value:scheme}]});
         const read=JSON.parse(await chrome.stable(`JSON.stringify((()=>{const m=${milestone('State summary')},bar=m.querySelector('.roadmap-summary-bar');return {text:m.textContent,releaseCount:document.querySelector('[data-roadmap-jump=\"m:State summary\"] b').textContent,legend:[...m.querySelectorAll('[data-summary-state]')].map(x=>[x.dataset.summaryState,x.querySelector('b').textContent]),segments:[...m.querySelectorAll('[data-summary-segment]')].map(x=>[x.dataset.summarySegment,Number(x.dataset.count),x.getBoundingClientRect().width]),bar:bar?.getBoundingClientRect().width,width:document.documentElement.scrollWidth,viewport:innerWidth};})())`));
-        assert.match(read.text,/5 left.*1 of 6 landed/u);assert.equal(read.releaseCount,'1/6','the header and Releases list share the summary total');assert.match(read.text,/About 3\.5 to 10 h/u);assert.match(read.text,/3 landed in the last 6 h, 3 in the last 2 h/u);assert.match(read.text,/Needs you:.*#9 Approve the release/u);
+        assert.match(read.text,/5 remaining.*1 of 6 landed/u);assert.doesNotMatch(read.text,/ left/u,'the count reads remaining, never left');assert.equal(read.releaseCount,'1/6','the header and Releases list share the summary total');assert.match(read.text,/About 2\.5 to 7\.5 h/u);assert.match(read.text,/4 landed in the last 6 h, 4 in the last 2 h/u);assert.match(read.text,/Needs you:.*#9 Approve the release/u);
         assert.deepEqual(read.legend,[['landed','1'],['landing','1'],['review','1'],['building','1'],['waiting','1'],['held','1']]);
         assert.equal(read.segments.reduce((sum,row)=>sum+row[1],0),6,'the six supplied states sum to total');
         assert.ok(read.segments.every(row=>row[2]>0&&Math.abs(row[2]-read.bar/6)<1),`${width}/${scheme}: every supplied state occupies its share`);
         assert.ok(read.width<=read.viewport,`${width}/${scheme}: the header stays inside the viewport`);
       }
     }
+    // Equal bounds read as one number, and the legend says waiting.
+    await chrome.stable("(()=>{const m=data.project.milestones.find(m=>m.name==='State summary');m.summary={...m.summary,estimate:{low:2.5,high:2.5}};render();return true;})()");
+    const single=await chrome.stable(`${milestone('State summary')}.querySelector('.roadmap-estimate')?.textContent||''`);
+    assert.match(single,/^About 2\.5 h at today/u,`equal bounds read as one number: ${single}`);
+    assert.equal(await chrome.stable(`${milestone('State summary')}.querySelector('[data-summary-state=waiting]').textContent.trim()`),'1 waiting','the legend says waiting');
     // The API owns counts: changing held item summaries cannot change the supplied milestone summary.
     await chrome.stable("window.__originalItems=data.project.items;window.__originalRoadmapItems=data.project.milestones.find(m=>m.name==='State summary').items;data.project.items=data.project.items.map(item=>({...item,status:'open',stage:'open',merged:null,claim:null}));data.project.milestones.find(m=>m.name==='State summary').items=window.__originalRoadmapItems.map(item=>({...item,status:'open',state:'open'}));render();true");
     assert.equal(await chrome.stable(`${milestone('State summary')}.querySelector('[data-summary-state=building] b').textContent`),'1');

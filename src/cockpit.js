@@ -2317,7 +2317,12 @@ function readMilestone(milestone, p) {
   const numeric = value => Number.isInteger(value) && value >= 0 ? value : null;
   const done = numeric(milestone.summary?.landed) ?? numeric(milestone.landed) ?? verified.length;
   const total = numeric(milestone.summary?.total) ?? numeric(milestone.total) ?? rows.length;
-  const shipped = milestone.shipped !== undefined ? Boolean(milestone.shipped) : rows.length > 0 && verified.length === rows.length;
+  // A milestone with nothing left, every item landed or withdrawn, is finished and sits under Shipped whether or not it
+  // was recorded with milestone ship (the person, 18 Oct). The summary's left owns that when present; an empty plan is
+  // never finished.
+  const left = numeric(milestone.summary?.left);
+  const finished = milestone.items.length > 0 && (left !== null ? left === 0 : rows.every((row) => row.stage === 'merged'));
+  const shipped = finished || (milestone.shipped !== undefined ? Boolean(milestone.shipped) : rows.length > 0 && verified.length === rows.length);
   return { milestone, rows, done, total, shipped };
 }
 

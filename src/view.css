@@ -926,7 +926,7 @@ code.inline.long { white-space: break-spaces; overflow-wrap: anywhere; }
 .roadmap-has-summary > .milestone-head { align-items: flex-start; }
 .roadmap-has-summary > .milestone-head h2 { flex: 1; min-width: 0; font-size: 18px; line-height: 1.35; }
 .roadmap-left { flex: none; display: grid; gap: 4px; margin-left: auto; text-align: right; white-space: nowrap; }
-.roadmap-left > b { font-size: 22px; font-weight: 600; line-height: 1.1; }
+.roadmap-left > b { font-size: 19px; font-weight: 600; line-height: 1.1; }
 .roadmap-left > span { color: var(--ink-muted); font: 12px var(--mono); }
 .roadmap-summary { margin: 0 14px 14px; min-width: 0; }
 .roadmap-summary-bar { display: block; height: 10px; margin: 10px 0; border-radius: 5px; }
