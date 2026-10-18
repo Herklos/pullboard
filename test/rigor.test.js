@@ -17,6 +17,11 @@ import { main } from '../src/cli.js';
 import { refusePersonMove } from '../src/mcp.js';
 import { CAUSE_ENGINE, ENGINE_VERSION } from '../src/machine.js';
 import { rigorReport } from '../src/rigor.js';
+import { newRigorNotices, undraftedRigor } from '../src/rigor-notices.js';
+import { readRigorSource, rigorSource, RIGOR_NOTICE_ENGINE } from '../src/rigor-source.js';
+import { loadConfig } from '../src/config.js';
+import { loadDoctrine } from '../src/doctrine.js';
+import { frozenCriterion, loadSpec } from '../src/spec.js';
 import { unpackRelease } from './release-archive.js';
 
 const BIN = resolve(import.meta.dirname, '../bin/pullboard.js');
@@ -77,12 +82,12 @@ function refused(result, code, why) {
  * Build board history straight through the board's own moves on the real SQLite file: a builder
  * and a reviewer in one lane, and helpers to submit, reject and land-reopen an item.
  */
-function history(file) {
+function history(file, { freeze: suppliedFreeze } = {}) {
   const board = store.openBoard(file);
   const builder = store.register(board, { lane: 'app', path: '/fixture/app-1', model: 'Builder model' });
   const reviewer = store.register(board, { lane: 'app', path: '/fixture/app-2', model: 'Reviewer model' });
   /** Freeze the item's title, as the real freezer digests its criterion. */
-  const freeze = (item) => ({ text: item.item_title, digest: `digest:${item.item_title}` });
+  const freeze = suppliedFreeze ?? ((item) => ({ text: item.item_title, digest: `digest:${item.item_title}` }));
   let next = 0;
   /** A fresh 40-character commit id for each submission. */
   const commit = () => (++next).toString(16).padStart(40, '0');
@@ -96,18 +101,162 @@ function history(file) {
   /** Reject the current submission, naming a cause key or none. */
   const reject = (id, cause, note = 'the named test failed at this commit') => store.verify(board, id, {
     agentId: reviewer, decision: 'REJECT', reason: 'TEST_FAILURE', note, ...(cause === undefined ? {} : { cause }),
-    head: store.getItem(board, id).item_commit, digest: `digest:${store.getItem(board, id).item_title}`, policy: 'any',
+    head: store.getItem(board, id).item_commit, digest: store.getItem(board, id).item_frozen_digest, policy: 'any',
   });
   /** Accept, then reopen after a red landing whose failing test the note names in the landing format. */
   const landReopen = (id, test) => {
     store.verify(board, id, { agentId: reviewer, decision: 'ACCEPT', note: 'broke the fix; its test failed; restored it',
-      head: store.getItem(board, id).item_commit, digest: `digest:${store.getItem(board, id).item_title}`, policy: 'any' });
+      head: store.getItem(board, id).item_commit, digest: store.getItem(board, id).item_frozen_digest, policy: 'any' });
     return store.reopen(board, id, { agentId: 'coordinator', note: `${test.file}: ${test.name}; merge commit ${MERGE}` });
   };
   /** Add one item in the fixture lane. */
   const add = (title) => store.addItem(board, { by: 'coordinator', lane: 'app', title });
   return { board, add, submit, reject, landReopen, close: () => store.closeBoard(board) };
 }
+
+/** Two real commits for a proof, including the exact failing source noticed on the board. */
+function noticeProof(box) {
+  mkdirSync(join(box.repo, 'src'), { recursive: true });
+  writeFileSync(join(box.repo, 'src', 'notice.js'), '// TODO: keep the rule\n');
+  box.git('add', 'src/notice.js'); box.git('commit', '-q', '-m', 'chore: record noticed failure');
+  const red = box.git('rev-parse', 'HEAD');
+  writeFileSync(join(box.repo, 'src', 'notice.js'), '// The rule holds.\n');
+  writeFileSync(join(box.repo, 'fixed.txt'), 'fixed\n');
+  box.git('add', 'src/notice.js', 'fixed.txt'); box.git('commit', '-q', '-m', 'chore: fix noticed failure');
+  return { red, green: box.git('rev-parse', 'HEAD') };
+}
+
+/** Resume reads a real frozen criterion, unlike the small board-only history fixture. */
+function noticeHistory(box) {
+  const config = loadConfig(box.repo);
+  return history(box.file, { freeze: item => frozenCriterion(loadSpec(box.repo, config), item, loadDoctrine(box.repo, config)) });
+}
+
+test('a repeated cause tells the coordinator once [D1,D3]', () => {
+  const box = freshBoard();
+  const proof = noticeProof(box);
+  const historyBox = noticeHistory(box);
+  const cause = 'doctrine:C3';
+  const ids = ['First', 'Second', 'Third', 'After decline', 'Still quiet'].map(historyBox.add);
+  const notices = () => store.allShouts(historyBox.board).filter(shout => shout.shout_from === 'rigor');
+  historyBox.submit(ids[0], proof.red); historyBox.reject(ids[0], cause);
+  assert.equal(notices().length, 0);
+  historyBox.submit(ids[1], proof.red); historyBox.reject(ids[1], cause);
+  assert.equal(notices().length, 1, 'the reject crossing the repeat threshold tells the coordinator');
+  assert.equal(notices()[0].shout_to, 'coordinator');
+  assert.ok(notices()[0].shout_text.includes(cause));
+  for (const id of ids.slice(0, 2)) assert.ok(notices()[0].shout_text.includes(`#${id}`));
+  assert.ok(notices()[0].shout_text.includes('pullboard rigor draft'));
+  assert.ok(notices()[0].shout_text.includes('--red <commit> --green <commit>'));
+  historyBox.submit(ids[2], proof.red); historyBox.reject(ids[2], cause);
+  assert.equal(notices().length, 1, 'a third failure posts no duplicate');
+  assert.equal(json(box, 'resume').rigor.undrafted.find(entry => entry.key === cause).items.length, 3);
+  const text = box.run('resume');
+  assert.equal(text.status, 0, text.stderr);
+  assert.ok(text.stdout.includes(`Rigor needs a proved draft: ${cause}`));
+  const draft = json(box, 'rigor', 'draft', cause, 'No TODO markers in source', '--check', 'grep -rn TODO src', '--red', proof.red, '--green', proof.green);
+  assert.equal(json(box, 'resume').rigor.undrafted.some(entry => entry.key === cause), false);
+  json(box, 'spec', 'decline', `doctrine:${draft.drafts[0].id}`, '--reason', 'This is not the rule we want');
+  historyBox.submit(ids[0], proof.green); historyBox.reject(ids[0], cause);
+  assert.equal(notices().length, 1, 'a new commit on an old item does not undo the person’s decline');
+  assert.equal(json(box, 'resume').rigor.undrafted.some(entry => entry.key === cause), false);
+  historyBox.submit(ids[3], proof.red); historyBox.reject(ids[3], cause);
+  assert.equal(notices().length, 2, 'a new item repeating after the decline tells the coordinator once');
+  historyBox.submit(ids[4], proof.red); historyBox.reject(ids[4], cause);
+  assert.equal(notices().length, 2);
+  const receipts = store.events(historyBox.board).filter(event => event.event_kind === 'rigor-notice');
+  assert.equal(receipts.length, 2);
+  assert.ok(receipts.every(event => event.event_by === 'rigor' && JSON.parse(event.event_detail).engine === RIGOR_NOTICE_ENGINE));
+  historyBox.close();
+});
+
+test('a Rigor draft reaches Needs-you with its proof [D1,D3,S1,P6]', () => {
+  const box = freshBoard();
+  const proof = noticeProof(box);
+  const historyBox = noticeHistory(box);
+  const ids = ['Product first', 'Product second'].map(historyBox.add);
+  for (const id of ids) { historyBox.submit(id, proof.red); historyBox.reject(id, 'row:G1'); }
+  historyBox.close();
+  const draft = json(box, 'rigor', 'draft', 'row:G1', 'The fixed file exists', '--check', 'test -f fixed.txt', '--red', proof.red, '--green', proof.green);
+  const source = readRigorSource(draft.drafts[0].line.split(' | source: ')[1]);
+  assert.equal(source.key, 'row:G1');
+  assert.deepEqual(source.evidence.items.map(item => item.id), ids);
+  assert.deepEqual([source.proof.red.commit, source.proof.red.exit, source.proof.green.commit, source.proof.green.exit], [proof.red, 1, proof.green, 0]);
+  const pending = json(box, 'resume');
+  const need = pending.needsYou.find(entry => entry.kind === 'rigor-draft');
+  assert.ok(need, 'the proved Rigor row is an individual Needs-you call');
+  assert.equal(need.target, `spec:${draft.drafts[0].id}`);
+  assert.equal(need.what, 'Approve or Decline');
+  assert.equal(need.cause, source.key);
+  assert.deepEqual(need.evidence, source.evidence);
+  assert.deepEqual(need.proof, source.proof);
+  assert.ok(need.text.includes('Rigor draft: The fixed file exists'));
+  assert.ok(need.text.includes(proof.red) && need.text.includes(proof.green));
+  assert.equal(pending.rigor.undrafted.length, 0);
+  assert.equal(pending.needsYou.filter(entry => entry.kind === 'draft').reduce((sum, entry) => sum + entry.count, 0),
+    json(box, 'spec').rows.filter(row => row.status === 'draft' && row.id !== draft.drafts[0].id).length, 'the generic draft count does not count the Rigor row twice');
+  json(box, 'spec', 'approve', draft.drafts[0].id);
+  assert.equal(json(box, 'resume').needsYou.some(entry => entry.kind === 'rigor-draft'), false, 'the person’s pending approval closes the call');
+  json(box, 'spec', 'apply');
+  const approved = json(box, 'spec').rows.find(row => row.id === draft.drafts[0].id);
+  assert.equal(approved.status, 'approved');
+  assert.equal(approved.gate, 'test -f fixed.txt');
+  assert.equal(json(box, 'resume').rigor.undrafted.length, 0);
+});
+
+test('automatic Rigor notices retain old replay and include reopen and never-again [D1,H16]', () => {
+  const box = freshBoard();
+  const historyBox = history(box.file);
+  historyBox.board.executionEngineVersion = RIGOR_NOTICE_ENGINE - 1;
+  const old = ['Old first', 'Old second'].map(historyBox.add);
+  for (const id of old) { historyBox.submit(id); historyBox.reject(id, 'row:G1'); }
+  assert.equal(store.allShouts(historyBox.board).filter(shout => shout.shout_from === 'rigor').length, 0,
+    'engine42 replay keeps its old event stream without automatic notices');
+  delete historyBox.board.executionEngineVersion;
+  const fresh = ['Reopened first', 'Reopened second'].map(historyBox.add);
+  for (const id of fresh) {
+    historyBox.submit(id);
+    store.reopen(historyBox.board, id, { agentId: 'coordinator', note: 'A typed product failure', cause: 'row:G2' });
+  }
+  assert.equal(store.allShouts(historyBox.board).filter(shout => shout.shout_from === 'rigor').length, 1);
+  const one = historyBox.add('One item, two commits');
+  historyBox.submit(one); historyBox.reject(one, 'refusal:UNDECLARED_REFUSAL');
+  historyBox.submit(one); historyBox.reject(one, 'refusal:UNDECLARED_REFUSAL');
+  assert.equal(store.allShouts(historyBox.board).filter(shout => shout.shout_from === 'rigor').length, 2);
+  store.appendFact(historyBox.board, one, { agentId: 'coordinator', kind: 'root-cause', text: 'Never again',
+    cause: 'doctrine:C4', neverAgain: true, asPerson: true, channel: 'terminal' });
+  assert.equal(store.allShouts(historyBox.board).filter(shout => shout.shout_from === 'rigor').length, 3,
+    'a person never-again tells the coordinator without waiting for a second item');
+  const conflicts = ['Conflict first', 'Conflict second'].map(historyBox.add);
+  for (const id of conflicts) { historyBox.submit(id); historyBox.reject(id, 'refusal:MERGE_CONFLICT'); }
+  assert.equal(store.allShouts(historyBox.board).filter(shout => shout.shout_from === 'rigor').length, 3);
+  historyBox.close();
+});
+
+test('unreadable historical decline metadata cannot abort or silence a repeated cause [D1,H16,M1]', () => {
+  const box = freshBoard();
+  const recorded = history(box.file);
+  recorded.board.executionEngineVersion = RIGOR_NOTICE_ENGINE - 1;
+  for (const id of ['Historical first', 'Historical second'].map(recorded.add)) {
+    recorded.submit(id); recorded.reject(id, 'row:G1');
+  }
+  const events = store.events(recorded.board);
+  const trigger = events.at(-1);
+  const cause = rigorReport(events, { person: store.PERSON }).causes[0];
+  const proof = { check: 'test -f fixed', red: { commit: 'a'.repeat(40), exit: 1 }, green: { commit: 'b'.repeat(40), exit: 0 } };
+  const row = `- G9 [draft, must] A proved rule | source: ${rigorSource(cause, proof)}`;
+  const declined = source => [...events, { event_id: trigger.event_id + 1, event_kind: 'row_decision', event_by: store.PERSON,
+    item_id: null, event_detail: JSON.stringify({ record: { decision: 'decline', source } }) }];
+  const state = { spec: [], practice: [] };
+  assert.deepEqual(undraftedRigor(declined(row), state, { person: store.PERSON }), [], 'a valid typed decline still stays quiet');
+  for (const source of [undefined, 'ordinary prose', `<!-- pullboard-grammar 999 -->\n${row}`]) {
+    const historical = declined(source);
+    assert.deepEqual(newRigorNotices(historical, trigger, { person: store.PERSON }).map(entry => entry.key), ['row:G1'],
+      'unknown provenance neither refuses the item move nor suppresses the notice');
+    assert.deepEqual(undraftedRigor(historical, state, { person: store.PERSON }).map(entry => entry.key), ['row:G1']);
+  }
+  recorded.close();
+});
 
 test('a repeated failure cause is noticed [D1,V1]', () => {
   const box = freshBoard();
@@ -369,7 +518,7 @@ test('a repeated cause becomes a draft row with its proof [D1,D3,S1,P6]', async 
   assert.equal(work.drafts.length, 1);
   const [doctrineRow] = work.drafts;
   assert.equal(doctrineRow.file, 'DOCTRINE.md');
-  assert.equal(doctrineRow.line, `- ${doctrineRow.id} [draft, must] No TODO markers in shipped source Why: rigor doctrine:C3 failed on #${workA}, #${workB}; red at ${bad}, green at ${fix}. | gate: check grep -rn TODO src | count: 0`);
+  assert.equal(doctrineRow.line.split(' | source: ')[0], `- ${doctrineRow.id} [draft, must] No TODO markers in shipped source Why: rigor doctrine:C3 failed on #${workA}, #${workB}; red at ${bad}, green at ${fix}. | gate: check grep -rn TODO src | count: 0`);
   assert.ok(readFileSync(join(box.repo, 'DOCTRINE.md'), 'utf8').includes(doctrineRow.line), 'the row is written into DOCTRINE.md');
   assert.equal(readFileSync(join(box.repo, 'SPEC.md'), 'utf8'), specBefore, 'a work cause writes no spec row');
 
@@ -380,7 +529,8 @@ test('a repeated cause becomes a draft row with its proof [D1,D3,S1,P6]', async 
   assert.equal(product.drafts.length, 1);
   const [specRow] = product.drafts;
   assert.equal(specRow.file, 'SPEC.md');
-  assert.equal(specRow.line, `- ${specRow.id} [draft, must] The fixed file exists Why: rigor row:G1 failed on #${productA}, #${productB}; red at ${bad}, green at ${fix}. | gate: test -f fixed.txt`);
+  assert.equal(specRow.line.split(' | source: ')[0], `- ${specRow.id} [draft, must] The fixed file exists Why: rigor row:G1 failed on #${productA}, #${productB}; red at ${bad}, green at ${fix}. | gate: test -f fixed.txt`);
+  assert.equal(readRigorSource(specRow.line.split(' | source: ')[1]).key, 'row:G1');
 
   // An unclear cause drafts both, and the person picks.
   const both = json(box, 'rigor', 'draft', bothKey, 'Page titles are escaped', ...flags("node --test test/page.test.js", bad, fix));

@@ -350,6 +350,7 @@ function recordEventContract() {
   withdraw(board, withdrawn, { agentId: coordinator, reason: 'duplicate fixture' });
   holdLane(board, 'view', { agentId: coordinator, reason: 'fixture hold' });
   releaseLane(board, 'view', { agentId: coordinator });
+  appendFact(board, first, { agentId: coordinator, kind: 'root-cause', text: 'A typed immediate Rigor format example', cause: 'doctrine:C3', neverAgain: true, asPerson: true, channel: 'terminal' });
   // A synthetic health observation exercises receipt fields only; the health tests prove scanning.
   const healthFinding = { key: `CLAIM_LAPSED:item:${corrected}`, cause: 'CLAIM_LAPSED', item: corrected,
     subject: `#${corrected}`, title: 'claim lapsed', since: '2026-10-17T19:00:00.000Z',
@@ -625,6 +626,7 @@ test('[A5] schema, versions, event kinds and event detail fields match live beha
     attempt: 'reporting agent',
     fact: 'author',
     guards: 'board',
+    'rigor-notice': 'rigor',
     shout: 'sender',
     pass: 'coordinator',
     answer: 'answerer',
