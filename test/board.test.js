@@ -930,6 +930,26 @@ test('a coordinator route edit starts a new rejection count [B15,B13]', () => {
   ]);
 });
 
+test('two send-backs at the strongest route keep the builder [B15,B13,H16]', () => {
+  const id = routed('Strong rework ownership', 'strong');
+  rejectRevision(id, SHA_A, 'first strong send-back: missing output');
+  rejectRevision(id, SHA_B, 'second strong send-back: output still wrong');
+  const item = store.getItem(board, id);
+  assert.deepEqual([item.item_status, item.item_route, item.item_owner], ['claimed', 'strong', 'web-1'], 'the second strong send-back stays with its builder');
+  assert.ok(item.item_lease_until > clock.now().toISOString(), 'the retained rework claim is live');
+  const events = store.events(board, { itemId: id });
+  assert.equal(events.filter(event => event.event_kind === 'escalate').length, 0, 'no strong-to-strong route event');
+  const facts = events.filter(event => event.event_kind === 'fact').map(event => JSON.parse(event.event_detail));
+  const fact = facts.find(entry => /two send-backs at the strongest route/iu.test(entry.text));
+  assert.ok(fact, 'the item records its strongest-route send-backs');
+  const rejections = store.verdictsFor(board, id).filter(entry => entry.verdict_decision === 'REJECT');
+  assert.equal(rejections.length, 2);
+  for (const rejection of rejections) assert.ok(fact.text.includes(String(rejection.verdict_id)), 'the fact names each rejection receipt');
+  const notices = store.allShouts(board).filter(entry => entry.shout_to === 'coordinator' && entry.shout_text.includes(`#${id} has two send-backs at the strongest route`));
+  assert.equal(notices.length, 1, 'one coordinator notice for the rejection pair');
+  assert.match(notices[0].shout_text, /it stays with web-1/u);
+});
+
 test('an item at strong stays at strong after more failures [B15,B13]', () => {
   const id = routed('Strong ceiling', 'strong');
   rejectRevision(id, SHA_A, 'strong reject one');
