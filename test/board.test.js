@@ -16,13 +16,15 @@ import { exportBoard } from '../src/exchange.js';
 import { main } from '../src/cli.js';
 import { briefFiles } from '../src/brief.js';
 import { JSON_SHAPES } from '../src/json.js';
-import { ENGINE_VERSION } from '../src/machine.js';
+import { AUTO_ESCALATE_ENGINE, ENGINE_VERSION } from '../src/machine.js';
 import { pathToFileURL } from 'node:url';
 import { unpackRelease } from './release-archive.js';
 
 const HOUR = 3_600_000;
 const SHA_A = 'a'.repeat(40);
 const SHA_B = 'b'.repeat(40);
+const SHA_C = 'c'.repeat(40);
+const SHA_D = 'd'.repeat(40);
 let board;
 let clock;
 
@@ -309,6 +311,22 @@ function submitted() {
  */
 const verdict = (id, fields) =>
   store.verify(board, id, { head: SHA_A, digest: 'digest:Page', policy: 'any', note: 'broke the fix; its test failed; restored it', ...fields });
+
+/** Submit one new revision and record its rejection on the item's real SQLite board [B15,V6].
+ *
+ * @param {number} id
+ * @param {string} commit
+ * @param {string} note
+ */
+function rejectRevision(id, commit, note) {
+  if (store.getItem(board, id).item_status === 'open') claimAs(id, 'web-1', 'web');
+  const item = store.getItem(board, id);
+  store.submit(board, id, { agentId: 'web-1', commit, tree: `tree-${commit[0]}` });
+  verdict(id, {
+    agentId: 'web-2', decision: 'REJECT', reason: 'TEST_FAILURE', note,
+    head: commit, digest: `digest:${item.item_title}`,
+  });
+}
 
 test('the builder never verifies its own work [V1]', () => {
   const id = submitted();
@@ -846,6 +864,109 @@ test('escalate frees an item one tier up, with what was tried attached [B15]', (
   assert.deepEqual(moves, ['attempt', 'escalate', 'escalate', 'escalate']);
   const first = store.events(board, { itemId: id }).find((event) => event.event_kind === 'escalate');
   assert.deepEqual(JSON.parse(first.event_detail), { from: 'light', to: 'mid', note: 'check failed twice', attempt: 'refs/pullboard/attempts/1/abc', model: 'unknown' }, 'the failure and the pinned attempt travel with it');
+});
+
+test('two failed attempts at a route escalate the item one route up [B15,B13]', () => {
+  const id = routed('Automatic escalation', 'light');
+  claimAs(id, 'web-1', 'web');
+  store.release(board, id, 'web-1');
+  rejectRevision(id, SHA_A, 'first reject: missing parser output');
+  assert.equal(store.getItem(board, id).item_route, 'light', 'a release is not a failed attempt');
+  assert.equal(store.events(board, { itemId: id }).filter((event) => event.event_kind === 'escalate').length, 0);
+
+  rejectRevision(id, SHA_B, 'second reject: parser still drops the row');
+  const item = store.getItem(board, id);
+  assert.deepEqual([item.item_status, item.item_route, item.item_owner], ['open', 'mid', null]);
+  const escalations = store.events(board, { itemId: id }).filter((event) => event.event_kind === 'escalate');
+  assert.equal(escalations.length, 1, 'the second rejection writes one existing escalation event');
+  const detail = JSON.parse(escalations[0].event_detail);
+  assert.deepEqual([detail.from, detail.to], ['light', 'mid']);
+  assert.equal(detail.rejections.length, 2, 'the single escalation receipt carries both rejections');
+  assert.deepEqual(detail.rejections.map((entry) => entry.note), [
+    'first reject: missing parser output', 'second reject: parser still drops the row',
+  ]);
+  assert.deepEqual(detail.rejections.map((entry) => entry.reason), ['TEST_FAILURE', 'TEST_FAILURE']);
+  assert.deepEqual(detail.rejections.map((entry) => [entry.commit, entry.head]), [[SHA_A, SHA_A], [SHA_B, SHA_B]]);
+  assert.ok(detail.rejections.every((entry) => entry.verdictId && entry.eventId && entry.digest && entry.at));
+});
+
+test('a hand escalation starts a new route rejection count [B15,B13]', () => {
+  const id = routed('Manual route reset', 'light');
+  rejectRevision(id, SHA_A, 'old-route reject');
+  assert.equal(store.getItem(board, id).item_route, 'light');
+  store.escalate(board, id, { agentId: 'coordinator', note: 'manual route handoff' });
+
+  rejectRevision(id, SHA_B, 'first mid-route reject');
+  assert.equal(store.getItem(board, id).item_route, 'mid', 'the prior light rejection does not carry over');
+  assert.equal(store.events(board, { itemId: id }).filter((event) => event.event_kind === 'escalate').length, 1);
+  rejectRevision(id, SHA_C, 'second mid-route reject');
+  assert.equal(store.getItem(board, id).item_route, 'strong');
+  const escalations = store.events(board, { itemId: id }).filter((event) => event.event_kind === 'escalate');
+  assert.equal(escalations.length, 2);
+  assert.deepEqual(JSON.parse(escalations[1].event_detail).rejections.map((entry) => entry.note), [
+    'first mid-route reject', 'second mid-route reject',
+  ]);
+});
+
+test('a coordinator route edit starts a new rejection count [B15,B13]', () => {
+  const id = routed('Edited route reset', 'light');
+  rejectRevision(id, SHA_A, 'old light-route reject');
+  store.editItem(board, id, { agentId: 'coordinator', route: 'mid' });
+
+  rejectRevision(id, SHA_B, 'first edited mid-route reject');
+  assert.equal(store.getItem(board, id).item_route, 'mid');
+  assert.equal(store.events(board, { itemId: id }).filter((event) => event.event_kind === 'escalate').length, 0);
+
+  rejectRevision(id, SHA_C, 'second edited mid-route reject');
+  assert.equal(store.getItem(board, id).item_route, 'strong');
+  const escalations = store.events(board, { itemId: id }).filter((event) => event.event_kind === 'escalate');
+  assert.equal(escalations.length, 1);
+  assert.deepEqual(JSON.parse(escalations[0].event_detail).rejections.map((entry) => entry.note), [
+    'first edited mid-route reject', 'second edited mid-route reject',
+  ]);
+});
+
+test('an item at strong stays at strong after more failures [B15,B13]', () => {
+  const id = routed('Strong ceiling', 'strong');
+  rejectRevision(id, SHA_A, 'strong reject one');
+  rejectRevision(id, SHA_B, 'strong reject two');
+  assert.equal(store.getItem(board, id).item_route, 'strong');
+  rejectRevision(id, SHA_C, 'strong reject three');
+  rejectRevision(id, SHA_D, 'strong reject four');
+  assert.equal(store.getItem(board, id).item_route, 'strong');
+  const escalations = store.events(board, { itemId: id }).filter((event) => event.event_kind === 'escalate');
+  assert.equal(escalations.length, 2, 'each pair records one ceiling escalation');
+  assert.ok(escalations.every((event) => {
+    const detail = JSON.parse(event.event_detail);
+    return detail.from === 'strong' && detail.to === 'strong' && detail.rejections.length === 2;
+  }));
+});
+
+test('engine 40 reject moves replay without automatic escalation [B15,H16]', () => {
+  const id = routed('Legacy engine', 'light');
+  const legacyFreeze = (item) => ({
+    text: JSON.stringify({
+      criterion: item.item_criterion,
+      policy: { version: 1, commit: SHA_A, verify: { policy: 'any', family: 'off' } },
+    }),
+    digest: `digest:${item.item_title}`,
+  });
+  let sequence = 0;
+  const applyLegacyMove = (operation, args) => {
+    sequence += 1;
+    const move = prepareEngineMove(board, operation, args, { id: `engine-40-auto-escalation-${sequence}` });
+    move.engine = AUTO_ESCALATE_ENGINE - 1;
+    const result = applyEngineMove(board, move, { sequence, at: `2026-10-18T00:00:0${sequence}.000Z` });
+    assert.equal(result.error, undefined, `${operation} replays on engine 40`);
+  };
+  applyLegacyMove('claim', [id, { agentId: 'web-1', lane: 'web', leaseMs: HOUR, freeze: legacyFreeze }]);
+  applyLegacyMove('submit', [id, { agentId: 'web-1', commit: SHA_A, tree: 'tree-a' }]);
+  applyLegacyMove('verify', [id, { agentId: 'web-2', decision: 'REJECT', reason: 'TEST_FAILURE', note: 'legacy reject one', head: SHA_A, digest: `digest:${store.getItem(board, id).item_title}`, policy: 'any' }]);
+  applyLegacyMove('claim', [id, { agentId: 'web-1', lane: 'web', leaseMs: HOUR, freeze: legacyFreeze }]);
+  applyLegacyMove('submit', [id, { agentId: 'web-1', commit: SHA_B, tree: 'tree-b' }]);
+  applyLegacyMove('verify', [id, { agentId: 'web-2', decision: 'REJECT', reason: 'TEST_FAILURE', note: 'legacy reject two', head: SHA_B, digest: `digest:${store.getItem(board, id).item_title}`, policy: 'any' }]);
+  assert.equal(store.getItem(board, id).item_route, 'light');
+  assert.equal(store.events(board, { itemId: id }).filter((event) => event.event_kind === 'escalate').length, 0);
 });
 
 test('a fresh claim records where the work started; submit records what it changed, reworks included [N21]', () => {

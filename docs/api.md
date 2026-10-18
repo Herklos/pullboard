@@ -214,6 +214,10 @@ The current release is the roadmap's first milestone with unverified local work;
 
 `pullboard.json` sets the thresholds under `health`, each a duration like `90m`, `2h` or `1d`: `stuck` (default `1h`), `holds` (default `1d`) and `release` (default `1d`). A value that is not a duration is refused as `BAD_CONFIG`.
 
+## Automatic escalation
+
+Starting with engine 41, the second REJECT verdict since an item's latest route change records the existing escalation move automatically. Releases do not count as failed attempts. One `escalate` event carries both rejection records, including their reason, note, commit, digest, checked head and timestamp. A hand escalation or a route edit starts a new count; strong remains the ceiling. Sealed operations from engines below 41 retain their prior replay behavior.
+
 ## Item threads
 
 `pullboard fact <id> <kind> "<text>"` appends a fact to an existing item. The observation kinds are `capture`, `measurement`, `note` and `diff`; any registered agent may append them. The judgement kinds are `decision`, `rejection`, `supersession` and `root-cause`; only the item's live lease holder or the coordinator may append them. An expired lease gives no judgement permission. Facts do not change the item's status or its claim.

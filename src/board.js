@@ -15,7 +15,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { boardNotWritable } from './board-access.js';
 import { briefFiles, briefSections } from './brief.js';
 import { COORDINATOR } from './config.js';
-import { ENGINE_VERSION, VERDICT_REVIEW_ENGINE, GUARDS, IN_STATE, MOVES, STATES, UNKNOWN_MOVE, effectiveGuards, storeTriggers } from './machine.js';
+import { AUTO_ESCALATE_ENGINE, ENGINE_VERSION, VERDICT_REVIEW_ENGINE, GUARDS, IN_STATE, MOVES, STATES, UNKNOWN_MOVE, effectiveGuards, storeTriggers } from './machine.js';
 import { Refused } from './refused.js';
 import { causeProblem, requireNeverAgain } from './rigor.js';
 import { barCorrectionFields } from './bar-corrections.js';
@@ -998,10 +998,10 @@ const onlyCoordinator = (agentId, what) => (agentId === COORDINATOR ? null : new
  *
  * @param {any} board
  * @param {number} id
- * @param {{ agentId: string, note: string, attempt?: string }} why
+ * @param {{ agentId: string, note: string, attempt?: string, rejections?: object[] }} why
  * @returns {{ from: string, to: string }}
  */
-export function escalate(board, id, { agentId, note, attempt = '' }) {
+export function escalate(board, id, { agentId, note, attempt = '', rejections }) {
   return atomic(board, () => {
     const nextRoute = (route) => ROUTES[Math.min(ROUTES.indexOf(route) + 1, ROUTES.length - 1)];
     const item = moveItem(board, id, 'escalate', {
@@ -1019,7 +1019,9 @@ export function escalate(board, id, { agentId, note, attempt = '' }) {
     });
     const from = item.item_route;
     const to = nextRoute(from);
-    logEvent(board, agentId, 'escalate', id, { from, to, note: note.trim(), ...(attempt ? { attempt } : {}) });
+    logEvent(board, agentId, 'escalate', id, {
+      from, to, note: note.trim(), ...(attempt ? { attempt } : {}), ...(rejections ? { rejections } : {}),
+    });
     return { from, to };
   });
 }
@@ -1475,6 +1477,61 @@ function reserveWithin(board, id, { agentId, leaseMs, policy, familyPolicy = 'of
   return getItem(board, id);
 }
 
+/** Return rejected verdict receipts since the item's most recent route change [B15,B13].
+ *
+ * @param {any} board
+ * @param {number} id
+ * @returns {object[]}
+ */
+function rejectionsSinceRouteChange(board, id) {
+  const thread = events(board, { itemId: id });
+  let lastRouteChange = -1;
+  for (const [index, event] of thread.entries()) {
+    if (event.event_kind === 'escalate') {
+      lastRouteChange = index;
+      continue;
+    }
+    if (event.event_kind === 'edit' && Object.hasOwn(JSON.parse(event.event_detail), 'route')) lastRouteChange = index;
+  }
+  const verdictEvents = thread.filter((event) => ['accept', 'reject'].includes(event.event_kind));
+  const verdicts = verdictsFor(board, id);
+  const byEvent = new Map(verdictEvents.map((event, index) => [event.event_id, verdicts[index]]));
+  return thread.slice(lastRouteChange + 1).flatMap((event) => {
+    if (event.event_kind !== 'reject') return [];
+    const verdict = byEvent.get(event.event_id);
+    if (!verdict || verdict.verdict_decision !== 'REJECT') return [];
+    return [{
+      eventId: event.event_id,
+      verdictId: verdict.verdict_id,
+      by: verdict.verdict_by,
+      reason: verdict.verdict_reason,
+      note: verdict.verdict_note,
+      commit: verdict.verdict_commit,
+      digest: verdict.verdict_digest,
+      head: verdict.verdict_head,
+      at: verdict.verdict_at,
+    }];
+  });
+}
+
+/** Automatically apply the existing escalation move when the current route has two rejects [B15].
+ *
+ * @param {any} board
+ * @param {number} id
+ * @param {number} engine
+ */
+function autoEscalateRejectedItem(board, id, engine) {
+  if (engine < AUTO_ESCALATE_ENGINE) return;
+  const rejections = rejectionsSinceRouteChange(board, id).slice(-2);
+  if (rejections.length < 2) return;
+  const item = itemById(board, id);
+  escalate(board, id, {
+    agentId: COORDINATOR,
+    note: `Two REJECT verdicts at the ${item.item_route} route`,
+    rejections,
+  });
+}
+
 /**
  * Record a verdict on submitted work, or a sealed re-review of unlanded work (E8,V1,V3,V8).
  * An accept verifies it; a reject
@@ -1548,6 +1605,7 @@ export function verify(board, id, { agentId, decision, reason, note = '', cause,
     if (isAccept && check !== undefined) detail.check = check;
     if (newReview) detail.review = { commit: review.commit, ...(Object.hasOwn(review, 'head') ? { head: review.head } : {}), trunk: review.trunk, paths: [...review.paths] };
     logEvent(board, agentId, verb, id, implies?.length ? { ...detail, implies } : detail);
+    if (!isAccept) autoEscalateRejectedItem(board, id, engine);
     tellVerdictImplications(board, (by, itemId, fact) => logEvent(board, by, 'fact', itemId, fact), id, { seed: impliesId, implies });
     return { decision, reason: code, ...(isAccept && check !== undefined ? { check } : {}) };
   });

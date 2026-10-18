@@ -10,7 +10,10 @@
  */
 
 /** Executable move semantics, carried by every sealed move and retained during replay [H16]. */
-export const ENGINE_VERSION = 33;
+export const ENGINE_VERSION = 41;
+
+/** First engine that automatically escalates an item's second rejection at its current route [B15]. */
+export const AUTO_ESCALATE_ENGINE = 41;
 
 /** The engine at which a reject, reopen or person fact can carry a cause key (#713); older moves replay unchanged [D1,H16]. */
 export const CAUSE_ENGINE = 30;
