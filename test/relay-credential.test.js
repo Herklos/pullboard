@@ -23,6 +23,9 @@ test('every current operation selects its native actor credential without a seco
     if (operation === 'release') args = [999999, actor];
     if (['claim', 'refreeze'].includes(operation)) args = [box.before.tables.item[0].item_id, options];
     if (operation === 'reserveNextReview') args = [options];
+    if (operation === 'recordHealthFindings') args = [{ agentId: actor, observedRevision: 0, findings: [] }];
+    // This missing-item fixture still supplies modern proof metadata before testing submit's transport credential.
+    if (operation === 'submit') args = [999999, { ...options, submissionProof: { version: 1, files: [], full: false, deferred: false, reason: '' } }];
     if (operation === 'completeCheckBaseline') args = [999999, { ...options,
       expected: { command: 'true', main: 'a'.repeat(40), result: 'pending', request: '11111111-1111-4111-8111-111111111111' },
       baseline: { command: 'true', main: 'a'.repeat(40), result: 'green' },
@@ -36,6 +39,8 @@ test('every current operation selects its native actor credential without a seco
     return { operation, args, kind, ...(kind === 'person' ? { sent: false } : {}) };
   });
   cases.push(
+    { operation: 'recordHealthFindings', args: [{ observedRevision: 0, findings: [] }], kind: 'agent', sent: false, expected: 'RELAY_ACTOR' },
+    { operation: 'submit', args: [999999, options], kind: 'agent', sent: false, expected: 'SUBMISSION_PROOF' },
     { operation: 'answerDecision', args: [999999, { ...options, asPerson: true, channel: 'terminal' }], kind: 'person', sent: false },
     { operation: 'holdLane', args: [box.lane, { ...options, asPerson: true, channel: 'terminal' }], kind: 'person', sent: false },
     { operation: 'releaseLane', args: [box.lane, { ...options, asPerson: true, channel: 'terminal' }], kind: 'person', sent: false },
@@ -66,13 +71,13 @@ test('every current operation selects its native actor credential without a seco
   }
   const records = box.moveAcks.slice(start);
   const sentCases = cases.filter(entry => entry.sent !== false);
-  assert.equal(records.length, sentCases.length, 'agent and machine moves are acknowledged; person-only moves stop before transport');
+  assert.equal(records.length, sentCases.length, 'valid agent and machine moves are acknowledged; invalid and person-only moves stop before transport');
   const key = decodeBoardKey(readFileSync(box.keyFile, 'utf8').trim());
   const state = JSON.parse(readFileSync(box.linkFile, 'utf8'));
   let recordIndex = 0;
   for (const [index, entry] of cases.entries()) {
     if (entry.sent === false) {
-      assert.equal(results[index], entry.expected ?? 'HUMAN_REQUIRED', `${entry.operation} cannot use the saved machine credential for a person action`);
+      assert.equal(results[index], entry.expected ?? 'HUMAN_REQUIRED', `${entry.operation} retains its exact refusal before transport`);
       continue;
     }
     const record = records[recordIndex++];
