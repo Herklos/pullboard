@@ -107,6 +107,28 @@ test('a landing escape is proposed as a submit invariant [C7,V4]', async () => {
     assert.throws(() => store.recordLandingBatch(board, { agentId: 'coordinator', revision: previous.revision,
       batch: { ...previous, invariantEvidence: { ...previous.invariantEvidence, gates: [] } } }), { code: 'LAND_EVIDENCE' });
     assert.equal(store.events(board).length, eventCount, 'a prior receipt cannot be removed or rewritten');
+    // Modern evidence names Git OIDs, whose full hexadecimal shape is SHA-1 or SHA-256.
+    for (const length of [41, 63]) for (const field of ['gate', 'submission', 'diagnostic']) {
+      const malformed = structuredClone(previous);
+      if (field === 'diagnostic') {
+        malformed.invariantEvidence.diagnostics.push({ commit: 'e'.repeat(length), test: 'test/oid.test.js', isGreen: true, wallMs: 1 });
+      } else {
+        const gate = structuredClone(previous.invariantEvidence.gates[0]);
+        if (field === 'gate') gate.commit = 'e'.repeat(length);
+        else gate.submissions[0].commit = 'e'.repeat(length);
+        malformed.invariantEvidence.gates.push(gate);
+      }
+      assert.throws(() => store.recordLandingBatch(board, { agentId: 'coordinator', revision: previous.revision, batch: malformed }),
+        { code: 'LAND_EVIDENCE' }, `${field} evidence rejects a ${length}-digit pseudo-commit`);
+      assert.equal(store.events(board).length, eventCount, 'malformed exact-commit evidence adds no event');
+      assert.deepEqual(store.landingBatches(board).find(batch => batch.id === previous.id), previous, 'malformed evidence preserves its prior revision');
+    }
+    const oid = 'f'.repeat(64);
+    const valid = { ...previous, id: 'sha256-evidence-control', invariantEvidence: { version: 1,
+      gates: [{ commit: oid, isGreen: true, submissions: [{ id: submit.id, commit: oid }], failures: [], fileTimes: [] }],
+      diagnostics: [{ commit: oid, test: 'test/oid.test.js', isGreen: true, wallMs: 1 }] } };
+    const accepted = store.recordLandingBatch(board, { agentId: 'coordinator', batch: valid });
+    assert.deepEqual(accepted.invariantEvidence, valid.invariantEvidence, '64-digit SHA-256 evidence remains representable; existing 40-digit receipts stay intact');
   });
   const untouchedConfig = readFileSync(configPath, 'utf8');
   const proposals = json(box, box.repo, 'status').submitInvariantProposals;

@@ -5,7 +5,7 @@ import { relative } from 'node:path';
 
 export const SUBMISSION_PROOF_ENGINE = 38;
 const BUDGET_MS = 60_000;
-const COMMIT = /^[a-f0-9]{40,64}$/u;
+const COMMIT = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u;
 
 /** Accept only literal project-relative paths that can be displayed and configured safely. */
 function projectFile(value) {
