@@ -1,5 +1,8 @@
 /** Versioned command results and refusals for tools that drive the CLI (A1). */
-import { nextStepFor } from './next-steps.js';
+import {
+  nextStepFor,
+  personRequestGuidance,
+} from './next-steps.js';
 
 /** A shape's required top-level fields; optional fields may be added within this version. */
 function shape(fields) {
@@ -121,11 +124,11 @@ export const JSON_SHAPES = {
   errorFields: { code: 'string', message: 'string', next: 'string' },
 };
 
-/** A refusal shared by the CLI and API, retaining its rule and repair guidance (A1, A2). */
-export function refusalDocument(error) {
+/** A refusal shared by the CLI and API, presenting guidance for a known caller without changing its receipt (A1, A2, B26). */
+export function refusalDocument(error, options = {}) {
   const message = String(error.message).replace(/^\[[A-Z][A-Z0-9_]*\] /, '');
   const code = error.code ?? 'INTERNAL';
-  return { version: JSON_SHAPES.version, error: { code, message, next: nextStepFor({ code, next: error.next }, message) } };
+  return { version: JSON_SHAPES.version, error: { code, message: personRequestGuidance(message, options), next: nextStepFor({ code, next: error.next }, message, options) } };
 }
 
 /**
@@ -137,6 +140,8 @@ export function commandOutput(argv, streams) {
   let result;
   let refusal;
   let remote;
+  let caller = 'unknown';
+  let callerRoot;
   let written = false;
   const messages = [];
   const diagnostics = [];
@@ -152,7 +157,7 @@ export function commandOutput(argv, streams) {
       const text = refusal?.message ?? [...diagnostics, ...messages].join('\n');
       const match = /\[([A-Z][A-Z0-9_]*)\]\s*([\s\S]*)/.exec(text);
       const message = refusal ? text.replace(/^\[[A-Z][A-Z0-9_]*\] /, '') : match?.[2] ?? text;
-      document = refusalDocument({ code: refusal?.code ?? match?.[1] ?? (code === 2 ? 'USAGE' : 'COMMAND_FAILED'), message, next: refusal?.next });
+      document = refusalDocument({ code: refusal?.code ?? match?.[1] ?? (code === 2 ? 'USAGE' : 'COMMAND_FAILED'), message, next: refusal?.next }, { caller });
     } else if (result !== undefined) {
       document = { version: JSON_SHAPES.version, ...result, ...(diagnostics.length ? { diagnostics } : {}) };
     } else {
@@ -175,6 +180,12 @@ export function commandOutput(argv, streams) {
     err: (line) => emit(streams.stderr, diagnostics, line),
     result: (value) => { result = value; },
     refusal: (error) => { refusal = error; },
+    // A successfully checked person channel stays the display caller for this command.
+    caller: (value, root) => { if (caller !== 'person') { caller = value; callerRoot = root; } },
+    callerKnown: (root) => caller === 'person' || caller !== 'unknown' && callerRoot === root,
+    callerRole: () => caller,
+    guidance: (message, options = {}) => personRequestGuidance(message, { ...options, caller }),
+    refusalDocument: (error) => refusalDocument(error, { caller }),
     remote: (value) => { remote = value; },
     exitCode: (code) => code || (remote ? 1 : 0),
     jsonMode: (value) => { enabled = Boolean(value); },
