@@ -10,13 +10,13 @@
  */
 
 /** Executable move semantics, carried by every sealed move and retained during replay [H16]. */
-export const ENGINE_VERSION = 42;
+export const ENGINE_VERSION = 48;
 
 /**
  * The engine whose relay moves carry seat provenance and verifier standing (#579). It is its own
  * constant because engine slots are allotted per item: whoever lands second renumbers this line.
  */
-export const VERIFIER_STANDING_ENGINE = 35;
+export const VERIFIER_STANDING_ENGINE = 48;
 
 /** The engine at which reject, reopen and person facts may carry cause keys [D1,H16]. */
 export const CAUSE_ENGINE = 30;
@@ -148,7 +148,7 @@ export const GUARDS = [
   { id: 'atSubmittedCommit', refuse: 'NOT_AT_COMMIT', alsoRefuses: [{ code: 'OUTSIDE_LANE', next: 'restore foreign paths before accepting' }, { code: 'NO_POLICY', next: 'restore the frozen policy objects' }, { code: 'BAD_CONFIG', next: 'repair the committed coordinator configuration' }, { code: 'GIT_GRAFTS', next: 'ask the coordinator to remove the Git graft file before retrying' }], rule: "the caller's checkout contains the submitted commit", next: 'git switch --detach <commit>', source: 'cli' },
   { id: 'verdictReviewRecorded', refuse: 'BAD_VERDICT_REVIEW', rule: 'a new review binds the submitted commit, its exact checked commit, a valid trunk commit and canonical candidate paths', next: 'restore the submitted Git objects and retry the review with current Pullboard', source: 'board' },
   { id: 'reviewTreeCurrent', refuse: 'STALE_VERDICT', alsoRefuses: [{ code: 'DIRTY', next: 'commit the reviewed composition before re-reviewing' }, { code: 'UNTRACKED', next: 'commit or ignore untracked files before re-reviewing' }, { code: 'VERDICT_TRUNK_MOVED', next: 'merge the latest main and re-review the clean composition' }], rule: 'a stale acceptance is re-reviewed at a clean HEAD containing the current trunk, which stays fixed through its check', next: 'merge current main into the submitted commit and re-review it', source: 'cli' },
-  { id: 'notBuilder', refuse: 'SELF_VERIFY', alsoRefuses: [{ code: 'VERIFIER_STANDING', next: 'the coordinator makes an independent verifier from the main checkout: pullboard worktree <lane> --model "<model name>"' }], rule: 'the caller did not build it; on a linked board, at engine 35 or newer, the caller was enrolled through the relay by a line of creating seats from the coordinator that includes neither the builder nor a machine join', next: 'another agent verifies it: pullboard next --verify', source: 'board' },
+  { id: 'notBuilder', refuse: 'SELF_VERIFY', alsoRefuses: [{ code: 'VERIFIER_STANDING', next: 'the coordinator makes an independent verifier from the main checkout: pullboard worktree <lane> --model "<model name>"' }], rule: 'the caller did not build it; on a linked board, at engine 48 or newer, the caller was enrolled through the relay by a line of creating seats from the coordinator that includes neither the builder nor a machine join', next: 'another agent verifies it: pullboard next --verify', source: 'board' },
   { id: 'policyAllows', refuse: 'COORDINATOR_VERIFIES', rule: "the repo's verify policy lets the caller verify this lane's work", next: 'the coordinator verifies it', source: 'board' },
   { id: 'familyAllows', refuse: 'O2_FAMILY_MATCH', rule: 'the builder and verifier have different declared families; an undeclared family counts as a match', next: 'ask the coordinator for a verifier from another declared family', source: 'board', when: 'only when verify.family is require' },
   { id: 'reviewFree', refuse: 'REVIEW_HELD', rule: 'no other agent holds its review under a live lease', next: 'pullboard next --verify, which passes over reviews another agent holds', source: 'board' },

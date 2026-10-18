@@ -7,12 +7,14 @@ import { applyEngineMove, prepareEngineMove } from '../src/engine.js';
 import { exportBoard, importBoard } from '../src/exchange.js';
 import { ENGINE_VERSION } from '../src/machine.js';
 import { VERIFIER_STANDING_ENGINE } from '../src/machine.js';
+import { RIGOR_NOTICE_ENGINE } from '../src/rigor-source.js';
 import { configProblems, defaults, loadConfig } from '../src/config.js';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 test('model declarations and event snapshots retain all recorded engine semantics [O8,O3,H16]', (t) => {
+  assert.ok(ENGINE_VERSION >= RIGOR_NOTICE_ENGINE, 'the next writer preserves every historical model snapshot through main engine 33');
   assert.ok(ENGINE_VERSION >= HEALTH_SENTINEL_ENGINE, 'the current writer retains the sentinel minimum and historical behavior');
   assert.ok(ENGINE_VERSION >= VERIFIER_STANDING_ENGINE, 'the current writer retains verifier standing');
   for (const version of Array.from({ length: ENGINE_VERSION }, (_, index) => index + 1)) {
