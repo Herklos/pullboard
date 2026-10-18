@@ -272,7 +272,10 @@ import {
   registerProjectAndLink,
   registeredProjectRootsSnapshot,
 } from './projects.js';
-import { milestoneRoadmap, roadmapEstimate } from './roadmap.js';
+import {
+  milestoneRoadmap,
+  roadmapEstimate,
+} from './roadmap.js';
 import {
   rigorLines,
   rigorReport,
