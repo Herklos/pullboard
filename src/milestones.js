@@ -22,7 +22,7 @@ import {
 } from './board.js';
 
 /** The engine at which a milestone carries a target and ships; older moves replay as they did. */
-export const MILESTONE_SHIP_ENGINE = 39;
+export const MILESTONE_SHIP_ENGINE = 45;
 
 /** The engine a move runs under: its recorded one during replay, else this client's. */
 function engineOf(board) {
@@ -246,7 +246,7 @@ export function moveMilestone(board, name, { agentId, before }) {
 
 /**
  * Rename a milestone, update its note, or set its target without touching its items. A target is
- * an engine-39 meaning, so an older engine's edit replays exactly as it did.
+ * an engine-45 meaning, so an older engine's edit replays exactly as it did.
  */
 export function editMilestone(board, name, { agentId, newName, note, target }) {
   requireCoordinator(agentId);

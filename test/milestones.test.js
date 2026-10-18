@@ -7,6 +7,7 @@ import { join, resolve } from 'node:path';
 import { after, test } from 'node:test';
 import * as store from '../src/board.js';
 import { submitFixture } from './board-submit-fixture.js';
+import { ENGINE_VERSION } from '../src/machine.js';
 
 const BIN = resolve(import.meta.dirname, '../bin/pullboard.js');
 const HOUR = 3_600_000;
@@ -211,7 +212,7 @@ test('[N26] milestone ship leaves external references in place and names them as
     'human output names every foreign reference that stayed in place');
 });
 
-test('[N26,H16] engine 38 cannot ship a milestone or set its target', async (t) => {
+test('[N26,H16] engine 44 cannot ship a milestone or set its target', async (t) => {
   const box = fixture(t);
   box.json('milestone', 'add', 'A');
   box.json('milestone', 'add', 'B');
@@ -220,18 +221,18 @@ test('[N26,H16] engine 38 cannot ship a milestone or set its target', async (t) 
   const main = box.git('rev-parse', 'main');
   const moves = [
     prepareEngineMove(box.board, 'shipMilestone', ['A', { agentId: 'coordinator', commit: main, next: 'B' }],
-      { id: 'engine38-milestone-ship', actor: 'coordinator' }),
+      { id: 'engine44-milestone-ship', actor: 'coordinator' }),
     prepareEngineMove(box.board, 'editMilestone', ['A', { agentId: 'coordinator', target: '2026-10-20T18:00:00Z' }],
-      { id: 'engine38-milestone-target', actor: 'coordinator' }),
+      { id: 'engine44-milestone-target', actor: 'coordinator' }),
   ];
   const before = exportBoard(box.board);
 
   for (const move of moves) {
-    const oldEnvelope = { ...move, engine: 38 };
+    const oldEnvelope = { ...move, engine: 44 };
     assert.throws(() => applyEngineMove(box.board, oldEnvelope, { sequence: 1, at: '2026-10-17T12:00:00.000Z' }),
-      (error) => error.code === 'RELAY_MOVE' && /introduced in engine 39/u.test(error.message),
-      `${move.operation} was introduced in engine 39 and must not run as engine 38`);
-    assert.deepEqual(exportBoard(box.board), before, 'an unsupported engine-38 meaning changes no rows or event history');
+      (error) => error.code === 'RELAY_MOVE' && /introduced in engine 45/u.test(error.message),
+      `${move.operation} was introduced in engine 45 and must not run as engine 44`);
+    assert.deepEqual(exportBoard(box.board), before, 'an unsupported engine-44 meaning changes no rows or event history');
     assert.equal(appliedSequence(box.board), 0, 'pre-validation refusal does not advance the relay cursor');
     assert.equal(engineReceipt(box.board, move.id), null, 'pre-validation refusal creates no move receipt');
   }
@@ -256,8 +257,8 @@ test('[N26,H16] an older-engine client cannot add work after a milestone ships',
   assert.equal(added.error, undefined, 'an engine38 addition to an unshipped milestone stays replayable');
   assert.deepEqual(store.milestones(board)[1].items, [id]);
   const ship = prepareEngineMove(board, 'shipMilestone',
-    ['A', { agentId: 'coordinator', commit: '1'.repeat(40) }], { id: 'ship39', actor: 'coordinator' });
-  assert.equal(ship.engine, 39, 'the current milestone writer is exercised');
+    ['A', { agentId: 'coordinator', commit: '1'.repeat(40) }], { id: 'ship45', actor: 'coordinator' });
+  assert.equal(ship.engine, ENGINE_VERSION, 'the current milestone writer is exercised');
   const shipped = applyRelayMove(board, ship, { sequence: 2, at: '2026-10-18T01:00:01.000Z', sender, kind: 'move' });
   assert.equal(shipped.error, undefined, JSON.stringify(shipped));
   assert.equal(store.milestones(board)[0].shipped.commit, '1'.repeat(40));

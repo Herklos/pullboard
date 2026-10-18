@@ -262,7 +262,7 @@ async function checkDependencyLegacyClients(cleanup, directory, snapshot, target
 }
 
 test('dependency edits replay the same on every engine [B3,V2,H16]', async (t) => {
-  assert.ok(ENGINE_VERSION >= HEALTH_SENTINEL_ENGINE, 'the current writer retains the sentinel minimum and historical behavior');
+  assert.equal(ENGINE_VERSION, 45, 'the current writer retains historical behavior through engine 44');
   const directory = mkdtempSync(join(tmpdir(), 'pullboard-dependency-engines-'));
   const cleanup = [];
   t.after(() => {
