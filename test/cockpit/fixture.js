@@ -1124,7 +1124,7 @@ async function readRoadmap(chrome) {
           rows: [...card.querySelectorAll('.milestone-item')].map((row) => {
             const chip = row.querySelector('.chip'), title = row.querySelector('.t'), style = getComputedStyle(title), box = chip.getBoundingClientRect();
             return {
-              id: row.querySelector('.id').innerText, label: chip.innerText, tone: [...chip.classList].filter((name) => name !== 'chip').join(' '),
+              id: row.querySelector('.id').innerText, label: chip.innerText, tone: [...chip.classList].filter((name) => ['ok', 'no', 'warn', 'busy', 'free'].includes(name)).join(' '),
               seen: box.width > 0 && box.height > 0 && getComputedStyle(chip).visibility === 'visible',
               chip: paint(chip), dot: getComputedStyle(row.querySelector('.dot')).backgroundColor,
               button: row.matches('button,[role="button"]'), tip: row.title, title: [...title.childNodes].slice(1).map((node) => node.textContent).join(''),

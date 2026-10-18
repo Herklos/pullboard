@@ -953,6 +953,10 @@ test('the roadmap shows landed, accepted and past target [N26]', { timeout: 90_0
     assert.equal(await chrome.stable(`${milestone('State summary')}.querySelector('[data-summary-state=building] b').textContent`),'1');
     await chrome.stable("data.project.items=window.__originalItems;const m=data.project.milestones.find(m=>m.name==='State summary');m.items=window.__originalRoadmapItems;m.summary.estimate=null;m.summary.needsYou=[];render();true");
     assert.equal(await chrome.stable(`${milestone('State summary')}.querySelectorAll('.roadmap-estimate,.roadmap-pace,.roadmap-summary-needs').length`),0,'absent JSON omits forecast and person line');
+    // A hand-edited snapshot can contain malformed counts; those values must remain inert [C5].
+    await chrome.stable(`(()=>{const m=data.project.milestones.find(m=>m.name==='State summary');const value='"><img src=x onerror="window.__badRoadmapCount=true">';m.summary={...m.summary,total:value,landed:value,left:value};m.total=value;m.landed=value;render();return true})()`);
+    assert.equal(await chrome.stable("document.querySelectorAll('#roadmap img,[data-status=release] img').length"),0,'malformed supplied counts never become HTML');
+
     assert.deepEqual(chrome.exceptions,[]);
   } finally {if(chrome)await closeSnapshotChrome(chrome);rmSync(profile,{recursive:true,force:true});await view.stop();}
 
