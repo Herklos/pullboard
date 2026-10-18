@@ -2,28 +2,121 @@
  * The pullboard command line: every command, bound to who is asking (B3, R3). The main checkout is the
  * coordinator; every other worktree is the agent that joined from it.
  */
-import { createHash, randomUUID } from 'node:crypto';
-import { spawn, spawnSync } from 'node:child_process';
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
-import { hostname, loadavg } from 'node:os';
-import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import {
+  createHash,
+  randomUUID,
+} from 'node:crypto';
+import {
+  spawn,
+  spawnSync,
+} from 'node:child_process';
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  writeFileSync,
+} from 'node:fs';
+import {
+  hostname,
+  loadavg,
+} from 'node:os';
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+} from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import * as store from './board.js';
-import { CONFIG_FILE, COORDINATOR, DOCTRINE_FILE, LEGACY_DOCTRINE_FILE, loadConfig } from './config.js';
+import {
+  CONFIG_FILE,
+  COORDINATOR,
+  DOCTRINE_FILE,
+  LEGACY_DOCTRINE_FILE,
+  loadConfig,
+} from './config.js';
 import { displayAgentName } from './agent-names.js';
-import { doctrineHistory, loadDoctrine } from './doctrine.js';
-import { agentDoctrine, proposeDoctrine, resumeDoctrineNotes, staleDoctrineRows } from './doctrine-rulings.js';
-import { checkRulesAt, doctrineReport, hasSubmitRules, holdDoctrine, ruleLine } from './doctrine-checks.js';
-import { AGENT_SESSION_IDS, agentSessionDigest, requirePersonChannel } from './person.js';
-import { bindLocalSession, localSessionMatches, localSessionSeats } from './agent-session.js';
-import { decisionAnswer, decisionProjection, handAnsweredQuestions, pendingAnswers, planRowApply, prepareRowDecisions, restoreRowApply, writeRowApply } from './row-decisions.js';
+import {
+  doctrineHistory,
+  loadDoctrine,
+} from './doctrine.js';
+import {
+  agentDoctrine,
+  proposeDoctrine,
+  resumeDoctrineNotes,
+  staleDoctrineRows,
+} from './doctrine-rulings.js';
+import {
+  checkRulesAt,
+  doctrineReport,
+  hasSubmitRules,
+  holdDoctrine,
+  ruleLine,
+} from './doctrine-checks.js';
+import {
+  AGENT_SESSION_IDS,
+  agentSessionDigest,
+  requirePersonChannel,
+} from './person.js';
+import {
+  bindLocalSession,
+  localSessionMatches,
+  localSessionSeats,
+} from './agent-session.js';
+import {
+  decisionAnswer,
+  decisionProjection,
+  handAnsweredQuestions,
+  pendingAnswers,
+  planRowApply,
+  prepareRowDecisions,
+  restoreRowApply,
+  writeRowApply,
+} from './row-decisions.js';
+import {
+  digestOf,
+  gateReport,
+  refuseSandboxBlocked,
+  runGate,
+  runProfiledShell,
+  runSubmitGate,
+  submitGateReport,
+  timingDigest,
+  withGateSlot,
+} from './gate.js';
 import { draftRow } from './spec-draft.js';
-import { digestOf, gateReport, refuseSandboxBlocked, runGate, runProfiledShell, runSubmitGate, submitGateReport, timingDigest, withGateSlot } from './gate.js';
 import { gateWaitReporter } from './gate-wait.js';
-import { checkNeedsBrowser, explicitCheckFiles } from './browser-admission.js';
-import { bareWorktreeFinding, codeIsFromMain, contains, differFromHead, git, gitChildEnv, headCommit, headTree, invalidateGitFacts, isClean, mainCheckout, patchId, repoInfo, resolveCommit, tryGit, untracked, withGitFacts } from './git.js';
+import {
+  checkNeedsBrowser,
+  explicitCheckFiles,
+} from './browser-admission.js';
+import {
+  bareWorktreeFinding,
+  codeIsFromMain,
+  contains,
+  differFromHead,
+  git,
+  gitChildEnv,
+  headCommit,
+  headTree,
+  invalidateGitFacts,
+  isClean,
+  mainCheckout,
+  patchId,
+  repoInfo,
+  resolveCommit,
+  tryGit,
+  untracked,
+  withGitFacts,
+} from './git.js';
 import {
   FIX_NOTE,
   applyFixers,
@@ -35,20 +128,57 @@ import {
   pushesTrunk,
   unwiredHookProblems,
 } from './hooks.js';
-import { askedLaneNotes, detectGate, initRepo, proposeLanes, starterLane, starterLaneNotes } from './init.js';
+import {
+  askedLaneNotes,
+  detectGate,
+  initRepo,
+  proposeLanes,
+  starterLane,
+  starterLaneNotes,
+} from './init.js';
 import { lifecycleMarkdown } from './machine.js';
-import { HELP, VERSION } from './help.js';
-import { barCorrectionLine, barCorrections, barStatsLines } from './bar-corrections.js';
-import { checkImplies, decisionsImplying, parseImplies, takeDecisionNotices, whyLine } from './implies.js';
+import {
+  buildHelp,
+  VERSION,
+} from './help.js';
+import {
+  barCorrectionLine,
+  barCorrections,
+  barStatsLines,
+} from './bar-corrections.js';
+import {
+  checkImplies,
+  decisionsImplying,
+  parseImplies,
+  takeDecisionNotices,
+  whyLine,
+} from './implies.js';
 import { defaultViewPort } from './view-port.js';
-export { HELP, VERSION };
-import { productLine, productProblems, productSummaries } from './products.js';
-import { addLane, isLane, laneNames, laneOf, outOfLane } from './lanes.js';
+export { VERSION };
+import {
+  productLine,
+  productProblems,
+  productSummaries,
+} from './products.js';
+import {
+  addLane,
+  isLane,
+  laneNames,
+  laneOf,
+  outOfLane,
+} from './lanes.js';
 import { Refused } from './refused.js';
 import { personNeeds } from './needs.js';
 import { personNeedsState } from './needs-state.js';
-import { commitCitations, committedIds } from './history.js';
-import { promptFor, skillProblems, updateSkills } from './skills.js';
+import {
+  commitCitations,
+  committedIds,
+} from './history.js';
+import {
+  promptFor,
+  skillProblems,
+  updateSkills,
+} from './skills.js';
 import {
   frozenCriterion,
   idProblems,
@@ -62,53 +192,219 @@ import {
   standings,
   unmetRows,
 } from './spec.js';
-import { answerQuestion, bundledBlueprints, landBlueprint, planBlueprint, readBlueprint, repoAnswers, saveBlueprint } from './blueprints.js';
+import {
+  answerQuestion,
+  bundledBlueprints,
+  landBlueprint,
+  planBlueprint,
+  readBlueprint,
+  repoAnswers,
+  saveBlueprint,
+} from './blueprints.js';
 import { fitCommand } from './blueprint-fit-command.js';
-import { fitSummary, readFitBatch } from './blueprint-fit.js';
-import { blueprintStarterNote, combinedSummary, initBlueprintLines, initBlueprintResult, installedBlueprints, landEach, readBlueprints, sharedRowLines } from './blueprint-set.js';
+import {
+  fitSummary,
+  readFitBatch,
+} from './blueprint-fit.js';
+import {
+  blueprintStarterNote,
+  combinedSummary,
+  initBlueprintLines,
+  initBlueprintResult,
+  installedBlueprints,
+  landEach,
+  readBlueprints,
+  sharedRowLines,
+} from './blueprint-set.js';
 import { briefFiles } from './brief.js';
-import { commitFirst, commitOwnerLines, commitOwners, coordinatorInbox, coordinatorInboxLines, inboxFirst } from './resume.js';
-import { checkBaseline, prepareCheckBaseline, refuseCheckSyntax, sayCheckBaseline } from './check-baseline.js';
-import { checkAcceptCommand, refuseClaimProvesNothing, refuseProvesNothing } from './check-accept.js';
-import { retryCheckBaselines, startCheckBaseline } from './check-baseline-worker.js';
-import { alreadyAddedLine, initWaitingRows, startersCommand, waitingRowLines } from './blueprint-report.js';
-import { compareMainFailures, mainRedMessage, mainRedReworkItems } from './main-red.js';
+import {
+  commitFirst,
+  commitOwnerLines,
+  commitOwners,
+  coordinatorInbox,
+  coordinatorInboxLines,
+  inboxFirst,
+} from './resume.js';
+import {
+  checkBaseline,
+  prepareCheckBaseline,
+  refuseCheckSyntax,
+  sayCheckBaseline,
+} from './check-baseline.js';
+import {
+  checkAcceptCommand,
+  refuseClaimProvesNothing,
+  refuseProvesNothing,
+} from './check-accept.js';
+import {
+  retryCheckBaselines,
+  startCheckBaseline,
+} from './check-baseline-worker.js';
+import {
+  alreadyAddedLine,
+  initWaitingRows,
+  startersCommand,
+  waitingRowLines,
+} from './blueprint-report.js';
+import {
+  compareMainFailures,
+  mainRedMessage,
+  mainRedReworkItems,
+} from './main-red.js';
 import { runItems } from './run.js';
-import { parseProblems, sweepItems } from './sweep.js';
+import {
+  parseProblems,
+  sweepItems,
+} from './sweep.js';
 import { renderSpecView } from './view.js';
 import { tour } from './tour.js';
-import { commandOutput, refusalDocument } from './json.js';
-import { forgetProject, listApiProjects, registerProjectAndLink, registeredProjectRootsSnapshot } from './projects.js';
+import {
+  commandOutput,
+  refusalDocument,
+} from './json.js';
+import {
+  forgetProject,
+  listApiProjects,
+  registerProjectAndLink,
+  registeredProjectRootsSnapshot,
+} from './projects.js';
 import { milestoneRoadmap } from './roadmap.js';
-import { rigorLines, rigorReport } from './rigor.js';
+import {
+  rigorLines,
+  rigorReport,
+} from './rigor.js';
+import {
+  listResources,
+  memoryVerdict,
+  readMachineMemory,
+  runnerResourceStatus,
+} from './resources.js';
+import {
+  citedTestFiles,
+  rowEvidence,
+  rowStage,
+} from './evidence.js';
+import {
+  exportView,
+  serveView,
+} from './serve.js';
+import {
+  forgetView,
+  portHolder,
+  rememberView,
+  runningView,
+} from './view-session.js';
+import {
+  backgroundViewLine,
+  keepViewRunning,
+  launchBackgroundView,
+  reportView,
+} from './background-view.js';
 import { rigorDraft } from './rigor-draft.js';
-import { listResources, memoryVerdict, readMachineMemory, runnerResourceStatus } from './resources.js';
-import { citedTestFiles, rowEvidence, rowStage } from './evidence.js';
-import { exportView, serveView } from './serve.js';
-import { forgetView, portHolder, rememberView, runningView } from './view-session.js';
-import { backgroundViewLine, keepViewRunning, launchBackgroundView, reportView } from './background-view.js';
 import { serveApi } from './api.js';
 import { watchCommand } from './watch.js';
 import { serveMcp } from './mcp.js';
-import { doctorProblems, doctrineProblems } from './doctor.js';
-import { boardHealth, healthLines } from './health.js';
-import { staleFrozenItems, staleItemFinding } from './approved-rows.js';
-import { mainPolicy, policyAt, itemPolicy, submissionPaths, frozenCheck, checkAtCommit, dependencySnapshots, requireTrunkMerge, trunkRef } from './trusted-policy.js';
-import { captureVerdictReview, staleVerdictRefusal, verdictProjector, verdictTrunk } from './verdict-freshness.js';
+import {
+  doctorProblems,
+  doctrineProblems,
+} from './doctor.js';
+import {
+  boardHealth,
+  healthLines,
+} from './health.js';
+import {
+  staleFrozenItems,
+  staleItemFinding,
+} from './approved-rows.js';
+import {
+  mainPolicy,
+  policyAt,
+  itemPolicy,
+  submissionPaths,
+  frozenCheck,
+  checkAtCommit,
+  dependencySnapshots,
+  requireTrunkMerge,
+  trunkRef,
+} from './trusted-policy.js';
+import {
+  captureVerdictReview,
+  staleVerdictRefusal,
+  verdictProjector,
+  verdictTrunk,
+} from './verdict-freshness.js';
 import { proofStats } from './stats.js';
-import { flowLines, flowAlertLine } from './stats-flow.js';
+import {
+  flowLines,
+  flowAlertLine,
+} from './stats-flow.js';
 import { releaseHeadlinesBetween } from './changelog.js';
-import { exportBoard, importBoard } from './exchange.js';
+import {
+  exportBoard,
+  importBoard,
+} from './exchange.js';
 import { digestCommand } from './digest.js';
-import { addSigner, assertRequiredSigners, defaultPrincipal, hasSignerFile } from './signature.js';
-import { addRunner, browserFreeChecksEnabled, gateQueueSettings, gateShortSlots, loadMachineSettings, memoryFloorMB, relayOfferEnabled, setBrowserSlots, setGateShortSlots, setGateSlots } from './settings.js';
-import { formatSnapshotLimit, pendingSnapshotSize, pendingCheckpointProblem, relayCommandReceipt, relayCommandReceiptReported, relayLinked, relayOff, relayOn, relayOperation, relayRecover, relayRecovered, relayRevoke, relayStatus, relayTokens, syncRelay } from './relay.js';
-import { autoLinkProject, offerRelayAtInit, relayOnAllCommand, revokeRelayDevice, unlinkedRelayProjects } from './relay-setup.js';
-import { relayRoster, rosterLines } from './relay-roster.js';
-import { relayJoin, relayPair } from './relay-pairing-client.js';
+import {
+  addSigner,
+  assertRequiredSigners,
+  defaultPrincipal,
+  hasSignerFile,
+} from './signature.js';
+import {
+  addRunner,
+  browserFreeChecksEnabled,
+  gateQueueSettings,
+  gateShortSlots,
+  loadMachineSettings,
+  memoryFloorMB,
+  relayOfferEnabled,
+  setBrowserSlots,
+  setGateShortSlots,
+  setGateSlots,
+} from './settings.js';
+import {
+  formatSnapshotLimit,
+  pendingSnapshotSize,
+  pendingCheckpointProblem,
+  relayCommandReceipt,
+  relayCommandReceiptReported,
+  relayLinked,
+  relayOff,
+  relayOn,
+  relayOperation,
+  relayRecover,
+  relayRecovered,
+  relayRevoke,
+  relayStatus,
+  relayTokens,
+  syncRelay,
+} from './relay.js';
+import {
+  autoLinkProject,
+  offerRelayAtInit,
+  relayOnAllCommand,
+  revokeRelayDevice,
+  unlinkedRelayProjects,
+} from './relay-setup.js';
+import {
+  relayRoster,
+  rosterLines,
+} from './relay-roster.js';
+import {
+  relayJoin,
+  relayPair,
+} from './relay-pairing-client.js';
 import { executePersonRequests } from './relay-request-execution.js';
 import { engineReceipt } from './engine.js';
-import { accountedFailures, land, landingRemote, landingSubject, liveWaiverProjection, waivedFailures, waiverLine } from './land.js';
+import {
+  accountedFailures,
+  land,
+  landingRemote,
+  landingSubject,
+  liveWaiverProjection,
+  waivedFailures,
+  waiverLine,
+} from './land.js';
 import { installStep } from './worktree.js';
 
 export { gateWaitReporter };
@@ -4316,6 +4612,9 @@ export function resultCommands() {
     'help', 'version', 'tour', 'lifecycle', 'view', 'serve', 'watch', 'forget', 'spec', 'prompt', 'hook', 'gate', 'settings', 'runner', 'relay',
   ])].sort();
 }
+
+/** Command help follows the same dispatch declarations as execution. */
+export const HELP = buildHelp(resultCommands());
 
 // This marker is emitted once when the actual CLI entrypoint finishes evaluating.
 if (process.env.PULLBOARD_STARTUP_TRACE_ENTRY

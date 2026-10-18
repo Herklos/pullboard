@@ -3,12 +3,18 @@ import { join } from 'node:path';
 import * as store from './board.js';
 import { repoInfo } from './git.js';
 import { projectRowDecisions } from './row-decisions.js';
-import { pendingFit, projectFit } from './blueprint-fit.js';
+import {
+  pendingFit,
+  projectFit,
+} from './blueprint-fit.js';
 import { projectState } from './serve.js';
 import { loadConfig } from './config.js';
 import { loadSpec } from './spec.js';
 import { loadDoctrine } from './doctrine.js';
-import { rigorDraftNeeds, undraftedRigor } from './rigor-notices.js';
+import {
+  rigorDraftNeeds,
+  undraftedRigor,
+} from './rigor-notices.js';
 import { personNeeds } from './needs.js';
 
 /** Borrow an existing connection or open a read-only one; retain exact row-decision matching. */

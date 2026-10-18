@@ -1,7 +1,15 @@
 /** Automatic repeated-cause notices and proved rows waiting on the person [D1,D3,S1]. */
-import { causeProblem, eventCauses, isMergeConflict, rigorReport } from './rigor.js';
+import {
+  causeProblem,
+  eventCauses,
+  isMergeConflict,
+  rigorReport,
+} from './rigor.js';
 import { parseSpec } from './spec.js';
-import { readRigorSource, RIGOR_NOTICE_ENGINE } from './rigor-source.js';
+import {
+  readRigorSource,
+  RIGOR_NOTICE_ENGINE,
+} from './rigor-source.js';
 
 /** Cause keys carried by this move, including the person's immediate never-again fact. */
 export function rigorTriggerCauses(event, person) {

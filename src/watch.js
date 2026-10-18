@@ -10,7 +10,10 @@ import { setTimeout as pause } from 'node:timers/promises';
 import { basename } from 'node:path';
 import { serveApi } from './api.js';
 import { openBoardReadOnly } from './board.js';
-import { headCommit, withGitFacts } from './git.js';
+import {
+  headCommit,
+  withGitFacts,
+} from './git.js';
 import { isLane } from './lanes.js';
 import { fetchLocal } from './local-fetch.js';
 import { Refused } from './refused.js';

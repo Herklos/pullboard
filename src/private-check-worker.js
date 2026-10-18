@@ -1,6 +1,10 @@
 /** Collect private command output through pipes; dependency files are never size-limited [V18,V2]. */
 import { spawn } from 'node:child_process';
-import { createWriteStream, readFileSync, writeFileSync } from 'node:fs';
+import {
+  createWriteStream,
+  readFileSync,
+  writeFileSync,
+} from 'node:fs';
 
 const { command, timeout, pidFile, logPath } = JSON.parse(readFileSync(0, 'utf8'));
 const LIMIT = 8 * 1024 * 1024;
