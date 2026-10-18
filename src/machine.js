@@ -10,13 +10,16 @@
  */
 
 /** Executable move semantics, carried by every sealed move and retained during replay [H16]. */
-export const ENGINE_VERSION = 33;
+export const ENGINE_VERSION = 34;
 
 /** The engine at which a reject, reopen or person fact can carry a cause key (#713); older moves replay unchanged [D1,H16]. */
 export const CAUSE_ENGINE = 30;
 
 /** First released engine binding the checked composition, review trunk and paths [E8,H16]. */
 export const VERDICT_REVIEW_ENGINE = 33;
+
+/** First engine carrying explicit milestone ranks in build and review selection [N2,B13,H16]. */
+export const MILESTONE_RANK_ENGINE = 34;
 
 /** @typedef {'agent' | 'coordinator' | 'clock'} Role */
 
