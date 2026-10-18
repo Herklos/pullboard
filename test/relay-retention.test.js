@@ -13,6 +13,7 @@ import { createRelayJournal } from '../relay/journal.js';
 import { createRelayRetention } from '../relay/retention.js';
 import { serveRelay } from '../relay/service.js';
 import { githubFixture } from './relay-fixture.js';
+import { VERIFIER_STANDING_ENGINE } from '../src/machine.js';
 
 const DAY = 86_400_000;
 const A = 'a'.repeat(32);
@@ -60,7 +61,7 @@ async function fixture(t) {
   /** Return status/body without ever placing credentials in diagnostic text or URLs. */
   async function call(id, { path = '/state', method = 'GET', token = signed.token, body } = {}) {
     const response = await fetch('http://127.0.0.1:' + relay.port + '/api/v1/boards' + (id ? '/' + id + path : ''), {
-      method, headers: { 'x-pullboard-engine': '3', authorization: 'Bearer ' + token, ...(body ? { 'content-type': 'application/json' } : {}) },
+      method, headers: { 'x-pullboard-engine': String(VERIFIER_STANDING_ENGINE), authorization: 'Bearer ' + token, ...(body ? { 'content-type': 'application/json' } : {}) },
       ...(body ? { body: JSON.stringify(body) } : {}),
     });
     return { status: response.status, body: await response.json() };
@@ -88,7 +89,7 @@ test('[H18] warnings begin at sixty days on authorized contact; compaction and r
   warningTimeout.unref();
   t.after(() => { clearTimeout(warningTimeout); controller.abort(); });
   const stream = await fetch('http://127.0.0.1:' + box.relay.port + '/api/v1/boards/' + A + '/events?after=0', {
-    headers: { 'x-pullboard-engine': '3', authorization: 'Bearer ' + box.signed.token, accept: 'text/event-stream' }, signal: controller.signal,
+    headers: { 'x-pullboard-engine': String(VERIFIER_STANDING_ENGINE), authorization: 'Bearer ' + box.signed.token, accept: 'text/event-stream' }, signal: controller.signal,
   });
   const reader = stream.body.getReader();
   let delivered = '';

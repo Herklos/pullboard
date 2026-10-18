@@ -9,6 +9,7 @@ import * as store from '../src/board.js';
 import { appliedSequence, applyRelayMove, engineReceipt, prepareEngineMove } from '../src/engine.js';
 import { exportBoard, importBoard } from '../src/exchange.js';
 import { ENGINE_VERSION } from '../src/machine.js';
+import { VERIFIER_STANDING_ENGINE } from '../src/machine.js';
 import { RIGOR_NOTICE_ENGINE } from '../src/rigor-source.js';
 import { HEALTH_SENTINEL_ENGINE } from '../src/health-receipts.js';
 import { createE2eHelpers } from './e2e-helpers.js';
@@ -263,9 +264,9 @@ async function checkDependencyLegacyClients(cleanup, directory, snapshot, target
 }
 
 test('dependency edits replay the same on every engine [B3,V2,H16]', async (t) => {
-  assert.equal(ENGINE_VERSION, 45, 'the current writer retains historical behavior through engine 44');
   assert.ok(ENGINE_VERSION >= RIGOR_NOTICE_ENGINE, 'the next writer retains all recorded dependency-edit behavior');
   assert.ok(ENGINE_VERSION >= HEALTH_SENTINEL_ENGINE, 'the current writer retains the sentinel minimum and historical behavior');
+  assert.ok(ENGINE_VERSION >= VERIFIER_STANDING_ENGINE, 'the current writer retains verifier standing');
   const directory = mkdtempSync(join(tmpdir(), 'pullboard-dependency-engines-'));
   const cleanup = [];
   t.after(() => {
