@@ -173,6 +173,10 @@ import {
   outOfLane,
 } from './lanes.js';
 import { Refused } from './refused.js';
+import {
+  applyStep,
+  personAsk,
+} from './setup-rows.js';
 import { personNeeds } from './needs.js';
 import { personNeedsState } from './needs-state.js';
 import { startServeSentinel } from './serve-sentinel.js';
@@ -1582,7 +1586,12 @@ function recordSetupState(ctx, identity, state) {
 function boardSetup(ctx, card, identity) {
   const rows = loadSpec(ctx.info.root, ctx.config).rows;
   const approved = rows.filter(row => row.status === 'approved');
-  const drafted = rows.filter(row => row.status === 'draft' || row.status === 'pending');
+  const decisions = withBoard(ctx, (board) => store.rowDecisions(board));
+  // Match the current row's decision projection, not a bare id: a changed draft needs a new person decision (#848).
+  const open = rows.filter(row => row.status === 'draft' || row.status === 'pending')
+    .map(row => decisionProjection(decisions, row, 'spec'));
+  const toApply = open.filter(row => row.decision);
+  const drafted = open.filter(row => !row.decision);
   const recordedComplete = setupReceiptMatches(ctx, identity, 'complete');
   const started = setupReceiptMatches(ctx, identity, 'started');
   const lanes = laneNames(ctx.config).filter(lane => !['review', COORDINATOR].includes(lane));
@@ -1604,7 +1613,7 @@ function boardSetup(ctx, card, identity) {
   /** Preserve all existing configuration when recording one setup answer. */
   const configure = patch => `node -e ${quote(`const fs=require('node:fs');const p='pullboard.json';const c=JSON.parse(fs.readFileSync(p,'utf8'));${patch};fs.writeFileSync(p,JSON.stringify(c,null,2)+${JSON.stringify('\n')})`)}`;
   const steps = [
-    { number: 1, done: approved.length > 0 && (!drafted.length || completed), question: 'Ask the person: what are we building, and who will use it? Draft a few requirements, then ask the person to approve them.',
+    { number: 1, done: approved.length > 0 && ((!drafted.length && !toApply.length) || completed), question: 'Ask the person: what are we building, and who will use it? Draft a few requirements, then ask the person to approve them.',
       command: 'pullboard spec draft "<text>"',
       afterAnswer: 'Record each answer with pullboard spec draft "<text>"; the person approves the returned ids in Pullboard View or runs pullboard spec approve <ids> in their own terminal; then the coordinator runs pullboard spec apply.' },
     { number: 2, done: lanes.length > 0, question: `Ask the person: how should we divide the work? Suggested folders: ${folders.join(', ') || 'app/ (create it for the app)'}.`,
@@ -1623,17 +1632,20 @@ function boardSetup(ctx, card, identity) {
   const current = steps.find(step => !step.done);
   if (!current && !recordedComplete) recordSetupState(ctx, identity, 'complete');
   else if (current && !completed && !started) recordSetupState(ctx, identity, 'started');
+  const seat = ctx.io.callerRole() === 'seat';
+  if (current?.number === 1 && !drafted.length && toApply.length) return { step: 1, total: 5, ...current, steps, ...applyStep(toApply.map(row => row.id), seat) };
   if (current?.number === 1 && drafted.length) {
     const rowIds = drafted.map(row => row.id);
     const names = rowIds.join(', ');
     const command = `pullboard spec show ${rowIds[0]}`;
-    const seat = ctx.io.callerRole() === 'seat';
-    return { step: 1, total: 5, ...current, steps, waitingOn: 'person-approval', rowIds,
-      question: seat ? `Waiting for the coordinator to bring approval of ${names} to the person.` : `Waiting for the person to approve ${names}.`, command,
-      personCommand: `pullboard spec approve ${rowIds.join(',')}`,
-      afterAnswer: 'The person approves these rows in Pullboard View or their own terminal; then the coordinator runs pullboard spec apply.',
+    // A pending question takes an answer, a draft row an approval: each gets the command that decides it.
+    const { personCommand, verb, seatQuestion, seatNext } = personAsk(drafted);
+    return { step: 1, total: 5, ...current, steps, waitingOn: 'person-approval', rowIds, ...(toApply.length ? { approvedRowIds: toApply.map(row => row.id) } : {}),
+      question: seat ? seatQuestion : `Waiting for the person to ${verb} ${names}.`, command,
+      personCommand,
+      afterAnswer: (toApply.length ? `The person already approved ${toApply.map(row => row.id).join(', ')}; pullboard spec apply writes them. ` : '') + 'The person approves draft rows and answers questions in Pullboard View or their own terminal; then the coordinator runs pullboard spec apply.',
       meanwhile: seat ? 'While waiting, review independent approved work or send questions to the coordinator with pullboard shout coordinator "<what is needed>" --decision.' : 'While waiting, the agent may review independent approved work or prepare questions for the person.',
-      agentNext: seat ? `ask the coordinator to bring approval of ${names} to the person: pullboard shout coordinator "approve ${names}" --decision; meanwhile ${command}` : `wait for the person to approve ${names}; meanwhile ${command}` };
+      agentNext: seat ? seatNext : (toApply.length ? 'pullboard spec apply for the approved rows; then ' : '') + `wait for the person to ${verb} ${names}; meanwhile ${command}` };
   }
   return current ? { step: current.number, total: 5, ...current, steps } : null;
 }
@@ -1739,7 +1751,7 @@ async function resumeHere(io, view) {
   if (card.setup) {
     say(`Setting up: step ${card.setup.step} of 5`);
     say(card.setup.question);
-    say(card.setup.personCommand ? `For the person: ${card.setup.personCommand}` : `Record the answer: ${card.setup.command}`);
+    say(card.setup.personCommand ? `For the person: ${card.setup.personCommand}` : card.setup.waitingOn === 'coordinator-apply' ? `Next: ${card.setup.agentNext}` : `Record the answer: ${card.setup.command}`);
     if (card.setup.afterAnswer) say(card.setup.afterAnswer);
     if (card.setup.meanwhile) say(card.setup.meanwhile);
   }
@@ -3573,7 +3585,6 @@ function workCommands(io, args) {
       });
       const check = frozenCheck(item);
       if (!check) throw new Refused('NO_CHECK', `#${item.item_id} has no check command; its proof is the project gate: pullboard gate`);
-      const policy = item.item_claim_head ? itemPolicy(ctx.info.root, item) : mainPolicy(ctx.info.root);
       const by = author || 'unknown (legacy)';
       const authorName = author ? agentDisplayName(agents, ctx.config, author) : by;
       const notice = `check #${item.item_id} set by ${authorName}: ${check}`;
@@ -3587,7 +3598,7 @@ function workCommands(io, args) {
           throw new Refused('CHECK_CONFIRM', `the check set by ${authorName} was not run: ${check}; run pullboard check ${item.item_id} --yes after reading the command, or answer yes at the prompt`);
         }
       }
-      await runStaticChecks(ctx.info.root, policy.config, { agent: caller, item: String(item.item_id), onWait: queuedItemLease(ctx, item, caller, 'build'), onBrowserFallback: browserAdmissionReporter(io, values.json) });
+      await runStaticChecks(ctx.info.root, (item.item_claim_head ? itemPolicy(ctx.info.root, item) : mainPolicy(ctx.info.root)).config, { agent: caller, item: String(item.item_id), onWait: queuedItemLease(ctx, item, caller, 'build'), onBrowserFallback: browserAdmissionReporter(io, values.json) });
       const browser = !browserFreeChecksEnabled() || await checkNeedsBrowser(ctx.info.root, check, { onFallback: browserAdmissionReporter(io, values.json) });
       const shortEligible = Boolean(await explicitCheckFiles(ctx.info.root, check));
       const run = await withGateSlot(ctx.info.root, (lease) => runProfiledShell(ctx.info.root, check, { waitMs: lease.waitMs, artifactPrefix: `pullboard-check-${item.item_id}`, persistLog: true, gateLease: lease }), { browser, agent: caller, item: String(item.item_id), kind: 'check', itemCheck: true, shortEligible, onWait: queuedItemLease(ctx, item, caller, 'build') });

@@ -79,7 +79,7 @@ test('opening an item loads its detail on demand [N26,A2]', { timeout: 150_000 }
       assert.equal(listed.summaries, true, 'the view sends item summaries: no history, criterion or thread');
       assert.deepEqual(listed.rows.sort(), ['2', '3'], 'the Active list shows the submitted and the open item');
       // Current Roadmap keeps pending work before verified rows (readMilestone).
-      assert.deepEqual(listed.roadmap, ['#2 to verify', '#1 verified'], 'the roadmap reads each item state from its summary');
+      assert.deepEqual(listed.roadmap, ['#2 to verify', '#1 accepted'], 'the roadmap reads each item state from its summary');
       assert.deepEqual(itemReads(listed.reads), [], 'the list renders with no item detail fetched');
 
       // Search asks the API, which matches the criterion the summaries leave out, and its result opens the item.
