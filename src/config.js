@@ -45,6 +45,7 @@ export function defaults() {
     practice: DOCTRINE_FILE,
     gate: '',
     submitInvariants: [],
+    staticChecks: '',
     lease: '2h',
     reviewLease: '30m',
     worktrees: 'beside',
@@ -170,6 +171,7 @@ export function configProblems(config) {
   if (config.landingShards !== undefined && (!Number.isSafeInteger(config.landingShards) || config.landingShards < 1 || config.landingShards > 64)) {
     problems.push('"landingShards" is a whole number from 1 to 64: how many shards the landing gate splits its test files into');
   }
+  if (typeof config.staticChecks !== 'string') problems.push('"staticChecks" is an optional project static-check command');
   if (config.affectedTests !== undefined && (typeof config.affectedTests !== 'string' || !config.affectedTests.trim())) {
     problems.push('"affectedTests" is a nonempty command prefix used to run selected test files');
   }

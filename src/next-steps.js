@@ -8,6 +8,57 @@
  * every code raised in src/ has a row here.
  */
 import { RECORDED_GENERIC_NEXT } from './recorded-refusal.js';
+import { Refused } from './refused.js';
+
+/** Name open build lanes without claiming their work as the coordinator [N2,B26]. */
+export function mainLaneWork(items) {
+  const counts = new Map();
+  for (const item of items) {
+    if (item.item_status !== 'open' || item.item_lane === 'coordinator') continue;
+    counts.set(item.item_lane, (counts.get(item.item_lane) ?? 0) + 1);
+  }
+  const lanes = [...counts].sort(([a], [b]) => a.localeCompare(b));
+  if (!lanes.length) return null;
+  return {
+    summary: lanes.map(([lane, count]) => `${count} ${count === 1 ? 'item' : 'items'} open in lane ${lane}`).join('; '),
+    next: `pullboard worktree ${lanes[0][0]} --model "<model name>"`,
+  };
+}
+
+/** Preserve empty-queue refusals while sending a main-checkout newcomer to existing lane work. */
+export function refuseNextIdle(io, reasons, displayed, { minutes, verify, laneWork }) {
+  const waited = minutes ? ` after ${minutes} minutes` : '';
+  const repair = laneWork ? `. ${laneWork.summary}. Start there: ${laneWork.next}`
+    : `${waited}. To keep looking: pullboard next --wait 9${verify ? ' --verify' : ''} (minutes; give the command a ten-minute timeout)`;
+  io.refusal?.(new Refused('NOTHING_FREE', reasons.join('; ') + repair, laneWork?.next));
+  io.err(`pullboard: [NOTHING_FREE] ${displayed.join('; ')}${repair}`);
+  return 1;
+}
+import { existsSync } from 'node:fs';
+import {
+  basename,
+  dirname,
+  join,
+} from 'node:path';
+
+/** Give a separate agent session one pasteable startup line, without claiming or verifying for it [V1,B26]. */
+export function reviewerStartup(root, config, id) {
+  if (!root) return 'ask the coordinator to locate the main checkout for a different agent session; the reviewer must not be the builder';
+  const lanes = Object.entries(config.lanes).filter(([name]) => name !== 'coordinator');
+  const lane = lanes.find(([, value]) => !value.owns.length)?.[0] ?? lanes[0]?.[0];
+  if (!lane) return 'ask the coordinator to declare a reviewer lane for a different agent session; the reviewer must not be the builder';
+  /** Quote the whole path so spaces, apostrophes and dollar signs remain literal. */
+  const quote = value => "'" + value.replaceAll("'", "'\\''") + "'";
+  /** Respect the configured placement while avoiding an existing checkout. */
+  const location = number => config.worktrees === 'inside'
+    ? join(root, '.claude', 'worktrees', `reviewer-${number}`)
+    : join(dirname(root), `${basename(root)}-reviewer-${number}`);
+  let number = 1;
+  while (existsSync(location(number))) number++;
+  const path = location(number);
+  const command = `cd ${quote(root)} && mkdir -p ${quote(dirname(path))} && git worktree add --detach ${quote(path)} HEAD && cd ${quote(path)} && pullboard join ${lane} --model "<model name>" && pullboard next --verify${id ? ' ' + id : ''}`;
+  return `Use a different agent session; the reviewer must not be the builder. Run: ${command}`;
+}
 
 /** The coordinator carries every seat's request for a person decision [B26]. */
 export const COORDINATOR_PERSON_REQUEST = 'ask the coordinator to bring it to the person: pullboard shout coordinator "<what is needed>" --decision';

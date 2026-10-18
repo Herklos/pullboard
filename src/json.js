@@ -67,7 +67,7 @@ export const JSON_SHAPES = {
     verify: shape({ id: 'number', decision: 'string', reason: 'string' }),
     merged: shape({ id: 'number', commit: 'string' }),
     land: shape({ batch: 'object|null', landed: 'array', conflicts: 'array', blocked: 'array', culprits: 'array', flakes: 'array' }),
-    withdraw: shape({ id: 'number', reason: 'string' }),
+    withdraw: shape({ id: 'number', reason: 'string', milestones: 'array' }),
     refreeze: shape({ id: 'number', after: 'string' }),
     reopen: shape({ id: 'number', commit: 'string' }),
     shout: shape({ id: 'number', decision: 'boolean' }),
