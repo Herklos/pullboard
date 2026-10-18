@@ -1,6 +1,7 @@
 /** Model route policy and rejection receipts for automatic escalation [B13,B15,H16]. */
 import { COORDINATOR } from './config.js';
 import { AUTO_ESCALATE_ENGINE } from './machine.js';
+import { STRONG_REJECTION_NOTICE_ENGINE } from './machine.js';
 import { verdictsFor } from './verdict-reviews.js';
 
 /**
@@ -26,7 +27,7 @@ export const canTake = (agentRoute, itemRoute) => ROUTES.indexOf(itemRoute) <= R
  * @param {number} id
  * @returns {object[]}
  */
-function rejectionsSinceRouteChange(board, id) {
+function rejectionsSinceRouteChange(board, id, engine) {
   const thread = board.db.prepare('SELECT * FROM event WHERE item_id = ? ORDER BY event_id').all(id);
   let lastRouteChange = -1;
   for (const [index, event] of thread.entries()) {
@@ -34,6 +35,8 @@ function rejectionsSinceRouteChange(board, id) {
       lastRouteChange = index;
       continue;
     }
+    if (engine >= STRONG_REJECTION_NOTICE_ENGINE && event.event_kind === 'strong-rejection-notice'
+      && JSON.parse(event.event_detail).engine === STRONG_REJECTION_NOTICE_ENGINE) lastRouteChange = index;
     if (event.event_kind === 'edit' && Object.hasOwn(JSON.parse(event.event_detail), 'route')) lastRouteChange = index;
   }
   const verdictEvents = thread.filter((event) => ['accept', 'reject'].includes(event.event_kind));
@@ -70,11 +73,28 @@ function rejectionsSinceRouteChange(board, id) {
  */
 export function rejectedItemEscalation(board, id, engine, route) {
   if (engine < AUTO_ESCALATE_ENGINE) return null;
-  const rejections = rejectionsSinceRouteChange(board, id).slice(-2);
+  const rejections = rejectionsSinceRouteChange(board, id, engine).slice(-2);
   if (rejections.length < 2) return null;
   return {
     agentId: COORDINATOR,
     note: `Two REJECT verdicts at the ${route} route`,
     rejections,
   };
+}
+
+/** Finish the rejection's route action atomically; old engines retain ceiling escalation [B15,H16]. */
+export function recordRejectedItemRoute(board, id, engine, item, { escalate, shout, logEvent }) {
+  const escalation = rejectedItemEscalation(board, id, engine, item.item_route);
+  if (!escalation) return;
+  if (engine < STRONG_REJECTION_NOTICE_ENGINE || item.item_route !== ROUTES.at(-1)) {
+    escalate(board, id, escalation);
+    return;
+  }
+  const builder = item.item_built_by ?? item.item_owner;
+  logEvent(board, COORDINATOR, 'strong-rejection-notice', id, {
+    engine: STRONG_REJECTION_NOTICE_ENGINE, route: item.item_route, builder, rejections: escalation.rejections,
+  });
+  const receipts = escalation.rejections.map(entry => `#${entry.verdictId} (${entry.reason})`).join(', ');
+  shout(board, { from: COORDINATOR, to: COORDINATOR, lanes: [COORDINATOR],
+    text: `#${id} has two send-backs at the strongest route; ${builder} built it. Rejections: ${receipts}.` });
 }

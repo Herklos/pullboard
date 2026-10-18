@@ -14,8 +14,11 @@ import { RIGOR_NOTICE_ENGINE } from './rigor-source.js';
 /** First engine that automatically escalates an item's second rejection at its current route [B15]. */
 export const AUTO_ESCALATE_ENGINE = 50;
 
+/** First engine replacing an automatic ceiling escalation with a paired notice [B15,H16]. */
+export const STRONG_REJECTION_NOTICE_ENGINE = 54;
+
 /** Executable move semantics, carried by every sealed move and retained during replay [H16]. */
-export const ENGINE_VERSION = Math.max(AUTO_ESCALATE_ENGINE, RIGOR_NOTICE_ENGINE);
+export const ENGINE_VERSION = Math.max(AUTO_ESCALATE_ENGINE, RIGOR_NOTICE_ENGINE, STRONG_REJECTION_NOTICE_ENGINE);
 
 /**
  * The engine whose relay moves carry seat provenance and verifier standing (#579). It is its own

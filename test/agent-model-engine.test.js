@@ -16,11 +16,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 test('model declarations and event snapshots retain all supported engine semantics [O8,O3,H16]', (t) => {
-  assert.equal(ENGINE_VERSION, AUTO_ESCALATE_ENGINE, 'the current writer is the automatic-escalation engine');
+  assert.ok(ENGINE_VERSION >= AUTO_ESCALATE_ENGINE, 'the current writer retains automatic escalation');
   assert.ok(ENGINE_VERSION >= 45, 'the current writer retains engine-45 milestone semantics');
   assert.ok(ENGINE_VERSION >= RIGOR_NOTICE_ENGINE, 'the next writer preserves every historical model snapshot through main engine 33');
   assert.ok(ENGINE_VERSION >= HEALTH_SENTINEL_ENGINE, 'the current writer retains the sentinel minimum and historical behavior');
-  assert.equal(AUTO_ESCALATE_ENGINE, ENGINE_VERSION, 'the current writer includes automatic escalation and preserves historical model snapshots');
+  assert.ok(ENGINE_VERSION >= AUTO_ESCALATE_ENGINE, 'the current writer includes automatic escalation and preserves historical model snapshots');
   assert.ok(ENGINE_VERSION >= VERIFIER_STANDING_ENGINE, 'the current writer retains verifier standing');
   assert.ok(ENGINE_VERSION >= MILESTONE_SHIP_ENGINE, 'the current writer retains milestone shipping');
   for (const version of Array.from({ length: ENGINE_VERSION }, (_, index) => index + 1)) {
