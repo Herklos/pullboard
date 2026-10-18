@@ -907,3 +907,6 @@ code.inline.long { white-space: break-spaces; overflow-wrap: anywhere; }
 .star-dismiss:hover { background: color-mix(in srgb, var(--ink) 7%, transparent); color: var(--ink); }
 .star-dismiss:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 @media (pointer: coarse) { .star-dismiss { width: 44px; height: 44px; } }
+
+.milestone-targetline { margin: 0 14px 10px; color: var(--ink-muted); font-size: 13px; }
+.roadmap-shipped-commit { flex: none; color: var(--ink-muted); font: 11px var(--mono); }

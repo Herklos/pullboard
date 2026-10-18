@@ -2249,7 +2249,7 @@ function milestoneItem(entry, p) {
     titles: new Map((root === view.root ? p.items : root ? named[0].items : []).map((i) => [String(i.id), i.title])),
     state: read ? stateOf(read) : null,
     stale: item ? staleChip(item) : '',
-    stage: item ? pipelineStage(item) : entry.status,
+    stage: entry.state === 'landed' ? 'merged' : entry.state === 'accepted' ? 'accepted' : item ? pipelineStage(item) : entry.status,
     word: entry.status,
     open: item ? { root, id } : null,
     // Why an item does not open, short enough to read beside its id on a phone.
@@ -2301,7 +2301,7 @@ function jumpToRoadmap(key) {
  */
 function milestoneRow(row, titles) {
   const title = row.title ? inline(String(row.title).replace(/\\s+/g, ' '), row.titles || titles, true, row.root) : '<span class="muted">' + esc(row.why) + '</span>';
-  const inner = '<span class="dot' + (row.state ? ' ' + row.state : '') + '"></span><span class="t"><span class="id">' + esc(row.label) + '</span>' + title + '</span>' + (row.stale || '') + (row.state ? chip(row.state) : '<span class="chip">' + esc(row.word) + '</span>');
+  const inner = '<span class="dot' + (row.state ? ' ' + row.state : '') + '"></span><span class="t"><span class="id">' + esc(row.label) + '</span>' + title + '</span>' + (row.stale || '') + (['merged', 'accepted'].includes(row.stage) ? '<span class="chip ok">' + (row.stage === 'merged' ? 'landed' : 'accepted') + '</span>' : row.state ? chip(row.state) : '<span class="chip">' + esc(row.word) + '</span>');
   if (!row.open) return '<li><div class="milestone-item" title="' + esc(row.title ? row.title + ' (' + row.why + ')' : row.why) + '">' + inner + '</div></li>';
   const attributes = 'class="milestone-item" data-go="item:' + row.open.id + '"' + (row.open.root === view.root ? '' : ' data-board="' + esc(row.open.root) + '"') + ' title="' + esc(row.title) + '"';
   // A title with its own links needs a separate containing control, never a nested button.
@@ -2315,7 +2315,11 @@ function readMilestone(milestone, p) {
   const visible = milestone.items.map((entry) => milestoneItem(entry, p)).filter((row) => row.state !== 'withdrawn');
   const verified = visible.filter((row) => row.state === 'verified');
   const rows = visible.filter((row) => row.state !== 'verified').concat(verified);
-  return { milestone, rows, done: verified.length, shipped: rows.length > 0 && verified.length === rows.length };
+  // Current API milestones own their landed count and explicit shipment. Old exports retain their old count.
+  const done = milestone.summary?.landed ?? milestone.landed ?? verified.length;
+  const total = milestone.summary?.total ?? milestone.total ?? rows.length;
+  const shipped = milestone.shipped !== undefined ? Boolean(milestone.shipped) : rows.length > 0 && verified.length === rows.length;
+  return { milestone, rows, done, total, shipped };
 }
 
 /** Pick the first release with remaining work in roadmap order; empty plans wait behind it. */
@@ -2326,7 +2330,7 @@ function nextMilestone(p) {
   });
   if (!next) return next;
   const read = readMilestone(next, p);
-  return { ...next, done: read.done, total: read.rows.length };
+  return { ...next, done: read.done, total: read.total };
 }
 
 /**
@@ -2347,17 +2351,17 @@ function roadmapCards(p, titles) {
   const isOpen = (key, first) => view.roadmapOpen.has(JSON.stringify([view.root, key])) ? view.roadmapOpen.get(JSON.stringify([view.root, key])) : first;
   const caret = '<span class="caret" aria-hidden="true"></span>';
   const next = coming.find((m) => m.rows.length) || null;
-  const stages = [['open', 'Open'], ['claimed', 'Building'], ['submitted', 'In review'], ['accepted', 'Accepted'], ['merged', 'Verified']];
+  const stages = [['open', 'Open'], ['claimed', 'Building'], ['submitted', 'In review'], ['accepted', 'Accepted'], ['merged', 'Landed']];
   const counts = Object.fromEntries(stages.map(([stage]) => [stage, next ? next.rows.filter((row) => row.stage === stage).length : 0]));
   const shippingCounts = '<dl class="roadmap-stage-counts">' + stages.map(([stage, label]) => '<div data-shipping-stage="' + stage + '"><dt>' + label + '</dt><dd>' + counts[stage] + '</dd></div>').join('') + '</dl>';
   const lastShipped = '<p class="roadmap-last-shipped"><span>Last shipped</span><b>' + esc(shipped[0]?.milestone.name || 'None yet') + '</b>'
     + (shipped[0]?.milestone.note ? '<small>' + esc(firstLine(shipped[0].milestone.note)) + '</small>' : '') + '</p>';
   const mobileShipping = '<section class="roadmap-shipping roadmap-mobile-shipping" aria-label="Shipping counts">' + shippingCounts + lastShipped + '</section>';
   /** Keep the existing verified-item count beside an upcoming release. */
-  const count = (m) => m.rows.length ? '<span class="milestone-count">' + m.done + '/' + m.rows.length + ' done</span>' : '';
+  const count = (m) => m.total ? '<span class="milestone-count" aria-label="' + m.done + '/' + m.total + ' landed">' + m.done + '/' + m.total + ' landed</span>' : '';
   /** Render the existing milestone items, progress and complete note when opened. */
-  const body = ({ milestone, rows, done }) => (rows.length
-    ? '<svg class="milestone-progress" viewBox="0 0 100 1" preserveAspectRatio="none" role="progressbar" aria-label="' + esc(milestone.name) + ': ' + done + ' of ' + rows.length + ' done" aria-valuemin="0" aria-valuemax="' + rows.length + '" aria-valuenow="' + done + '"><rect width="' + Math.round((100 * done) / rows.length) + '" height="1"/></svg><ul>' + rows.map((row) => milestoneRow(row, titles)).join('') + '</ul>'
+  const body = ({ milestone, rows, done, total }) => (rows.length
+    ? '<svg class="milestone-progress" viewBox="0 0 100 1" preserveAspectRatio="none" role="progressbar" aria-label="' + esc(milestone.name) + ': ' + done + ' of ' + rows.length + ' done" aria-valuemin="0" aria-valuemax="' + rows.length + '" aria-valuenow="' + done + '"><rect width="' + Math.round((100 * done) / total) + '" height="1"/></svg><ul>' + rows.map((row) => milestoneRow(row, titles)).join('') + '</ul>'
     : '<p class="milestone-empty">No items yet.</p>')
     + (milestone.note ? '<p class="milestone-note">' + rich(milestone.note, titles) + '</p>' : '');
   /** Keep folding consistent with the View's other keyboard-accessible disclosure controls. */
@@ -2366,12 +2370,13 @@ function roadmapCards(p, titles) {
     return '<' + tag + ' class="' + classes + '" data-key="' + esc(key) + '"><div class="milestone-head" data-roadmap-key="' + esc(key) + '" role="button" tabindex="0" aria-expanded="' + open + '">' + caret + heading + '</div>' + afterHead + '<div class="milestone-body"' + (open ? '' : ' hidden') + '>' + contents + '</div></' + tag + '>';
   };
   /** Open every upcoming milestone by default; the person's current-page fold remains in the view map. */
-  const card = (m) => wrap('section', 'card-panel milestone', 'm:' + m.milestone.name, true, '<h2>' + linked(m.milestone.name, titles) + '</h2>' + count(m), body(m), m === next ? mobileShipping : '');
+  const card = (m) => wrap('section', 'card-panel milestone', 'm:' + m.milestone.name, true, '<h2>' + linked(m.milestone.name, titles) + '</h2>' + count(m), body(m),
+    (m.milestone.target ? '<div class="milestone-targetline">Target <time datetime="' + esc(m.milestone.target) + '">' + when(m.milestone.target) + '</time>' + (m.milestone.pastTarget ? ' <span class="chip warn">past target</span>' : '') + '</div>' : '') + (m === next ? mobileShipping : ''));
   /** Summarize one shipped milestone with its first note line and total count. */
-  const line = (m) => wrap('div', 'milestone shipped-one', 'm:' + m.milestone.name, false, '<h2>' + esc(m.milestone.name) + '</h2><small>' + esc(firstLine(m.milestone.note)) + '</small><span class="milestone-count">' + m.rows.length + (m.rows.length === 1 ? ' item' : ' items') + '</span>', body(m));
+  const line = (m) => wrap('div', 'milestone shipped-one', 'm:' + m.milestone.name, false, '<h2>' + esc(m.milestone.name) + '</h2><small>' + esc(firstLine(m.milestone.note)) + '</small>' + (m.milestone.shipped?.commit ? '<code class="roadmap-shipped-commit" title="' + esc(m.milestone.shipped.commit) + '">' + esc(m.milestone.shipped.commit.slice(0, 12)) + '</code>' : '') + '<span class="milestone-count">' + m.total + (m.total === 1 ? ' item' : ' items') + '</span>', body(m));
   const releaseButtons = coming.map((m) => {
     const key = 'm:' + m.milestone.name;
-    return '<button class="roadmap-release" data-roadmap-jump="' + esc(key) + '" type="button"><span>' + esc(m.milestone.name) + '</span><b>' + m.done + '/' + m.rows.length + '</b></button>';
+    return '<button class="roadmap-release" data-roadmap-jump="' + esc(key) + '" type="button"><span>' + esc(m.milestone.name) + '</span><b>' + m.done + '/' + m.total + '</b></button>';
   }).join('');
   const shippedButton = shipped.length
     ? '<button class="roadmap-release" data-roadmap-jump="shipped" type="button"><span>Shipped</span><b>' + shipped.length + '</b></button>' : '';
