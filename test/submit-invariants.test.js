@@ -222,13 +222,15 @@ test('a landing escape is proposed as a submit invariant only when modern submit
   const source = store.openBoard(join(box.dir, 'modern-source.sqlite'));
   const target = store.openBoard(join(box.dir, 'modern-replica.sqlite'));
   const legacyTarget = store.openBoard(join(box.dir, 'legacy37-replica.sqlite'));
-  t.after(() => {store.closeBoard(source);store.closeBoard(target);store.closeBoard(legacyTarget);});
+  const replica = store.openBoard(join(box.dir, 'modern-second-replica.sqlite'));
+  t.after(() => {store.closeBoard(source);store.closeBoard(target);store.closeBoard(legacyTarget);store.closeBoard(replica);});
   store.register(source, {lane:'coordinator',path:'/fixture/main'});
   store.register(source, {lane:'web',path:'/fixture/web'});
   const id=store.addItem(source,{by:'coordinator',lane:'web',title:'modern missing selection'});
   store.claim(source,id,{agentId:'web-1',lane:'web',leaseMs:3600000,freeze:()=>({text:'{"rows":[]}',digest:'f'.repeat(64)})});
   importBoard(target,exportBoard(source));
   importBoard(legacyTarget,exportBoard(source));
+  importBoard(replica,exportBoard(source));
   const count=store.events(target).length;
   const options = {agentId:'web-1',commit:'a'.repeat(40),tree:'b'.repeat(40)};
   const move=prepareEngineMove(source,'submit',[id,{...options,submissionProof:{version:1,
@@ -246,18 +248,34 @@ test('a landing escape is proposed as a submit invariant only when modern submit
   const legacyEvent = store.events(legacyTarget).findLast(e=>e.event_kind==='submit');
   assert.equal(Object.hasOwn(JSON.parse(legacyEvent.event_detail),'submissionProof'),false,'legacy37 stays unknown without invented coverage');
   console.log('review696 legacy37 control '+JSON.stringify({engine:SUBMISSION_PROOF_ENGINE - 1,status:store.getItem(legacyTarget,id).item_status,recordedSelection:false}));
-  const result=applyRelayMove(target,move,{sequence:1,at:'2026-10-17T00:00:00.000Z',kind:'move',sender:{kind:'agent',userId:'fixture',agent:'web-1'}});
+  const ordered = {sequence:1,at:'2026-10-17T00:00:00.000Z',kind:'move',sender:{kind:'agent',userId:'fixture',agent:'web-1'}};
+  const result=applyRelayMove(target,move,ordered);
   const event=store.events(target).findLast(e=>e.event_kind==='submit');
   const detail=event ? JSON.parse(event.event_detail) : null;
   console.log('review696 modern missing proof '+JSON.stringify({engine:move.engine,error:result.error?.code??null,status:store.getItem(target,id).item_status,newEvents:store.events(target).length-count,submitEventPresent:!!event,recordedSelection:!!detail?.submissionProof}));
   assert.equal(result.error?.code,'SUBMISSION_PROOF','a current engine submit must record a selection instead of silently becoming unknown history');
   assert.equal(store.getItem(target,id).item_status,'claimed');
   assert.equal(store.events(target).length,count);
+  assert.equal(appliedSequence(target), 1, 'a typed refusal still consumes its authenticated relay position');
+  assert.deepEqual(engineReceipt(target, move.id)?.outcome, result, 'the refusal is retained as the move receipt');
+  assert.deepEqual(applyRelayMove(target, move, ordered), result, 'redelivery returns the same durable refusal');
+  assert.equal(appliedSequence(target), 1, 'redelivery does not advance twice');
+  assert.equal(store.events(target).length, count, 'redelivery adds no submit event');
+  assert.deepEqual(applyRelayMove(replica, move, ordered), result, 'another replica reaches the same refusal');
+  assert.equal(appliedSequence(replica), 1, 'both replicas retain the same ordered prefix');
+  assert.equal(store.getItem(replica, id).item_status, 'claimed');
+  assert.deepEqual(store.events(replica), store.events(target), 'neither replica records a submit event');
+  assert.deepEqual(engineReceipt(replica, move.id), engineReceipt(target, move.id), 'replica refusal receipts agree');
+  const sourceEvents = store.events(source).length;
   assert.throws(() => store.submit(source,id,options), {code:'SUBMISSION_PROOF'},
     'a current local board submission also refuses missing selection');
   assert.throws(() => prepareEngineMove(source,'submit',[id,options],
     {id:'producer-missing-selection',actor:'web-1'}), {code:'SUBMISSION_PROOF'},
   'the current producer refuses a missing receipt before sealing a move');
+  assert.equal(store.getItem(source, id).item_status, 'claimed');
+  assert.equal(store.events(source).length, sourceEvents, 'local refusal writes no item event');
+  assert.equal(appliedSequence(source), 0, 'local refusal writes no relay position');
+  assert.equal(engineReceipt(source, 'producer-missing-selection'), null, 'local preparation writes no receipt');
 });
 
 
