@@ -37,6 +37,7 @@ import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import {
   mainLaneWork,
+  reviewQueueLine,
   refuseNextIdle,
 } from './next-steps.js';
 import { reviewerStartup } from './next-steps.js';
@@ -70,6 +71,7 @@ import {
   AGENT_SESSION_IDS,
   agentSessionDigest,
   requirePersonChannel,
+  personShout,
 } from './person.js';
 import {
   bindLocalSession,
@@ -156,6 +158,14 @@ import {
   barCorrections,
   barStatsLines,
 } from './bar-corrections.js';
+import {
+  MAIN_MERGE_LABEL,
+  mainMergeFor,
+  mainMergeLines,
+  mainMergesFor,
+  reopenConflict,
+  reopenedLine,
+} from './trunk-conflict.js';
 import {
   checkImplies,
   decisionsImplying,
@@ -344,6 +354,7 @@ import {
   checkAtCommit,
   dependencySnapshots,
   requireTrunkMerge,
+  trunkMerge,
   trunkRef,
 } from './trusted-policy.js';
 import {
@@ -641,6 +652,7 @@ const OPTIONS = {
   commit: { type: 'string' },
   ref: { type: 'string' },
   supersedes: { type: 'string' },
+  conflict: { type: 'string', multiple: true },
   cause: { type: 'string' },
   'never-again': { type: 'boolean' },
   implies: { type: 'string' },
@@ -1219,13 +1231,13 @@ function firstLineOf(note) {
  * @param {any} item
  * @returns {string}
  */
-function itemLine(item, name = (id) => id) {
+function itemLine(item, name = (id) => id, mainMerge = false) {
   const holder = item.item_status === 'claimed' ? ` ${name(item.item_owner)}` : '';
   const verifier = item.item_status === 'verified' ? ` by ${name(item.item_verified_by)}` : '';
   const specs = item.item_spec_ids ? `  [${item.item_spec_ids}]` : '';
   const parent = item.item_parent_id ? `  under #${item.item_parent_id}` : '';
   const after = item.item_after ? `  after ${item.item_after.split(',').map((id) => `#${id}`).join(',')}` : '';
-  const rejected = item.item_status === 'open' && item.item_verdict === 'REJECT' ? ' (rejected)' : '';
+  const rejected = item.item_status === 'open' && item.item_verdict === 'REJECT' ? ' (rejected)' : mainMerge ? ` (${MAIN_MERGE_LABEL})` : '';
   const light = item.item_route === 'strong' ? '' : `  ${item.item_route}`;
   const staleVerdict = item.item_verdict_state ? `  ${item.item_verdict_state.code}` : '';
   const hold = item.item_hold_reason ? `  held by ${name(item.item_hold_by)}: ${item.item_hold_reason}` : '';
@@ -1707,6 +1719,7 @@ async function resumeHere(io, view) {
       sentBack: all
         .filter((item) => item.item_status === 'open' && item.item_verdict === 'REJECT' && item.item_built_by === me.id)
         .map((item) => ({ item, verdict: store.verdictsFor(board, item.item_id).at(-1) })),
+      mainMerges: mainMergesFor(board, all.filter((item) => item.item_status === 'open' && item.item_built_by === me.id)),
       awaiting: all.filter((item) => item.item_status === 'submitted' && item.item_built_by === me.id),
       toVerify: all.filter((item) => item.item_status === 'submitted' && item.item_built_by !== me.id),
       toMerge,
@@ -1789,6 +1802,7 @@ async function resumeHere(io, view) {
   for (const { item, verdict } of card.sentBack) {
     say(`sent back: #${item.item_id} ${verdict ? `${verdict.verdict_reason} by ${name(verdict.verdict_by)}: ${firstLine(verdict.verdict_note)}` : 'rejected'}`);
   }
+  for (const { item, merge } of card.mainMerges) say(mainMergeLines(item, merge, name).join('; '));
   if (isMain && card.staleFollowUps.count) say(`${plural(card.staleFollowUps.count, 'stale follow-up')}; list them with ${card.staleFollowUps.list}`);
   else if (!isMain) for (const item of card.stale) say(`stale: ${item.message}; next: ${item.next}`);
   for (const item of card.staleVerdicts) say(staleVerdictRefusal(item, item.item_verdict_state).message);
@@ -2390,14 +2404,14 @@ function readCommands(io, { first, second, rest, values }) {
     },
     list: () => {
       const ctx = context(io);
-      const { items, agents } = withBoard(ctx, (board) => ({
+      const { items, agents, merging } = withBoard(ctx, (board) => ({
         items: store.listItems(board, { lane: first, all: values.all }).map(verdictProjector(ctx.info.root, board).project),
-        agents: store.listAgents(board),
+        agents: store.listAgents(board), merging: new Set(store.listItems(board, { lane: first }).filter((item) => mainMergeFor(board, item.item_id)).map((item) => item.item_id)),
       }));
       const filtered = items.filter((item) => !values.route || item.item_route === values.route);
       if (values.json) io.result({ items: filtered });
       else if (!filtered.length) io.say(values.all ? 'no items yet' : 'nothing open; --all shows closed items');
-      else filtered.forEach((item) => io.say(itemLine(item, (id) => agentDisplayName(agents, ctx.config, id))));
+      else filtered.forEach((item) => io.say(itemLine(item, (id) => agentDisplayName(agents, ctx.config, id), merging.has(item.item_id))));
       return 0;
     },
     roadmap: () => {
@@ -2438,21 +2452,21 @@ function readCommands(io, { first, second, rest, values }) {
     show: () => {
       const ctx = context(io);
       const id = idArg(first);
-      const { item, verdicts, moves, thread, related, reviewer, agents } = withBoard(ctx, (board) => ({
+      const { item, verdicts, moves, thread, related, reviewer, agents, mainMerge } = withBoard(ctx, (board) => ({
         item: verdictProjector(ctx.info.root, board).project(store.getItem(board, id)),
         verdicts: store.verdictsFor(board, id),
         moves: store.events(board, { itemId: id }).filter((event) => ['attempt', 'escalate'].includes(event.event_kind)),
         thread: store.itemThread(board, id),
         related: store.relatedItems(board, store.getItem(board, id)),
         reviewer: store.reviewHolder(board, store.getItem(board, id)),
-        agents: store.listAgents(board),
+        agents: store.listAgents(board), mainMerge: mainMergeFor(board, id),
       }));
       const agentName = (id) => displayAgentName(agents.find((agent) => agent.agent_id === id) ?? { agent_id: id }, ctx.config.agents.names);
       if (values.json) {
         io.result({ ...item, verdicts, thread });
         return 0;
       }
-      io.say(itemLine(item, agentName));
+      io.say(itemLine(item, agentName, Boolean(mainMerge)));
       if (item.item_verdict_state) io.say(staleVerdictRefusal(item, item.item_verdict_state).message);
       if (item.item_criterion) io.say(`criterion: ${item.item_criterion}`);
       if (item.item_check) io.say(`check: ${item.item_check}`);
@@ -2484,6 +2498,7 @@ function readCommands(io, { first, second, rest, values }) {
       });
       if (notes.some((note, index) => note !== verdicts[index].verdict_note)) io.say(`(earlier verdicts shortened; every note in full: pullboard show ${id} --history)`);
       for (const correction of barCorrections(thread)) io.say(barCorrectionLine(correction));
+      for (const line of mainMerge ? mainMergeLines(item, mainMerge, agentName) : []) io.say(line);
       if (item.item_merged_commit) io.say(`merged as ${item.item_merged_commit}`);
       if (item.item_withdrawn_reason) io.say(`withdrawn: ${item.item_withdrawn_reason}`);
       io.say('thread:');
@@ -2517,7 +2532,7 @@ function readCommands(io, { first, second, rest, values }) {
       io.say(`${summary.me.displayName}: ${summary.unread} unread shouts; holding ${summary.mine.map((item) => `#${item.item_id}`).join(', ') || 'nothing'}`);
       io.say(`board: ${items.open} open, ${items.claimed} claimed, ${items.submitted} awaiting verification, ${items.verified} verified, ${items.withdrawn} withdrawn`);
       io.say(`verdicts: ${accepted} accepted, ${rejected} rejected`);
-      io.say(reviewQueueLine(ctx, summary.reviewQueue));
+      io.say(reviewQueueLine(ctx, summary.reviewQueue, span));
       for (const proposal of summary.submitInvariantProposals) io.say(submitInvariantLine(proposal));
       if (Object.keys(ctx.config.products).length) {
         const all = withBoard(ctx, (board) => store.listItems(board, { all: true }));
@@ -3210,40 +3225,19 @@ async function nextOnce(ctx, values) {
   });
 }
 
-/** Describe the queue's actual outstanding reviews and submission age [Q1,V15]. */
-function reviewQueueLine(ctx, queue) {
-  const age = queue.oldestSubmittedAt ? `${span(ctx, queue.oldestSubmittedAt)} ago` : 'none';
-  if (queue.awaitingFirstReview !== undefined) {
-    const released = queue.releasedItems?.map((item) => `#${item.item} released ${item.releases} ${item.releases === 1 ? 'time' : 'times'}: ${item.reason}`).join('; ');
-    return `review queue: ${queue.pending} submitted; ${queue.awaitingFirstReview} waiting for a first reviewer, ${queue.releasedWithoutVerdict} released without a verdict${released ? ` (${released})` : ''}, ${queue.reviewing} agents reviewing; oldest submission ${age}`;
-  }
-  return `review queue: ${queue.pending} awaiting, ${queue.reviewing} agents reviewing; oldest submission ${age}`;
-}
 
 /** Print an unreserved review first, then the build available through an explicit opt-out. */
 function sayReviewOffer(ctx, found) {
   const command = `pullboard next --verify ${found.item.item_id}${ctx.info.isMain ? ' --as coordinator' : ''}`;
   const offer = { item: found.item.item_id, command, queue: found.offer.queue, ratio: found.offer.ratio };
   ctx.io.result?.({ item: found.item, review: true, held: false, shared: [], offer, build: found.build });
-  ctx.io.say(`${reviewQueueLine(ctx, offer.queue)}; ratio ${offer.ratio} reached (zero active reviewers counts as one)`);
+  ctx.io.say(`${reviewQueueLine(ctx, offer.queue, span)}; ratio ${offer.ratio} reached (zero active reviewers counts as one)`);
   const agents = withBoard(ctx, (board) => store.listAgents(board));
   ctx.io.say(`review offered: #${found.item.item_id} ${found.item.item_title}, built by ${agentDisplayName(agents, ctx.config, found.item.item_built_by)}; reserve it explicitly: ${command}`);
   if (found.build) ctx.io.say(`build available: #${found.build.item_id} ${found.build.item_title}; claim it explicitly: pullboard next --build`);
   else ctx.io.say('no build is currently free in your lane; this review is available');
 }
 
-/**
- * Whether a shout is the person's own: a relay person request, or the local view acting as the
- * coordinator (N26, B26). The view acting as a named agent, or an agent shell as the coordinator,
- * still speaks as that agent.
- *
- * @param {any} io
- * @param {{ id: string }} me
- * @returns {boolean}
- */
-function personShout(io, me) {
-  return io.personRequest?.phase === 'execute' || (io.personChannel === 'view' && me.id === COORDINATOR);
-}
 
 /**
  * A review search that found nothing while another agent is still building: say so, with the wait,
@@ -3304,7 +3298,7 @@ async function nextHere(io, values) {
         io.say(`check out exactly that commit, here: ${here} git switch --detach ${item.item_commit}`);
         io.say(`then: ${here} pullboard verify ${item.item_id} accept${as} --note "how you proved it", or reject${as} --reason CODE --note "what failed"`);
       } else {
-        if (found.reviewSkipped) io.say(`${reviewQueueLine(ctx, found.reviewSkipped)}; explicit build intent recorded with this claim`);
+        if (found.reviewSkipped) io.say(`${reviewQueueLine(ctx, found.reviewSkipped, span)}; explicit build intent recorded with this claim`);
         io.say(`${found.held ? 'you hold' : 'claimed'} #${item.item_id}: ${item.item_title}`);
         if (found.seat) io.say(`${found.seat.created ? 'opened' : 'work in'} ${found.seat.agent}, ${found.seat.lane} lane: ${here}`);
         if (found.shared?.length) io.say(`it touches ${found.shared.length === 1 ? 'a file' : `${found.shared.length} files`} you worked in recently: ${found.shared.slice(0, 4).join(', ')}`);
@@ -3738,11 +3732,10 @@ function workCommands(io, args) {
     }),
     reopen: () => act(async (ctx, board, me) => {
       const result = await ordered(ctx, board, 'reopen', [idArg(first), { agentId: me.id, note: textArg(io, values, 'note') ?? '',
-        ...(values.cause !== undefined ? { cause: values.cause } : {}) }]);
+        ...(values.cause !== undefined ? { cause: values.cause } : {}),
+        ...(values.conflict === undefined ? {} : { conflict: reopenConflict({ item: store.getItem(board, idArg(first)), coordinator: me.id === COORDINATOR, values: values.conflict, trunkMerge: (commit) => trunkMerge(ctx.info.root, commit) }) }) }]);
       io.result?.(result);
-      io.say(result.landingFailure
-        ? `reopened #${first} after landing failure; previous accept remains recorded at ${result.commit.slice(0, 12)}`
-        : `reopened #${first} without a verdict; previous commit ${result.commit.slice(0, 12)} remains recorded`);
+      io.say(reopenedLine(first, result));
       return 0;
     }),
     shout: () => act(async (ctx, board, me) => {

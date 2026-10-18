@@ -82,6 +82,20 @@ export function trunkRef(root, branch) {
  * @returns {{ ref: string, commit: string }}
  */
 export function requireTrunkMerge(root, commit, retainedRef = trunkRef(root)) {
+  const { files, ...trunk } = trunkMerge(root, commit, retainedRef);
+  if (!files) return trunk;
+  const branch = trunk.ref.replace(/^refs\/heads\//, '');
+  throw new Refused('MERGE_CONFLICT', `the candidate conflicts with the current trunk ${branch} in ${files.map(path => JSON.stringify(path)).join(', ') || 'unresolved files'}; merge the trunk into your branch, resolve these files, commit and resubmit`);
+}
+
+/** Merge a commit onto the trunk tip in memory: the ref, the tip, and the conflicting files or null [B34,V6].
+ *
+ * @param {string} root
+ * @param {string} commit
+ * @param {string} [retainedRef]
+ * @returns {{ ref: string, commit: string, files: string[] | null }}
+ */
+export function trunkMerge(root, commit, retainedRef = trunkRef(root)) {
   const checkout = mainCheckout(root);
   const branchRef = checkout?.branch ?? retainedRef;
   if (!branchRef?.startsWith('refs/heads/')) throw new Refused('NO_TRUNK', 'no trunk branch was recorded; check out the trunk branch in the main checkout once and run pullboard inbox');
@@ -90,13 +104,11 @@ export function requireTrunkMerge(root, commit, retainedRef = trunkRef(root)) {
   const result = spawnSync('git', ['--no-replace-objects', '-c', 'core.quotepath=false', 'merge-tree', '--write-tree', '--name-only', '-z', tip.stdout.trim(), commit], {
     cwd: root, env: cleanGitEnvironment(), encoding: 'utf8', maxBuffer: 32 * 1024 * 1024,
   });
-  if (result.status === 0) return { ref: branchRef, commit: tip.stdout.trim() };
+  if (result.status === 0) return { ref: branchRef, commit: tip.stdout.trim(), files: null };
   if (result.status !== 1) throw new Refused('MERGE_CHECK_FAILED', 'Git could not check the candidate against the trunk; use Git 2.38 or newer, restore its objects and retry');
   const records = result.stdout.split('\0').slice(1);
   const end = records.indexOf('');
-  const files = records.slice(0, end < 0 ? records.length : end).map(path => JSON.stringify(path));
-  const branch = branchRef.replace(/^refs\/heads\//, '');
-  throw new Refused('MERGE_CONFLICT', `the candidate conflicts with the current trunk ${branch} in ${files.join(', ') || 'unresolved files'}; merge the trunk into your branch, resolve these files, commit and resubmit`);
+  return { ref: branchRef, commit: tip.stdout.trim(), files: records.slice(0, end < 0 ? records.length : end) };
 }
 
 /** Re-read coordinator settings from a pinned Git object; never from the candidate filesystem. */
