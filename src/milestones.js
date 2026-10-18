@@ -7,9 +7,19 @@
  * into the next milestone, so the roadmap stays the one place that says what is planned.
  */
 import { COORDINATOR } from './config.js';
-import { ENGINE_VERSION, MILESTONE_RANK_ENGINE } from './machine.js';
+import {
+  ENGINE_VERSION,
+  MILESTONE_RANK_ENGINE,
+} from './machine.js';
 import { Refused } from './refused.js';
-import { atomic, itemById, listItems, logEvent, milestones, PERSON } from './board.js';
+import {
+  atomic,
+  itemById,
+  listItems,
+  logEvent,
+  milestones,
+  PERSON,
+} from './board.js';
 
 /** The engine at which a milestone carries a target and ships; older moves replay as they did. */
 export const MILESTONE_SHIP_ENGINE = 39;
