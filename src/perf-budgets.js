@@ -96,6 +96,9 @@ export function evaluatePerfBudgets(report, budgets = PERF_BUDGETS) {
 /** Render budgets separately from the unbudgeted idle window and its raw observed render offsets. */
 export function perfBudgetTable(result) {
   const lines = [
+    result.errors.length ? 'Report validation: invalid.' : 'Report validation: complete.',
+    ...result.errors.map(error => 'Error: ' + error),
+    '',
     '| action | median ms | worst ms | median budget ms | worst budget ms | result |',
     '|---|---:|---:|---:|---:|---|',
     ...result.interactions.map(row => '| ' + row.name + ' | ' + row.medianMs + ' | ' + row.worstMs

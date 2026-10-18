@@ -81,6 +81,8 @@ test('perf budgets warn by name and fail on a missing action [N40,C7]', async t 
   const noMeasurement = run(missing);
   assert.equal(noMeasurement.child.status, 1);
   assert.match(noMeasurement.child.stderr, /budget entry switchProject has no measured action/u);
+  assert.ok(readFileSync(join(noMeasurement.outputDirectory, 'performance.md'), 'utf8').includes('Report validation: invalid.'));
+  assert.ok(readFileSync(join(noMeasurement.outputDirectory, 'performance.md'), 'utf8').includes('budget entry switchProject has no measured action'));
 
   for (const mutate of [
     value => { value.actions.push({ ...value.actions[0] }); },

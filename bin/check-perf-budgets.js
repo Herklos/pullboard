@@ -24,7 +24,9 @@ function main(args) {
   mkdirSync(directory, { recursive: true });
   writeFileSync(join(directory, 'performance.json'), JSON.stringify(report, null, 2) + '\n');
   writeFileSync(join(directory, 'budgets.json'), JSON.stringify(result, null, 2) + '\n');
-  writeFileSync(join(directory, 'performance.md'), (typeof report.table === 'string' ? report.table + '\n\n' : '') + perfBudgetTable(result) + '\n');
+  const context = 'Measured board: ' + JSON.stringify(report.size) + ' items; ' + JSON.stringify(report.projects) + ' projects; ' + JSON.stringify(report.runs) + ' run(s).';
+  writeFileSync(join(directory, 'performance.md'), context + '\n\n' + perfBudgetTable(result) + '\n\n'
+    + (typeof report.table === 'string' ? report.table + '\n' : ''));
   for (const warning of result.warnings) {
     // Names come only from the fixed action registry, so harness content cannot inject annotations.
     console.log('::warning::' + warning.name + ': median ' + warning.medianMs + ' ms (budget 100 ms), worst '
