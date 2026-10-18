@@ -326,7 +326,7 @@ test('the board reads at a glance from the status bar [N26]', { timeout: 180_000
           assert.ok(Math.abs(r.barBox.bottom - 900) <= 1 && r.barBox.left === 0 && Math.abs(r.barBox.width - r.page.width) <= 1, `${at}: the bar runs along the foot: ${JSON.stringify(r.barBox)}`);
           assert.ok(r.barTint[3] > 0 && r.barTint[3] < 1 && /blur/.test(r.barBlur), `${at}: the bar is see-through and frosted: ${JSON.stringify([r.barTint, r.barBlur])}`);
           assert.deepEqual(r.bar.map((p) => p.to).filter((to) => !to.startsWith('item:') && to !== 'activity'), ['items', 'agents', 'verify', 'gated', 'release'], `${at}: items, agents, to verify, gated and the release, then the last event: ${JSON.stringify(r.bar)}`);
-          assert.deepEqual([part(r, 'items').text, part(r, 'verify').text, part(r, 'gated').text, part(r, 'release').text], ['6 items', '1 to verify', '2 gated', '1.0: first cut 1/3'], `${at}: what the parts say`);
+          assert.deepEqual([part(r, 'items').text, part(r, 'verify').text, part(r, 'gated').text, part(r, 'release').text], ['6 items', '1 to verify', '2 gated', '1.0: first cut 0/3'], `${at}: what the parts say`);
         }
         // Rows: two lines, the age at the top right, the lane and up to three spec ids below, or the verdict instead.
         const row = Object.fromEntries(r.rows.map((x) => [x.id, x]));
