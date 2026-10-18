@@ -1540,9 +1540,9 @@ export async function relayOff(root, io) {
     let joined = [];
     try {
       const roster = await request(state, '/auth/machines?board=' + state.board, {}, io);
-      if (Array.isArray(roster.machines)) joined = roster.machines.filter(entry => typeof entry.machine === 'string' && /^[A-Za-z0-9_.-]{1,128}$/u.test(entry.machine) && entry.machine !== state.machine).map(entry => entry.machine);
+      if (Array.isArray(roster.machines)) joined = roster.machines.filter(entry => typeof entry.machine === 'string' && /^[A-Za-z0-9_.-]{1,128}$/u.test(entry.machine) && entry.machine !== state.machine).map(entry => ({ machine: entry.machine, name: typeof entry.host === 'string' && entry.host.trim() ? entry.host : entry.machine.slice(-8) }));
     } catch { /* Local unlink still completes when the relay cannot inventory joined computers. */ }
-    const warning = joined.length ? ' If you approve deletion, joined computers ' + joined.map(machine => machine.slice(-8)).join(', ') + ' lose the shared copy; their local boards keep working.' : '';
+    const warning = joined.length ? ' If you approve deletion, joined computers ' + joined.map(entry => entry.name).join(', ') + ' lose the shared copy; their local boards keep working.' : '';
     if (warning) io.err(warning.trim());
     // Local unlink always completes, including agent shells, outages and a fenced remote baseline.
 
@@ -1563,7 +1563,7 @@ export async function relayOff(root, io) {
     }
     return { linked: false, board: state.board, url: state.url, link: '', sequence: state.sequence, behind: 0, recovery: recoverySummary(null),
       ...(remote ? { remote } : {}),
-      ...(joined.length ? { affectedMachines: joined } : {}),
+      ...(joined.length ? { affectedMachines: joined.map(entry => entry.machine), joined: joined.map(entry => entry.name) } : {}),
       notice: 'Local link removed. The relay copy stays until you approve deleting it on your phone.' + warning + (requested ? '' : ' Open the phone to manage the relay copy.') };
   });
 }
@@ -1626,6 +1626,20 @@ export async function deliverDeviceWraps(root, io) {
 
 /** Expose board-scoped machine context only to the native setup/approval adapter. */
 export function relayMachineContext(root) { return loadLink(linkFile(root)); }
+
+/** Ignore notices from courtesy roster reads; disconnected boards keep their local labels and dates. */
+function ignoreRosterNotice() {}
+
+const ROSTER_READ_IO = Object.freeze({ ignoreRelayEnvironmentToken: true, err: ignoreRosterNotice });
+
+/** Read only the fixed, board-scoped roster resources through the CLI's existing outbound transport. */
+export async function relayRosterRead(state, path) {
+  const board = typeof state?.board === 'string' && /^[0-9a-f]{32}$/u.test(state.board);
+  const allowed = typeof path === 'string' && (path === '/api/v1/devices' || /^\/api\/v1\/devices\/device-[0-9a-f]{32}$/u.test(path) ||
+    (board && path === `/auth/machines?board=${state.board}`));
+  if (!allowed) throw new Refused('RELAY_ROSTER_PATH', 'the roster requested an unsupported relay resource');
+  return request(state, path, { method: 'GET', signal: AbortSignal.timeout(5000) }, ROSTER_READ_IO);
+}
 
 /** Require one exact phone approval before revoking and removing a device from the trusted roster. */
 export async function relayRevokeDevice(root, deviceId, io) {
