@@ -699,7 +699,9 @@ async function threeReplicaFixture(t, timing) {
   try {
     store.register(seedBoard, { lane: 'coordinator', path: seed });
     for (let index = 0; index < worktrees.length; index += 1) {
-      store.register(seedBoard, { lane: 'web', path: worktrees[index], route: 'light' });
+      const seat = store.register(seedBoard, { lane: 'web', path: worktrees[index], route: 'light', createdBy: 'coordinator' });
+      // The seed stands in for seats the coordinator enrolled through the relay, so they may verify (#579).
+      seedBoard.db.prepare('INSERT INTO board_meta (meta_key, meta_value) VALUES (?, ?)').run(`agent_enrolled:${seat}`, 'coordinator');
     }
     for (let id = 1; id <= 20; id += 1) {
       store.addItem(seedBoard, {
@@ -743,8 +745,14 @@ async function threeReplicaFixture(t, timing) {
       const machineCredential = await timing.wait(`issue the machine credential for clone ${index + 1}`, () => auth.issueMachine(person.token, { board: boardId, machine }));
       cloneCredentials.push(machineCredential);
       assert.match(machineCredential.token, /^pm_[A-Za-z0-9_-]{43}$/u);
+      // Each clone's person sign-in sets up its own coordinator token, as relay on does (#579).
+      const coordinator = await auth.issueCoordinator(person.token, { board: boardId });
+      // The seeded web seat stands in for one this coordinator enrolled: the relay records it the same way.
+      const seat = await auth.enrollSeat(coordinator.token, boardId, { target: `web-${index + 1}`, creator: 'coordinator', sequence: index + 1, digest: String(index).repeat(64) });
       const state = {
         version: 1, mode: 'ordered', board: boardId, url: relay.origin, repository: 'fixture/repository',
+        agentTokens: { coordinator: { id: coordinator.id, token: coordinator.token, expires: coordinator.expires, created: coordinator.created },
+          [`web-${index + 1}`]: { id: seat.id, token: seat.token, expires: seat.expires, created: seat.created } },
         token: machineCredential.token, tokenId: machineCredential.id, account: person.user.id, machine,
         keyStorage: 'file', sequence: 0,
         cursor: snapshot.tables.event.at(-1)?.event_id ?? 0,
@@ -868,7 +876,7 @@ async function competingReplicaClaims(fixture, timing) {
   const earlierSealed = Buffer.from(await timing.wait('seal the earlier coordinator move', () => seal(key, new TextEncoder().encode(JSON.stringify(earlier)), {
     boardId, kind: 'move', sequence: next,
   }))).toString('base64url');
-  const coordinatorCredential = await timing.wait('issue the coordinator fixture credential', () => auth.issueToken(person.token, { board: boardId, agent: 'coordinator' }));
+  const coordinatorCredential = await timing.wait('issue the coordinator fixture credential', () => auth.issueCoordinator(person.token, { board: boardId }));
   const headers = { 'x-pullboard-engine': String(ENGINE_VERSION), authorization: 'Bearer ' + coordinatorCredential.token, 'content-type': 'application/json' };
   assert.equal((await timing.wait('append the earlier coordinator move', () => fetch(`${relay.origin}/api/v1/boards/${boardId}/moves`, {
     method: 'POST', headers, body: JSON.stringify({ sequence: next, sealed: earlierSealed }),
@@ -1149,7 +1157,7 @@ async function finalReplicaOrder(fixture, timing) {
     next = appliedSequence(updated) + 1;
     future = { ...prepareEngineMove(updated, 'addItem', [{ by: 'coordinator', lane: 'web', title: 'Future engine item' }]), engine: ENGINE_VERSION + 1 };
   } finally { store.closeBoard(updated); }
-  const coordinatorCredential = await timing.wait('issue the coordinator fixture credential for the final order check', () => auth.issueToken(person.token, { board: boardId, agent: 'coordinator' }));
+  const coordinatorCredential = await timing.wait('issue the coordinator fixture credential for the final order check', () => auth.issueCoordinator(person.token, { board: boardId }));
   const headers = { 'x-pullboard-engine': String(ENGINE_VERSION), authorization: 'Bearer ' + coordinatorCredential.token, 'content-type': 'application/json' };
   const futureSealed = Buffer.from(await timing.wait('seal the future-engine move', () => seal(key, new TextEncoder().encode(JSON.stringify(future)), {
     boardId, kind: 'move', sequence: next,
