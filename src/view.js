@@ -53,7 +53,7 @@ function rowHtml(row, by, withSignoff) {
   const label = row.status === 'wont' ? "won't build" : row.status;
   const search = esc(`${row.id} ${row.status} ${label} ${row.tier} ${row.text} ${row.gate}`.toLowerCase());
   const signoff = withSignoff ? `<td>${signoffCell(row, by).html}</td>` : '';
-  return `<tr data-text="${search}"><td class="id">${esc(row.id)}</td><td><span class="st st-${esc(row.status)}">${esc(label)}</span>${tier}</td><td>${esc(row.text)}</td><td class="gate">${esc(row.gate)}</td><td class="id">${serves}</td>${signoff}</tr>`;
+  return `<tr data-text="${search}"><td class="id">${esc(row.id)}</td><td><span class="st st-${esc(row.status)}">${esc(label)}</span>${tier}${row.stage ? `<div>${esc(row.stage)}</div>` : ''}</td><td>${esc(row.text)}</td><td class="gate">${esc(row.gate)}</td><td class="id">${serves}</td>${signoff}</tr>`;
 }
 
 /**
