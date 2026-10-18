@@ -18,6 +18,9 @@ export const CAUSE_ENGINE = 30;
 /** First released engine binding the checked composition, review trunk and paths [E8,H16]. */
 export const VERDICT_REVIEW_ENGINE = 33;
 
+/** First engine carrying explicit milestone ranks in build and review selection [N2,B13,H16]. */
+export const MILESTONE_RANK_ENGINE = 34;
+
 /** @typedef {'agent' | 'coordinator' | 'clock'} Role */
 
 /**

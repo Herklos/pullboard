@@ -6,7 +6,7 @@ import { BAR_ENGINE, carriesBarReason } from './bar-corrections.js';
 import { carriesImplies, IMPLIES_ENGINE } from './implies.js';
 import { CHECK_ACCEPT_ENGINE } from './check-accept.js';
 import { HEALTH_SENTINEL_ENGINE } from './health-receipts.js';
-import { CAUSE_ENGINE, ENGINE_VERSION, VERDICT_REVIEW_ENGINE } from './machine.js';
+import { CAUSE_ENGINE, ENGINE_VERSION, VERDICT_REVIEW_ENGINE, MILESTONE_RANK_ENGINE } from './machine.js';
 import { Refused } from './refused.js';
 import { requestMoveProblem, recordRequestMove } from './relay-requests.js';
 import { relayMoveActor, relaySenderProblem, validRelaySender } from './relay-sender.js';
@@ -18,14 +18,14 @@ export const ENGINE_OPERATIONS = Object.freeze([
   'register', 'ensureCoordinator', 'addItem', 'editItem', 'completeCheckBaseline', 'escalate', 'recordAttempt',
   'claim', 'release', 'submit', 'reserveReview', 'reserveNextReview', 'verify', 'merged',
   'withdraw', 'refreeze', 'reopen', 'shout', 'passDecision', 'answerDecision', 'holdLane', 'releaseLane', 'holdItem', 'releaseItemHold',
-  'addMilestone', 'editMilestoneItems', 'moveMilestone', 'editMilestone', 'removeMilestone',
+  'addMilestone', 'editMilestoneItems', 'orderMilestoneItems', 'moveMilestone', 'editMilestone', 'removeMilestone',
   'recordRowDecisions', 'applyRowDecisions', 'appendFact',
   'recordLandingBatch', 'recordLandingWaiver', 'recordLandingFlake', 'finishLandingBatch', 'acceptCheck',
   'recordHealthFindings',
 ]);
 
 /** Engine version at which each ordered operation first has stable replay semantics. */
-const OPERATION_ENGINE = Object.freeze({ reopen: 8, recordLandingBatch: 8, recordLandingWaiver: 8, recordLandingFlake: 8, finishLandingBatch: 8, acceptCheck: CHECK_ACCEPT_ENGINE });
+const OPERATION_ENGINE = Object.freeze({ orderMilestoneItems: MILESTONE_RANK_ENGINE, reopen: 8, recordLandingBatch: 8, recordLandingWaiver: 8, recordLandingFlake: 8, finishLandingBatch: 8, acceptCheck: CHECK_ACCEPT_ENGINE });
 
 /** Dependency edits, bar reasons and sealed review metadata retain their distinct recorded engine meanings. */
 function minimumOperationEngine(operation, args, board) {
