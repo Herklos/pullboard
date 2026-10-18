@@ -49,6 +49,8 @@ test('the harness measures with eight registered projects [N26,N40]', async (t) 
       ['firstLoad', 'tab:shouts', 'tab:spec', 'tab:doctrine', 'tab:activity', 'tab:roadmap', 'tab:items',
         'openSmallItem', 'openLongestHistoryItem', 'search', 'idleWithLiveWrites'], 'the eleven existing actions stay intact');
     assert.equal(report.size, 5, 'the measured stress-board size is preserved');
+    t.diagnostic(JSON.stringify({ projects: report.projects, size: report.size,
+      projectNames: report.projectNames, actions: report.actions.map((action) => action.name) }));
   }
 });
 
