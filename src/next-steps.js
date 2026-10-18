@@ -331,6 +331,7 @@ export const NEXT_STEPS = Object.freeze({
   RELAY_SNAPSHOT_LIMIT: 'reduce the board snapshot until it fits the relay limit, then retry the command',
   RELAY_RECORD: 'retry the relay action after the displayed blocker is resolved',
   RELAY_RETRY_PENDING: 'repeat the interrupted command exactly to get its original outcome',
+  RELAY_ROSTER_PATH: 'upgrade Pullboard on this machine, then run pullboard relay devices again',
   RELAY_SEAL: 'continue with the next record: pullboard relay',
   RELAY_SENDER: 'restore the record\'s sender before replaying it',
   RELAY_SENDER_MISMATCH: 'send the move as the agent that makes it, from that agent\'s worktree',
