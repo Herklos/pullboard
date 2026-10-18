@@ -88,6 +88,7 @@ import {
   runGate,
   runProfiledShell,
   runSubmitGate,
+  runStaticChecks,
   submitGateReport,
   timingDigest,
   withGateSlot,
@@ -2736,7 +2737,7 @@ async function submitHere(ctx, id) {
   for (const rule of doctrine) ctx.io.say(`doctrine: ${ruleLine(rule)}`);
   // Every submit proves its frozen check and reachable tests anew on this exact commit (V4,V16).
   // A full-gate stamp never substitutes for either proof; only an actual full fallback may stamp.
-  const submitConfig = { ...ctx.config, submitGate: acceptedMain.config.submitGate,
+  const submitConfig = { ...ctx.config, submitGate: acceptedMain.config.submitGate, staticChecks: acceptedMain.config.staticChecks,
     submitInvariants: acceptedMain.config.submitInvariants,
     // The accepted project runner interprets its current invariant files; candidate config cannot replace it.
     ...(acceptedMain.config.submitInvariants.length ? { affectedTests: acceptedMain.config.affectedTests } : {}) };
@@ -3582,8 +3583,6 @@ function workCommands(io, args) {
       });
       const check = frozenCheck(item);
       if (!check) throw new Refused('NO_CHECK', `#${item.item_id} has no check command; its proof is the project gate: pullboard gate`);
-      if (item.item_claim_head) itemPolicy(ctx.info.root, item);
-      else mainPolicy(ctx.info.root);
       const by = author || 'unknown (legacy)';
       const authorName = author ? agentDisplayName(agents, ctx.config, author) : by;
       const notice = `check #${item.item_id} set by ${authorName}: ${check}`;
@@ -3597,6 +3596,7 @@ function workCommands(io, args) {
           throw new Refused('CHECK_CONFIRM', `the check set by ${authorName} was not run: ${check}; run pullboard check ${item.item_id} --yes after reading the command, or answer yes at the prompt`);
         }
       }
+      await runStaticChecks(ctx.info.root, (item.item_claim_head ? itemPolicy(ctx.info.root, item) : mainPolicy(ctx.info.root)).config, { agent: caller, item: String(item.item_id), onWait: queuedItemLease(ctx, item, caller, 'build'), onBrowserFallback: browserAdmissionReporter(io, values.json) });
       const browser = !browserFreeChecksEnabled() || await checkNeedsBrowser(ctx.info.root, check, { onFallback: browserAdmissionReporter(io, values.json) });
       const shortEligible = Boolean(await explicitCheckFiles(ctx.info.root, check));
       const run = await withGateSlot(ctx.info.root, (lease) => runProfiledShell(ctx.info.root, check, { waitMs: lease.waitMs, artifactPrefix: `pullboard-check-${item.item_id}`, persistLog: true, gateLease: lease }), { browser, agent: caller, item: String(item.item_id), kind: 'check', itemCheck: true, shortEligible, onWait: queuedItemLease(ctx, item, caller, 'build') });
