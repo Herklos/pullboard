@@ -322,3 +322,86 @@ test('gate set keeps configuration in the coordinator checkout [I1,L3,B26]', () 
     assert.equal(readFileSync(mainFile, 'utf8'), mainBefore, 'a malformed setter leaves all configuration alone');
   }
 });
+
+/** Follow the actual printed setter after proving the same real target fails independently. */
+test('NO_GATE preserves a failing Makefile test with ordinary multiple targets [C3,I1,B26]', () => {
+  const box = e2e.sandbox();
+  const root = join(box.dir, 'multi-target-project');
+  mkdirSync(root);
+  box.git(root, 'init', '-q', '-b', 'main');
+  const initialized = box.run(root, 'init');
+  assert.equal(initialized.code, 0, initialized.err || initialized.out);
+  const configFile = join(root, 'pullboard.json');
+  const config = JSON.parse(readFileSync(configFile, 'utf8'));
+  writeFileSync(configFile, JSON.stringify({ ...config, gate: '' }, null, 2));
+  writeFileSync(join(root, 'SPEC.md'), '# Make project\n\n## G · Goals\n- G1 [approved, must] Project tests prove the work. | gate: make test\n');
+  const marker = join(box.dir, 'make-test-ran');
+  const quote = value => "'" + value.replaceAll("'", "'\\''") + "'";
+  writeFileSync(join(root, 'Makefile'), `test check:\n\t@printf tested > ${quote(marker)}\n\t@exit 1\n`);
+  box.git(root, 'add', '-A');
+  box.git(root, 'commit', '-q', '-m', 'chore: prepare a multiple-target Makefile');
+  const actual = runFixtureChild('make', ['test'], { cwd: root, env: box.env, encoding: 'utf8' });
+  assert.notEqual(actual.status, 0, 'the real project target must be red before following any advice');
+  assert.equal(readFileSync(marker, 'utf8'), 'tested');
+  rmSync(marker);
+  const missing = box.run(root, 'gate', '--json');
+  assert.equal(missing.code, 1, missing.err || missing.out);
+  const refusal = JSON.parse(missing.out).error;
+  assert.equal(refusal.code, 'NO_GATE');
+  const printed = /pullboard gate set '[^']*'/u.exec(refusal.next)?.[0];
+  assert.ok(printed, 'the current refusal must provide the executable setter');
+  const set = runFixtureChild('sh', ['-c', printed], { cwd: root, env: box.env, encoding: 'utf8' });
+  assert.equal(set.status, 0, set.failure || set.stderr || set.stdout);
+  assert.equal(existsSync(marker), false, 'detection and configuration must not run the project gate');
+  box.git(root, 'add', 'pullboard.json');
+  box.git(root, 'commit', '-q', '-m', 'chore: follow printed gate advice');
+  const gated = box.run(root, 'gate', '--json');
+  const result = JSON.parse(gated.out);
+  console.log(JSON.stringify({ directMakeStatus: actual.status, printed, configured: JSON.parse(readFileSync(configFile, 'utf8')).gate, gateStatus: gated.code, green: result.green, projectTestRan: existsSync(marker) }));
+  assert.equal(result.green, false, 'following NO_GATE advice must not pass a real failing multi-target make test');
+  assert.notEqual(gated.code, 0);
+  assert.equal(readFileSync(marker, 'utf8'), 'tested');
+});
+
+test('NO_GATE finds test anywhere in literal Makefile target lists [C3,I1,B26]', () => {
+  for (const [rule, target] of [
+    ['check test:', true],
+    ['check \\' + '\ntest:', true],
+    ['  check test :', true],
+    ['test := test check:', false],
+    ['all:\n\ttest: recipe-text', false],
+  ]) {
+    const box = e2e.sandbox();
+    const root = join(box.dir, 'make-target-project');
+    mkdirSync(root);
+    box.git(root, 'init', '-q', '-b', 'main');
+    assert.equal(box.run(root, 'init').code, 0);
+    const configFile = join(root, 'pullboard.json');
+    const config = JSON.parse(readFileSync(configFile, 'utf8'));
+    writeFileSync(configFile, JSON.stringify({ ...config, gate: '' }, null, 2));
+    writeFileSync(join(root, 'SPEC.md'), '# Make project\n\n## G · Goals\n- G1 [approved, must] Project tests prove the work. | gate: make test\n');
+    const marker = join(box.dir, 'project-test-ran');
+    const quoted = "'" + marker.replaceAll("'", "'\\''") + "'";
+    writeFileSync(join(root, 'Makefile'), rule + (target ? `\n\t@printf tested > ${quoted}\n\t@exit 1\n` : '\n'));
+    box.git(root, 'add', '-A');
+    box.git(root, 'commit', '-q', '-m', 'chore: prepare literal Makefile target coverage');
+    const direct = runFixtureChild('make', ['test'], { cwd: root, env: box.env, encoding: 'utf8' });
+    assert.notEqual(direct.status, 0, 'the real test fails, or make reports no test target');
+    assert.equal(existsSync(marker), target, `make itself determines whether ${JSON.stringify(rule)} has our test recipe`);
+    if (target) rmSync(marker);
+    const missing = box.run(root, 'gate', '--json');
+    assert.equal(missing.code, 1);
+    const refusal = JSON.parse(missing.out).error;
+    assert.equal(refusal.code, 'NO_GATE');
+    const printed = /pullboard gate set '[^']*'/u.exec(refusal.next)?.[0];
+    assert.equal(printed, `pullboard gate set '${target ? 'make test' : 'pullboard spec check'}'`, rule);
+    const configured = runFixtureChild('sh', ['-c', printed], { cwd: root, env: box.env, encoding: 'utf8' });
+    assert.equal(configured.status, 0, configured.failure || configured.stderr || configured.stdout);
+    assert.equal(existsSync(marker), false, 'finding and setting the gate never runs Makefile code');
+    box.git(root, 'add', 'pullboard.json');
+    box.git(root, 'commit', '-q', '-m', 'chore: use the printed project gate');
+    const gated = box.run(root, 'gate', '--json');
+    assert.equal(JSON.parse(gated.out).green, !target, rule);
+    assert.equal(existsSync(marker), target, 'only running a real project gate executes its test recipe');
+  }
+});

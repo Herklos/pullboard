@@ -31,9 +31,18 @@ export function detectGate(root) {
   }
   for (const name of ['GNUmakefile', 'makefile', 'Makefile']) {
     if (!existsSync(join(root, name))) continue;
-    return /^test[ \t]*:(?!=)/mu.test(readFileSync(join(root, name), 'utf8')) ? 'make test' : '';
+    return makeHasTest(readFileSync(join(root, name), 'utf8')) ? 'make test' : '';
   }
   return '';
+}
+
+/** Read literal rule target lists without executing Makefile parsing, includes or recipes. */
+function makeHasTest(source) {
+  return source.replace(/\\\r?\n/gu, ' ').split(/\r?\n/u).some((line) => {
+    if (line.startsWith('\t')) return false;
+    const targets = /^([^:#=]+):(?!(?::)*=)/u.exec(line)?.[1];
+    return targets?.trim().split(/[ \t]+/u).includes('test') ?? false;
+  });
 }
 
 /** Quote the whole gate command as one shell argument, including embedded quotes. */
