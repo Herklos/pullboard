@@ -2,9 +2,19 @@
  * Lanes (L1, L2): which folders each lane owns. The board, `pullboard lanes` and the pre-commit
  * lane check all read the same declaration in pullboard.json, and `pullboard lane add` writes it.
  */
-import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
-import { CONFIG_FILE, COORDINATOR, configFromSource, loadConfig } from './config.js';
+import {
+  CONFIG_FILE,
+  COORDINATOR,
+  configFromSource,
+  loadConfig,
+} from './config.js';
 import { Refused } from './refused.js';
 
 /**

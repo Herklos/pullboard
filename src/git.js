@@ -1,10 +1,25 @@
 /**
  * The few Git facts pullboard needs: repository/worktree identity, selected refs and tree cleanliness.
  */
-import { execFileSync, spawnSync } from 'node:child_process';
+import {
+  execFileSync,
+  spawnSync,
+} from 'node:child_process';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
-import { basename, dirname, join, resolve } from 'node:path';
+import {
+  existsSync,
+  lstatSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  statSync,
+} from 'node:fs';
+import {
+  basename,
+  dirname,
+  join,
+  resolve,
+} from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Refused } from './refused.js';
 

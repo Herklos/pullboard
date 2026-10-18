@@ -1,10 +1,26 @@
 /** Owner-only machine metadata, authenticated device roster and one-use enrollment [H5,H15,H17]. */
 import { randomUUID } from 'node:crypto';
-import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  closeSync,
+  existsSync,
+  fsyncSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { authenticateDeviceEnrollment, devicePublicKey, wrapDeviceBoardKey } from './relay-device-keys.js';
+import {
+  authenticateDeviceEnrollment,
+  devicePublicKey,
+  wrapDeviceBoardKey,
+} from './relay-device-keys.js';
 import { scrubLegacyPersonSessions } from './relay-key.js';
 import { approvalContext } from './relay-approval.js';
 import { createPairingCode } from './pairing.js';

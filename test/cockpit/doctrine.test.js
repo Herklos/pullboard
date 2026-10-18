@@ -81,8 +81,33 @@ test('the doctrine pane names DOCTRINE.md and its rules doctrine [D1,N26]', asyn
     assert.doesNotMatch(detail, /PRACTICE\.md/);
     await page.click({ row: 'doctrine:R1' });
     const localDetail = page.show('doctrine-detail');
-    assert.match(localDetail, /Rows change in DOCTRINE\.md/);
+    assert.doesNotMatch(localDetail, /Rows change in/, 'a local row does not repeat who approves rows (#822)');
     assert.doesNotMatch(localDetail, /PRACTICE\.md/);
+  } finally {
+    await view.stop();
+  }
+});
+
+test('a row detail does not repeat who approves rows [N26]', async () => {
+  const box = machine();
+  const alpha = project(box, 'row-detail-approval', SPEC, { practice: 'DOCTRINE.md' });
+  writeFileSync(join(alpha.repo, 'DOCTRINE.md'), '# Team\n\n## Team\n- R1 [approved, must] Keep evidence. | gate: review\n');
+  const view = await startView(box);
+  try {
+    const page = await openPage(view);
+    await page.click({ tab: 'spec' });
+    await page.click({ row: 'spec:G1' });
+    const spec = page.show('spec-detail');
+    assert.match(spec, /G1/, 'the spec row detail is open');
+    assert.doesNotMatch(spec, /Rows change in/, 'a spec row does not repeat who approves rows');
+    await page.click({ tab: 'doctrine' });
+    await page.click({ row: 'doctrine:R1' });
+    const local = page.show('doctrine-detail');
+    assert.match(local, /R1/, 'the local doctrine row detail is open');
+    assert.doesNotMatch(local, /Rows change in/, 'a local doctrine row does not repeat who approves rows');
+    await page.click({ row: 'doctrine:PB1' });
+    assert.match(page.show('doctrine-detail'), /Standard rules come with Pullboard as defaults to review; override or decline one in DOCTRINE\.md\./,
+      'a standard rule keeps its note');
   } finally {
     await view.stop();
   }

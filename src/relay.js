@@ -1,26 +1,94 @@
 /** Opt-in, sealed relay ordering, with crash-safe migration from the older mirror [H1,H3,H5,H16,H17,P5]. */
-import { createHash, randomUUID } from 'node:crypto';
-import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  createHash,
+  randomUUID,
+} from 'node:crypto';
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { hostname } from 'node:os';
-import { basename, dirname, join } from 'node:path';
-import { gunzipSync, gzipSync } from 'node:zlib';
+import {
+  basename,
+  dirname,
+  join,
+} from 'node:path';
+import {
+  gunzipSync,
+  gzipSync,
+} from 'node:zlib';
 import * as store from './board.js';
-import { exportBoard, importBoard, restoreRelaySnapshot, semanticBoardDigest } from './exchange.js';
-import { appliedSequence, applyEngineMove, applyRelayMove, checkpointSequence, engineReceipt, prepareEngineMove, refuseRelayMove, requireSupportedEngine, startRelayEpoch } from './engine.js';
+import {
+  exportBoard,
+  importBoard,
+  restoreRelaySnapshot,
+  semanticBoardDigest,
+} from './exchange.js';
+import {
+  appliedSequence,
+  applyEngineMove,
+  applyRelayMove,
+  checkpointSequence,
+  engineReceipt,
+  prepareEngineMove,
+  refuseRelayMove,
+  requireSupportedEngine,
+  startRelayEpoch,
+} from './engine.js';
 import { relayMoveActor } from './relay-sender.js';
 import { ENGINE_VERSION } from './machine.js';
-import { presentationDigest, relayPresentation, relaySnapshot } from './relay-presentation.js';
-import { codeIsFromMain, repoInfo, tryGit } from './git.js';
-import { forgetBoardKey, readBoardKey, storeBoardKey } from './relay-key.js';
-import { encodeBoardKey, generateBoardKey, seal, unseal } from './seal.js';
+import {
+  presentationDigest,
+  relayPresentation,
+  relaySnapshot,
+} from './relay-presentation.js';
+import {
+  codeIsFromMain,
+  repoInfo,
+  tryGit,
+} from './git.js';
+import {
+  forgetBoardKey,
+  readBoardKey,
+  storeBoardKey,
+} from './relay-key.js';
+import {
+  encodeBoardKey,
+  generateBoardKey,
+  seal,
+  unseal,
+} from './seal.js';
 import { terminalQr } from './qr.js';
 import { Refused } from './refused.js';
 import { refusalFromReceipt } from './recorded-refusal.js';
 import { relaySenderProblem } from './relay-sender.js';
-import { readRelayMachine, removeRecordedDevice, updateRelayMachine, wrapForRecordedDevice } from './relay-machine.js';
-import { receivePersonRequest, requestMoveProblem } from './relay-requests.js';
-import { nativePhoneAction, phoneProposal, publishPhoneApproval, warnPhoneApproval } from './relay-phone.js';
-import { remoteShell as isRemoteShell, requirePersonChannel, requireRelayOnChannel } from './person.js';
+import {
+  readRelayMachine,
+  removeRecordedDevice,
+  updateRelayMachine,
+  wrapForRecordedDevice,
+} from './relay-machine.js';
+import {
+  receivePersonRequest,
+  requestMoveProblem,
+} from './relay-requests.js';
+import {
+  nativePhoneAction,
+  phoneProposal,
+  publishPhoneApproval,
+  warnPhoneApproval,
+} from './relay-phone.js';
+import {
+  remoteShell as isRemoteShell,
+  requirePersonChannel,
+  requireRelayOnChannel,
+} from './person.js';
 import { listApiProjects } from './projects.js';
 
 export const DEFAULT_RELAY = 'https://app.pullboard.dev';
@@ -1540,9 +1608,9 @@ export async function relayOff(root, io) {
     let joined = [];
     try {
       const roster = await request(state, '/auth/machines?board=' + state.board, {}, io);
-      if (Array.isArray(roster.machines)) joined = roster.machines.filter(entry => typeof entry.machine === 'string' && /^[A-Za-z0-9_.-]{1,128}$/u.test(entry.machine) && entry.machine !== state.machine).map(entry => entry.machine);
+      if (Array.isArray(roster.machines)) joined = roster.machines.filter(entry => typeof entry.machine === 'string' && /^[A-Za-z0-9_.-]{1,128}$/u.test(entry.machine) && entry.machine !== state.machine).map(entry => ({ machine: entry.machine, name: typeof entry.host === 'string' && entry.host.trim() ? entry.host : entry.machine.slice(-8) }));
     } catch { /* Local unlink still completes when the relay cannot inventory joined computers. */ }
-    const warning = joined.length ? ' If you approve deletion, joined computers ' + joined.map(machine => machine.slice(-8)).join(', ') + ' lose the shared copy; their local boards keep working.' : '';
+    const warning = joined.length ? ' If you approve deletion, joined computers ' + joined.map(entry => entry.name).join(', ') + ' lose the shared copy; their local boards keep working.' : '';
     if (warning) io.err(warning.trim());
     // Local unlink always completes, including agent shells, outages and a fenced remote baseline.
 
@@ -1563,7 +1631,7 @@ export async function relayOff(root, io) {
     }
     return { linked: false, board: state.board, url: state.url, link: '', sequence: state.sequence, behind: 0, recovery: recoverySummary(null),
       ...(remote ? { remote } : {}),
-      ...(joined.length ? { affectedMachines: joined } : {}),
+      ...(joined.length ? { affectedMachines: joined.map(entry => entry.machine), joined: joined.map(entry => entry.name) } : {}),
       notice: 'Local link removed. The relay copy stays until you approve deleting it on your phone.' + warning + (requested ? '' : ' Open the phone to manage the relay copy.') };
   });
 }
@@ -1626,6 +1694,20 @@ export async function deliverDeviceWraps(root, io) {
 
 /** Expose board-scoped machine context only to the native setup/approval adapter. */
 export function relayMachineContext(root) { return loadLink(linkFile(root)); }
+
+/** Ignore notices from courtesy roster reads; disconnected boards keep their local labels and dates. */
+function ignoreRosterNotice() {}
+
+const ROSTER_READ_IO = Object.freeze({ ignoreRelayEnvironmentToken: true, err: ignoreRosterNotice });
+
+/** Read only the fixed, board-scoped roster resources through the CLI's existing outbound transport. */
+export async function relayRosterRead(state, path) {
+  const board = typeof state?.board === 'string' && /^[0-9a-f]{32}$/u.test(state.board);
+  const allowed = typeof path === 'string' && (path === '/api/v1/devices' || /^\/api\/v1\/devices\/device-[0-9a-f]{32}$/u.test(path) ||
+    (board && path === `/auth/machines?board=${state.board}`));
+  if (!allowed) throw new Refused('RELAY_ROSTER_PATH', 'the roster requested an unsupported relay resource');
+  return request(state, path, { method: 'GET', signal: AbortSignal.timeout(5000) }, ROSTER_READ_IO);
+}
 
 /** Require one exact phone approval before revoking and removing a device from the trusted roster. */
 export async function relayRevokeDevice(root, deviceId, io) {

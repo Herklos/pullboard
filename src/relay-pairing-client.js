@@ -1,19 +1,51 @@
 /** CLI pairing flow: the relay stores only a one-use client-encrypted package [H15,H17]. */
 import { randomUUID } from 'node:crypto';
-import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { hostname } from 'node:os';
+import {
+  dirname,
+  join,
+} from 'node:path';
 import * as store from './board.js';
-import { exportBoard, importBoard } from './exchange.js';
-import { codeIsFromMain, repoInfo } from './git.js';
-import { forgetBoardKey, readBoardKey, storeBoardKey } from './relay-key.js';
+import {
+  exportBoard,
+  importBoard,
+} from './exchange.js';
+import {
+  codeIsFromMain,
+  repoInfo,
+} from './git.js';
+import {
+  forgetBoardKey,
+  readBoardKey,
+  storeBoardKey,
+} from './relay-key.js';
 import { encodeBoardKey } from './seal.js';
-import { createPairingCode, openPairingBundle, parsePairingCode, sealPairingBundle } from './pairing.js';
+import {
+  createPairingCode,
+  openPairingBundle,
+  parsePairingCode,
+  sealPairingBundle,
+} from './pairing.js';
 import { terminalQr } from './qr.js';
-import { DEFAULT_RELAY, originRepository, syncRelay } from './relay.js';
+import {
+  DEFAULT_RELAY,
+  originRepository,
+  syncRelay,
+} from './relay.js';
 import { ENGINE_VERSION } from './machine.js';
 import { Refused } from './refused.js';
 import { requirePersonChannel } from './person.js';
 import { updateRelayMachine } from './relay-machine.js';
+import { listApiProjects } from './projects.js';
 
 const TOKEN = /^pm_[A-Za-z0-9_-]{43}$/;
 const BOARD = /^[0-9a-f]{32}$/;
@@ -223,7 +255,8 @@ export async function relayJoin(root, code, address, io) {
   const file = linkFile(root);
   if (existsSync(file)) throw new Refused('RELAY_LINKED', 'this clone already has relay link metadata; use a fresh clone to join another device');
   const machine = updateRelayMachine(state => state.machine);
-  const issued = await relayRequest(url, signed.token, '/auth/machines', { board: bundle.board, machine });
+  // The linked computer lists this one by its host name, in relay devices and before relay off.
+  const issued = await relayRequest(url, signed.token, '/auth/machines', { board: bundle.board, machine, host: hostname() });
   if (!TOKEN.test(issued.token) || issued.board !== bundle.board || issued.machine !== machine) throw new Refused('RELAY_RESPONSE', 'the relay did not issue this joined board’s machine credential; pair again');
   let keyStorage;
   try {
@@ -245,8 +278,10 @@ export async function relayJoin(root, code, address, io) {
     throw error;
   }
   await syncRelay(root, io);
-  const result = { linked: true, board: bundle.board, url: bundle.url, sequence: bundle.sequence, behind: 0 };
+  const name = listApiProjects().find(project => project.root === repoInfo(root).root)?.name ?? bundle.repository;
+  const notice = `Joined ${name}. This brought one board; for another, run pullboard relay pair in that board on the linked computer. Run pullboard status to read it.`;
+  const result = { linked: true, board: bundle.board, name, url: bundle.url, sequence: bundle.sequence, behind: 0, notice };
   io.result?.(result);
-  io.say(`paired board ${bundle.board}; run pullboard status to read it`);
+  io.say(notice);
   return 0;
 }

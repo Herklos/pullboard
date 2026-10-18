@@ -1,14 +1,46 @@
 /** Coordinator landing batches retain exact Git and gate receipts across interruptions [B3,R3]. */
-import { createHash, randomUUID } from 'node:crypto';
-import { closeSync, copyFileSync, existsSync, mkdirSync, openSync, readFileSync, readSync } from 'node:fs';
-import { dirname, isAbsolute, join, relative } from 'node:path';
+import {
+  createHash,
+  randomUUID,
+} from 'node:crypto';
+import {
+  closeSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readSync,
+} from 'node:fs';
+import {
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+} from 'node:path';
 import * as store from './board.js';
-import { git, headCommit, headTree, isClean, mainCheckout, repoInfo, tryGit, untracked } from './git.js';
-import { runGate, runProfiledShell, withGateSlot } from './gate.js';
+import {
+  git,
+  headCommit,
+  headTree,
+  isClean,
+  mainCheckout,
+  repoInfo,
+  tryGit,
+  untracked,
+} from './git.js';
+import {
+  runGate,
+  runProfiledShell,
+  withGateSlot,
+} from './gate.js';
 import { laneOf } from './lanes.js';
 import { Refused } from './refused.js';
 import { landingFileTimes } from './submit-invariants.js';
-import { staleVerdictRefusal, verdictProjector } from './verdict-freshness.js';
+import {
+  staleVerdictRefusal,
+  verdictProjector,
+} from './verdict-freshness.js';
 
 /** Quote a command argument without allowing shell interpolation. */
 function quote(value) { return `'${String(value).replaceAll("'", "'\\''")}'`; }

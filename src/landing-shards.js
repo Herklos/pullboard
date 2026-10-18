@@ -3,11 +3,31 @@
  * a free local gate slot or a registered runner, and report one result. One red shard stops the rest,
  * and a shard whose runner fails mid-run reruns locally.
  */
-import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, renameSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { createHash, randomUUID } from 'node:crypto';
-import { gitChildEnv, repoInfo } from './git.js';
+import {
+  spawn,
+  spawnSync,
+} from 'node:child_process';
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  readlinkSync,
+  renameSync,
+  writeFileSync,
+} from 'node:fs';
+import {
+  dirname,
+  join,
+} from 'node:path';
+import {
+  createHash,
+  randomUUID,
+} from 'node:crypto';
+import {
+  gitChildEnv,
+  repoInfo,
+} from './git.js';
 import { parseProcessCensus } from './process-census.js';
 import {
   BROWSER_SLOT_HELD_ENV,
