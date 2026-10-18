@@ -7,6 +7,8 @@ Run a repeatable local sample with:
 node test/cockpit/perf/run.mjs --seed pullboard-perf-606 --size 3000 --runs 5 --idle 30 --live-every 5
 ```
 
+Add `--projects 8` to register eight separate boards in the fixture's isolated home. The requested `--size` still describes the measured stress board; the other projects are lightweight initialized boards. The JSON records `projects` and the actual sidebar `projectNames`. Multi-project runs add `switchProject`: after an unmeasured visit to another board, it measures the real click back to the stress board. The original eleven actions stay intact, and the default one-project run has no switch sample.
+
 The harness holds the shared browser-capable gate slot across fixture setup and measurement, creates a disposable board and machine home, starts the normal local view server, and uses an isolated real Chrome profile with real pointer and keyboard input. It measures first load, each cockpit tab, opening a small item and the longest-history item, search typing, and a 30-second idle interval while one board API writer adds a shout every five seconds. It reports each action's median and worst stable-paint time, counts Long Tasks longer than 50ms, and records resource request sizes. Unsupported Long Task observation is reported as unavailable rather than as zero tasks. The harness records measurements without applying a performance pass/fail threshold.
 
 The default size follows the measured 605-item board shape and scales its status mix, long histories, event stream, agents, roadmap and spec rows. The generated spec keeps one draft row visible under the cockpit's default "Needs your decision" filter and the remaining rows approved; the status distribution appears in the board manifest and performance report. At the named-test size of 150, all generated roadmap milestones are shipped, so its roadmap action measures the visible, collapsed Shipped disclosure summary rather than expanded upcoming milestone content. The named test uses 150 items to check deterministic generation and action coverage; it does not assert timing values. Use the reported output as a measurement of the specific machine and run conditions, not as a guarantee for other environments.
@@ -458,6 +460,9 @@ async function measureRun(board, runIndex, executable, idleMs, liveEveryMs, proj
       await press(chrome, row(other.root));
       await waitPaintedAndStable(chrome, network, 'switchProjectSetup', '#status-board',
         `view.root === ${JSON.stringify(other.root)} && data?.root === ${JSON.stringify(other.root)}`);
+      if (await chrome.stable("getComputedStyle(document.querySelector('#side .side-body')).display === 'none'")) {
+        await press(chrome, "document.querySelector('#proj-switch')");
+      }
       await beginAction(chrome, 'switchProject', 'mousedown');
       await press(chrome, row(measuredRoot));
       actions.push(await waitPaintedAndStable(chrome, network, 'switchProject', '#chain .row',
