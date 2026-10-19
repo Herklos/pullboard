@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { tmpdir } from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
 import { takeResource } from '../src/resources.js';
@@ -10,10 +11,12 @@ import { readRemoteGateHolders, waitForCondition } from './runner-fixture-state.
 
 /**
  * Keep the original custody assertions identical in ordinary and forced ordering cases: `holdRelease` forces a real
- * release write conflict, and `chatty` makes the command keep writing output, so some always arrives after the
- * transport drops (#888: a forwarded write then waited forever for a drain from a destroyed stdout).
+ * release write conflict, `chatty` makes the command keep writing output, so some always arrives after the
+ * transport drops (#888: a forwarded write then waited forever for a drain from a destroyed stdout), and `epermOnce`
+ * makes the worker's repeat signal to one process group answer EPERM, as macOS did when the command group finished
+ * exiting during the TERM grace loop (#888); the launcher lingers 300 ms after TERM so that repeat signal is sent.
  */
-export async function parentDeathDrainFixture(t, tools, { holdRelease = false, chatty = false } = {}) {
+export async function parentDeathDrainFixture(t, tools, { holdRelease = false, chatty = false, epermOnce = false } = {}) {
   const { cli, git, installSshStandIn, observe, startQueueController, waitForMarker, processIsAlive, shellQuote, HOST } = tools;
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'pullboard-runner-parent-death-')));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -32,6 +35,7 @@ export async function parentDeathDrainFixture(t, tools, { holdRelease = false, c
   const releaseChild = join(dir, 'release-detached-child');
   const childGone = join(dir, 'detached-child-gone');
   const workerLog = join(dir, 'worker-stderr.log');
+  const epermAnswered = join(dir, 'eperm-answered');
   let releaseLock;
   /** The worker's own account of a stalled release: its runner status lines and any cleanup files in its private job (#888). */
   function workerCleanupReport() {
@@ -74,6 +78,7 @@ const child = spawn(process.execPath, [require.resolve('./remote-detached-child.
 });
 child.unref();
 ${chatty ? "setInterval(() => process.stdout.write('launcher output\\n'), 20);" : 'setInterval(() => {}, 1_000);'}
+${epermOnce ? "process.on('SIGTERM', () => setTimeout(() => process.exit(0), 300));" : ''}
 `);
   writeFileSync(join(repo, 'remote-detached-child.js'), `const { existsSync, writeFileSync } = require('node:fs');
 const [ready, pidFile, term, release, gone] = process.argv.slice(2);
@@ -95,7 +100,26 @@ setInterval(() => {}, 1_000);
 `);
   git(repo, env, 'add', 'pullboard.json', 'tracked.txt', 'remote-parent-death-launcher.js', 'remote-detached-child.js');
   git(repo, env, 'commit', '-q', '-m', 'test: prepare committed detached-child launchers');
-  installSshStandIn({ bin, worker, home: remoteHome, machineHome: remoteMachineHome, requests, stderrLog: workerLog });
+  let nodeOptions = '';
+  if (epermOnce) {
+    const preload = join(dir, 'eperm-once.mjs');
+    writeFileSync(preload, `import { writeFileSync } from 'node:fs';
+const kill = process.kill.bind(process);
+const groups = new Map();
+let answered = false;
+process.kill = (pid, signal) => {
+  if (pid < 0) groups.set(pid, (groups.get(pid) ?? 0) + 1);
+  if (!answered && pid < 0 && groups.get(pid) === 2) {
+    answered = true;
+    writeFileSync(${JSON.stringify(epermAnswered)}, 'eperm\\n');
+    throw Object.assign(new Error('kill EPERM'), { code: 'EPERM', errno: -1, syscall: 'kill' });
+  }
+  return kill(pid, signal);
+};
+`);
+    nodeOptions = '--import=' + pathToFileURL(preload).href;
+  }
+  installSshStandIn({ bin, worker, home: remoteHome, machineHome: remoteMachineHome, requests, stderrLog: workerLog, nodeOptions });
   const added = cli(repo, env, 'runner', 'add', HOST, '--slots', '1', '--browser', '1', '--json');
   assert.equal(added.status, 0, added.context);
 
@@ -175,6 +199,7 @@ setInterval(() => {}, 1_000);
       t.diagnostic(message);
       t.diagnostic('worker cleanup report ' + JSON.stringify(workerCleanupReport()));
     } });
+    if (epermOnce) assert.equal(existsSync(epermAnswered), true, 'a repeat group signal really answered EPERM before the release');
     const controller = await remoteRun.closed;
     remoteRun = null;
     assert.equal(controller.signal, 'SIGTERM', 'the owned API controller alone received SIGTERM');

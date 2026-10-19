@@ -641,7 +641,13 @@ function createDescendantTracker(directory) {
     });
     if (!ownedMember) return false;
     try { process.kill(-pgid, signal); }
-    catch (error) { if (error.code === 'ESRCH') return false; throw error; }
+    catch (error) {
+      if (error.code === 'ESRCH') return false;
+      // macOS answers EPERM for a group whose members exited but are not yet reaped. Throwing here escaped cleanup and
+      // skipped the lease release (#888); retry on a fresh census instead, as for any other ambiguity.
+      if (error.code === 'EPERM') return null;
+      throw error;
+    }
     return true;
   }
 

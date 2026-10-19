@@ -88,9 +88,10 @@ function cli(repo, env, ...args) {
  * Make a local ssh stand-in that executes the actual worker command in a second private machine.
  * It appends "dispatched" and "returned" to <requests>.phases so a round trip can be timed by phase,
  * and `hold` ('dispatch', 'run' or 'return') keeps it alive at that phase, as a stuck runner would.
- * `stderrLog` also copies the worker's stderr, so a test can read its result receipt.
+ * `stderrLog` also copies the worker's stderr, so a test can read its result receipt, and `nodeOptions` reaches the
+ * worker's own Node process, so a test can force an ordering inside it.
  */
-function installSshStandIn({ bin, worker, home, machineHome, requests, starts, nodeCommand = 'node', dropFirst = false, dropAfterMarker, hold = '', stderrLog }) {
+function installSshStandIn({ bin, worker, home, machineHome, requests, starts, nodeCommand = 'node', dropFirst = false, dropAfterMarker, hold = '', stderrLog, nodeOptions = '' }) {
   const ssh = join(bin, 'ssh');
   const source = `#!/usr/bin/env node
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
@@ -157,7 +158,8 @@ ${dropFirst ? `if (host.endsWith('-drop') && call === 1) {
   process.stdin.resume();
 } else` : ''} {
   const env = { PATH: process.env.PATH, HOME: home, TMPDIR: process.env.TMPDIR,
-    PULLBOARD_HOME: home, PULLBOARD_MACHINE_HOME: machineHome, LANG: 'C', LC_ALL: 'C', TZ: 'UTC' };
+    PULLBOARD_HOME: home, PULLBOARD_MACHINE_HOME: machineHome, LANG: 'C', LC_ALL: 'C', TZ: 'UTC',
+    ...(${JSON.stringify(nodeOptions)} ? { NODE_OPTIONS: ${JSON.stringify(nodeOptions)} } : {}) };
   // Replace the marker-driven shell so the injected HUP reaches the actual worker process.
   const child = spawn('/bin/sh', ['-c', remoteCommand], { cwd: worker, env,
     stdio: ['pipe', 'pipe', 'pipe'] });
@@ -1674,6 +1676,9 @@ test('parent death retries a failed remote holder deletion after the real databa
 
 test('a queued run executes on a registered runner and its result comes back [C7] (parent death drains its worker while the command keeps writing output)',
   { timeout: 90_000 }, t => parentDeathDrainFixture(t, parentDeathTools, { chatty: true })); // budget: same fixture ceiling as the ordinary parent-death case.
+
+test('a queued run executes on a registered runner and its result comes back [C7] (parent death drains its worker when a group signal answers EPERM)',
+  { timeout: 90_000 }, t => parentDeathDrainFixture(t, parentDeathTools, { epermOnce: true })); // budget: same fixture ceiling as the ordinary parent-death case.
 
 test('a queued run executes on a registered runner and its result comes back [C7] (unverified cleanup times out as a named red result)', { timeout: 90_000 }, async (t) => { // budget: bounded 30-second remote cleanup timeout plus startup, transport and fixture cleanup ceiling.
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'pullboard-runner-cleanup-timeout-')));
