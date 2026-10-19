@@ -5,7 +5,8 @@ import { ENGINE_VERSION } from './engine.js';
 import { Refused } from './refused.js';
 import { approvalContext, openApproval, sealApproval, verifyApprovalIntent } from './relay-approval.js';
 import { devicePublicKey } from './device-keys.js';
-import { approvalCardText, approvalNames, deletedText } from './browser-approval-card.js';
+import { approvalCardText, approvalNames, deletedText, phoneApprovalStatus } from './browser-approval-card.js';
+import { withBrowserDeadline } from './browser-deadline.js';
 
 const PENDING = 'pullboard.relay.device-pair.v1';
 
@@ -20,45 +21,62 @@ export function rememberDevicePairing() {
   history.replaceState(null, '', location.pathname + location.search);
 }
 
-/** Complete one IndexedDB transaction before its connection is closed or the page continues. */
-async function deviceStorage(value) {
-  if (!globalThis.indexedDB) throw new Refused('DEVICE_STORAGE', 'Use a secure browser with IndexedDB enabled to pair this phone.');
-  const db = await new Promise((resolve, reject) => {
+/** Close a late IndexedDB open instead of retaining a key connection after the caller timed out. */
+function openDeviceDatabase(signal) {
+  return new Promise((resolve, reject) => {
     const request = indexedDB.open('pullboard-relay-device-v1', 1);
-    request.onupgradeneeded = () => request.result.createObjectStore('keys');
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(new Refused('DEVICE_STORAGE', 'Enable IndexedDB before pairing this phone.'));
+    const abort = () => reject(signal.reason);
+    signal.addEventListener('abort', abort, { once: true });
+    request.onupgradeneeded = () => {
+      if (signal.aborted) request.transaction.abort();
+      else request.result.createObjectStore('keys');
+    };
+    request.onsuccess = () => {
+      signal.removeEventListener('abort', abort);
+      if (signal.aborted) { request.result.close(); reject(signal.reason); }
+      else resolve(request.result);
+    };
+    request.onerror = () => {
+      signal.removeEventListener('abort', abort);
+      reject(new Refused('DEVICE_STORAGE', 'Enable IndexedDB before pairing this phone.'));
+    };
   });
-  try {
-    return await new Promise((resolve, reject) => {
-      const transaction = db.transaction('keys', value === undefined ? 'readonly' : 'readwrite');
-      const store = transaction.objectStore('keys');
-      const request = value === undefined ? store.get('device') : store.put(value, 'device');
-      let result;
-      request.onsuccess = () => { result = request.result; };
-      transaction.oncomplete = () => resolve(value === undefined ? result ?? null : value);
-      transaction.onerror = transaction.onabort = () => reject(new Refused('DEVICE_STORAGE', 'The phone could not retain its private key. Enable device storage and pair again.'));
-    });
-  } finally { db.close(); }
 }
 
-/** Erase this removed browser's non-extractable private key before its revoked board can be drawn again. */
+/** Bound opening and completing a private key transaction, aborting that transaction on expiry. */
+async function withDeviceStore(mode, action) {
+  if (!globalThis.indexedDB) throw new Refused('DEVICE_STORAGE', 'Use a secure browser with IndexedDB enabled to pair this phone.');
+  return withBrowserDeadline(async signal => {
+    const db = await openDeviceDatabase(signal);
+    try {
+      if (signal.aborted) throw signal.reason;
+      return await new Promise((resolve, reject) => {
+        const transaction = db.transaction('keys', mode);
+        const abort = () => { try { transaction.abort(); } catch (error) { if (error.name !== 'InvalidStateError') reject(error); } };
+        signal.addEventListener('abort', abort, { once: true });
+        const request = action(transaction.objectStore('keys'));
+        let result;
+        request.onsuccess = () => { result = request.result; };
+        transaction.oncomplete = () => { signal.removeEventListener('abort', abort); resolve(result); };
+        transaction.onerror = transaction.onabort = () => {
+          signal.removeEventListener('abort', abort);
+          reject(new Refused('DEVICE_STORAGE', 'Device storage did not finish. Open this page again to retry.'));
+        };
+      });
+    } finally { db.close(); }
+  }, { code: 'DEVICE_STORAGE', message: 'Device storage did not answer. Open this page again to retry.' });
+}
+
+/** Complete one bounded private key transaction before the connection is closed or the page continues. */
+async function deviceStorage(value) {
+  const result = await withDeviceStore(value === undefined ? 'readonly' : 'readwrite',
+    store => value === undefined ? store.get('device') : store.put(value, 'device'));
+  return value === undefined ? result ?? null : value;
+}
+
+/** Erase a removed browser's private key with the same bounded, abortable storage operation. */
 export async function forgetDevice() {
-  if (!globalThis.indexedDB) return;
-  const db = await new Promise((resolve, reject) => {
-    const request = indexedDB.open('pullboard-relay-device-v1', 1);
-    request.onupgradeneeded = () => request.result.createObjectStore('keys');
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(new Refused('DEVICE_STORAGE', 'Clear this removed browser’s site data before pairing again.'));
-  });
-  try {
-    await new Promise((resolve, reject) => {
-      const transaction = db.transaction('keys', 'readwrite');
-      transaction.objectStore('keys').delete('device');
-      transaction.oncomplete = resolve;
-      transaction.onerror = transaction.onabort = () => reject(new Refused('DEVICE_STORAGE', 'Clear this removed browser’s site data before pairing again.'));
-    });
-  } finally { db.close(); }
+  if (globalThis.indexedDB) await withDeviceStore('readwrite', store => store.delete('device'));
 }
 
 /** Send a public enrollment without exposing private material; return true once new pairing delivers keys. */
@@ -75,11 +93,11 @@ export async function enrollPhone(documentAt) {
   const identity = await documentAt('/api/v1/devices/session');
   let device = await deviceStorage();
   if (device?.locator !== locator || device.account !== identity.account) {
-    device = { ...await createDeviceKeys(), account: identity.account, locator };
+    device = { ...await withBrowserDeadline(() => createDeviceKeys()), account: identity.account, locator };
     await deviceStorage(device);
   }
-  const body = await signDeviceEnrollment(secret, { v: 1, account: identity.account, locator,
-    deviceId: device.deviceId, publicKey: device.publicKey, label: 'Phone browser', createdAt: new Date().toISOString() });
+  const body = await withBrowserDeadline(() => signDeviceEnrollment(secret, { v: 1, account: identity.account, locator,
+    deviceId: device.deviceId, publicKey: device.publicKey, label: 'Phone browser', createdAt: new Date().toISOString() }));
   await documentAt('/api/v1/devices/enrollments/' + locator, {
     method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
   });
@@ -114,8 +132,8 @@ export async function deviceBoardKeys(documentAt) {
     let envelope;
     try { envelope = JSON.parse(atob(row.wrapped.replaceAll('-', '+').replaceAll('_', '/'))); }
     catch { throw new Refused('DEVICE_WRAP_AUTH', 'The wrapped board key could not be authenticated. Pair again.'); }
-    keys[row.board] = encodeBoardKey(await unwrapDeviceBoardKey(device.privateKey, envelope,
-      { board: row.board, device: device.deviceId, engine: ENGINE_VERSION }));
+    keys[row.board] = encodeBoardKey(await withBrowserDeadline(() => unwrapDeviceBoardKey(device.privateKey, envelope,
+      { board: row.board, device: device.deviceId, engine: ENGINE_VERSION })));
   }
   return keys;
 }
@@ -134,10 +152,8 @@ export async function installPhoneApprovals(documentAt, boardKeys, onApproved, s
   if (document.getElementById('phone-approvals')) return;
   let device = await deviceStorage();
   if (!device || signal?.aborted) return;
-  const panel = document.createElement('section');
-  panel.className = 'card-panel'; panel.id = 'phone-approvals';
-  panel.setAttribute('aria-label', 'Requests from your Mac');
-  document.querySelector('main').prepend(panel);
+  const panel = phoneApprovalStatus(document, 'Checking requests from your computer…');
+  if (!panel) return;
   const active = new Set();
   let stopped = false;
   let timer;
@@ -150,6 +166,8 @@ export async function installPhoneApprovals(documentAt, boardKeys, onApproved, s
     try {
       const response = await documentAt('/api/v1/devices/' + device.deviceId + '/approvals');
       if (stopped) return;
+      phoneApprovalStatus(document, null);
+      delete panel.dataset.error;
       const ids = new Set(response.approvals.map(value => value.context.id));
       for (const child of [...panel.children]) if (child.dataset.request && !ids.has(child.dataset.request) && !active.has(child.dataset.request)) child.remove();
       for (const row of response.approvals) {
@@ -159,8 +177,8 @@ export async function installPhoneApprovals(documentAt, boardKeys, onApproved, s
         const raw = boardKeys[context.publisher];
         if (!raw) continue;
         const key = Uint8Array.from(atob(raw.replaceAll('-', '+').replaceAll('_', '/') + '='.repeat((4 - raw.length % 4) % 4)), char => char.charCodeAt(0));
-        const envelope = await verifyApprovalIntent(key, approvalDocument(row.sealed));
-        const intent = await openApproval(device.privateKey, envelope, context, 'intent');
+        const envelope = await withBrowserDeadline(() => verifyApprovalIntent(key, approvalDocument(row.sealed)), { signal });
+        const intent = await withBrowserDeadline(() => openApproval(device.privateKey, envelope, context, 'intent'), { signal });
         if (stopped) return;
         if (JSON.stringify(approvalContext(intent.context)) !== JSON.stringify(context)) throw new Refused('PHONE_APPROVAL_AUTH', 'The displayed request differs from its sealed action.');
         const replyKey = devicePublicKey(intent.replyKey);
@@ -179,7 +197,7 @@ export async function installPhoneApprovals(documentAt, boardKeys, onApproved, s
             const authorized = await documentAt('/api/v1/devices/approvals/' + context.id + '/authorize', {
               method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
             });
-            const encrypted = await sealApproval(authorized.result, replyKey, context, 'reply');
+            const encrypted = await withBrowserDeadline(() => sealApproval(authorized.result, replyKey, context, 'reply'), { signal });
             const response = btoa(JSON.stringify(encrypted)).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/u, '');
             await documentAt('/api/v1/devices/approvals/' + context.id + '/complete', {
               method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ response }),
@@ -195,7 +213,12 @@ export async function installPhoneApprovals(documentAt, boardKeys, onApproved, s
         card.append(text, detail, button); panel.append(card);
       }
     } catch (error) {
-      if (error?.code !== 'DEVICE_NOT_ENROLLED') panel.setAttribute('data-error', 'Approval requests are unavailable. Retry from the Mac.');
+      if (stopped) return;
+      if (error?.code === 'DEVICE_NOT_ENROLLED') phoneApprovalStatus(document, null);
+      else {
+        panel.setAttribute('data-error', 'Approval requests are unavailable. Retry from the Mac.');
+        phoneApprovalStatus(document, 'Requests from your computer did not load. They will retry.');
+      }
     } finally { if (!stopped) timer = setTimeout(refresh, 1000); }
   }
   addEventListener('pagehide', stop, { once: true });

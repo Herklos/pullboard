@@ -35,9 +35,33 @@ export function deletedText(names) {
 
 /** Card spacing for the relay page; served after the shared view styles. */
 export const APPROVAL_CARD_STYLES = `
+#phone-approvals:empty { display: none; }
+.phone-approval-status { margin: 0; padding: 14px 16px; color: var(--ink-muted); }
 .phone-approval { display: grid; gap: 10px; padding: 14px 16px; }
 .phone-approval p { margin: 0; overflow-wrap: anywhere; }
 .phone-approval-title { font-weight: 600; }
 .phone-approval-detail { color: var(--ink-muted); }
 .phone-approval button { justify-self: start; }
 `;
+
+/** Show the requests feed's own progress without making it a prerequisite for reading a board. */
+export function phoneApprovalStatus(doc, message) {
+  let panel = doc.getElementById('phone-approvals');
+  if (!panel && message) {
+    const main = doc.querySelector('main');
+    if (!main) return null;
+    panel = doc.createElement('section');
+    panel.id = 'phone-approvals'; panel.className = 'card-panel';
+    panel.setAttribute('aria-label', 'Requests from your computer');
+    main.prepend(panel);
+  }
+  if (!panel) return null;
+  let status = panel.querySelector('.phone-approval-status');
+  if (!message) { status?.remove(); return panel; }
+  if (!status) {
+    status = doc.createElement('p'); status.className = 'phone-approval-status';
+    status.setAttribute('role', 'status'); panel.prepend(status);
+  }
+  status.textContent = message;
+  return panel;
+}
