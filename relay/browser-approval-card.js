@@ -37,12 +37,36 @@ export function deletedText(names) {
 export const APPROVAL_CARD_STYLES = `
 #phone-approvals:empty { display: none; }
 .relay-panel #phone-approvals { margin-top: 20px; text-align: left; }
+.phone-approval-status { margin: 0; padding: 14px 16px; color: var(--ink-muted); }
 .phone-approval { display: grid; gap: 10px; padding: 14px 16px; }
 .phone-approval p { margin: 0; overflow-wrap: anywhere; }
 .phone-approval-title { font-weight: 600; }
 .phone-approval-detail { color: var(--ink-muted); }
 .phone-approval button { justify-self: start; }
 `;
+
+/** Show the requests feed's own progress without making it a prerequisite for reading a board. */
+export function phoneApprovalStatus(doc, message) {
+  let panel = doc.getElementById('phone-approvals');
+  if (!panel && message) {
+    const main = doc.querySelector('main');
+    if (!main) return null;
+    panel = doc.createElement('section');
+    panel.id = 'phone-approvals'; panel.className = 'card-panel';
+    panel.setAttribute('aria-label', 'Requests from your computer');
+    main.prepend(panel);
+  }
+  if (!panel) return null;
+  placePhoneApprovals(doc);
+  let status = panel.querySelector('.phone-approval-status');
+  if (!message) { status?.remove(); return panel; }
+  if (!status) {
+    status = doc.createElement('p'); status.className = 'phone-approval-status';
+    status.setAttribute('role', 'status'); panel.prepend(status);
+  }
+  status.textContent = message;
+  return panel;
+}
 
 /** Keep the same authenticated cards and live handlers on the phone's visible screen until a board can draw. */
 export function placePhoneApprovals(doc) {
