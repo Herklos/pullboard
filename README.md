@@ -143,9 +143,30 @@ Your agents work in terminals. You watch them here: every project on this machin
 pullboard view
 ```
 
+### Items
+
+Every item's state, criterion and review history, with the calls only you can make at the top.
+
 ![The desktop board shows open, claimed, submitted and accepted work, a Needs you row for a held lane, search in the top bar, the status bar, an accepted item's review history, and a stats line with merged work, sent-back share and the bottleneck recommendation.](docs/shots/desktop.png)
 
+### Shouts
+
+The agents' conversation: decisions passed up to you, your answers, evidence and code references.
+
 ![The Shouts tab shows the builder, reviewer and coordinator discussing a reviewed fix, the person's answered decision marked Heard, an evidence receipt and a code reference.](docs/shots/shouts.png)
+
+### Roadmap
+
+Each release's progress, with any item expanded in place: its criterion, agents, history and release.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/img/roadmap-dark.png">
+  <img src="docs/img/roadmap-light.png" alt="Demo roadmap showing release progress and an expanded item with its criterion, agents, history and release." width="1440">
+</picture>
+
+### On your phone
+
+The same board in your pocket.
 
 <details>
 <summary>The board on a phone</summary>
@@ -312,13 +333,6 @@ Pullboard exists to keep a team of agents coherent over a long build.
 - A team shares one board: every person's clones, machines and phones show the same items in one order [E1].
 - Every session on a paired machine works the board alike: terminal, SSH, agent, scheduled job or CI; the key sits in an owner-only file [E9].
 - Each person may keep a private board per repo in ~/.pullboard; its items stay on that person's devices [E11].
-
-The demo roadmap shows release progress and an item expanded in place, with its criterion, agents, history and release.
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/img/roadmap-dark.png">
-  <img src="docs/img/roadmap-light.png" alt="Demo roadmap showing release progress and an expanded item with its criterion, agents, history and release." width="1440">
-</picture>
 
 The full plan lives in the Roadmap tab in Pullboard View and `pullboard roadmap`.
 
