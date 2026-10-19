@@ -13,8 +13,34 @@ import {
   join,
   resolve,
 } from 'node:path';
-import { takeResource } from './resources.js';
+import {
+  holdsLease,
+  takeResource,
+} from './resources.js';
 import { Refused } from './refused.js';
+
+/**
+ * A command that holds this checkout passes its lease to the processes it starts, its Git hooks among them, so they act
+ * under it instead of queueing behind their own parent (#906: init --yes committed, and its pre-commit hook waited on
+ * init forever).
+ */
+export const CHECKOUT_SESSION_TOKEN_ENV = 'PULLBOARD_CHECKOUT_SESSION_TOKEN';
+/** How long a hook waits for a checkout another command holds before it names the holder and stops (#906). */
+export const HOOK_CHECKOUT_WAIT_MS = 30_000;
+
+/** Take the checkout's lease, act under the one a parent command passed down, or stop after waitLimitMs naming the holder. */
+async function checkoutLease(info, name, agent, waitLimitMs) {
+  const inherited = process.env[CHECKOUT_SESSION_TOKEN_ENV];
+  if (inherited && holdsLease({ name, scope: 'repo', root: info.root, token: inherited })) return { token: inherited, release() {} };
+  const startedAt = Date.now();
+  const onWait = waitLimitMs ? (state) => {
+    if (Date.now() - startedAt < waitLimitMs) return;
+    const holder = state?.holders?.[0];
+    throw new Refused('CHECKOUT_BUSY', `this checkout is in use by ${holder ? `${holder.agent} (since ${holder.since})` : 'another Pullboard command'}, `
+      + `and this hook waited ${Math.round(waitLimitMs / 1000)} s for it; let that command finish, or stop it if it is stuck, then commit again`);
+  } : undefined;
+  return takeResource({ name, capacity: 1, scope: 'repo', root: info.root, agent, ...(onWait ? { onWait } : {}) });
+}
 
 /** Keep each worktree's binding in its own Git directory rather than the shared common directory. */
 export function checkoutSessionFile(info) {
@@ -41,10 +67,10 @@ export function localSessionMatches(info, { agent, digest }) {
 }
 
 /** Serialize local binding changes, record an explicit takeover, and replace complete JSON atomically. */
-export async function bindLocalSession(info, { agent, digest, takeover = false, recordTakeover, keepLease = false }) {
+export async function bindLocalSession(info, { agent, digest, takeover = false, recordTakeover, keepLease = false, waitLimitMs = 0 }) {
   const file = checkoutSessionFile(info);
   const name = 'checkout-session:' + createHash('sha256').update(info.gitDir).digest('hex');
-  const lease = await takeResource({ name, capacity: 1, scope: 'repo', root: info.root, agent });
+  const lease = await checkoutLease(info, name, agent, waitLimitMs);
   let retained = false;
   /** Atomically replace the complete local record, keeping identifiers out of durable state. */
   function persist(identity) {
@@ -62,7 +88,17 @@ export async function bindLocalSession(info, { agent, digest, takeover = false, 
     if (!previous || takeover || previous.agent !== agent) persist(agent);
     if (keepLease) {
       retained = true;
-      return { release: lease.release, updateAgent: persist };
+      // Processes this command starts while it holds the checkout inherit the lease; the previous value returns with it.
+      const previous = process.env[CHECKOUT_SESSION_TOKEN_ENV];
+      process.env[CHECKOUT_SESSION_TOKEN_ENV] = lease.token;
+      const release = () => {
+        if (process.env[CHECKOUT_SESSION_TOKEN_ENV] === lease.token) {
+          if (previous === undefined) delete process.env[CHECKOUT_SESSION_TOKEN_ENV];
+          else process.env[CHECKOUT_SESSION_TOKEN_ENV] = previous;
+        }
+        lease.release();
+      };
+      return { release, updateAgent: persist };
     }
   } finally { if (!retained) lease.release(); }
 }

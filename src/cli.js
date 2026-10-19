@@ -75,6 +75,7 @@ import {
 } from './person.js';
 import {
   bindLocalSession,
+  HOOK_CHECKOUT_WAIT_MS,
   localSessionMatches,
   localSessionSeats,
 } from './agent-session.js';
@@ -1031,7 +1032,7 @@ async function bindCheckoutSession(io, positionals, values) {
     CHECKOUT_BOARD_ONLY.set(io, command);
     return;
   }
-  const lease = await bindLocalSession(info, { agent: agent ?? 'unjoined agent', digest, takeover: command === 'takeover', keepLease: !['run', 'next'].includes(command),
+  const lease = await bindLocalSession(info, { agent: agent ?? 'unjoined agent', digest, takeover: command === 'takeover', keepLease: !['run', 'next'].includes(command), waitLimitMs: command === 'hook' ? HOOK_CHECKOUT_WAIT_MS : 0,
     /** Use an existing ordered shout so takeover has a receipt without changing the board format. */
     recordTakeover: async () => {
       const ctx = context(io);
