@@ -33,6 +33,7 @@ import { machineSettingsFile } from '../src/settings.js';
 import { runFixtureChild } from './fixture-child.js';
 import { runFixtureGit } from './fixture-child.js';
 import { parseProcessCensus } from '../src/process-census.js';
+import { requireSupportedEngine as requirePublished55Engine } from './fixtures/engine-55-reader.js';
 
 /** Isolate actual SQLite, Git, settings and subprocess files; due time is explicitly injected. */
 function fixture(t) {
@@ -194,6 +195,27 @@ test('a project directory symlink cannot change an approved watch into outside e
   const row = sentinelDefinition({ name: 'inside', check: 'echo must-not-run', every: 'daily', owner: 'coordinator', directory: 'escape' });
   await assert.rejects(executeSentinel(box.root, row), error => error.code === 'BAD_SENTINEL');
   assert.throws(() => sentinelDefinition({ ...row, directory: '../outside' }), error => error.code === 'BAD_SENTINEL');
+});
+
+test('a published engine-55 reader refuses a board watch before inspecting it [A6,H16]', t => {
+  const box = fixture(t);
+  assert.equal(BOARD_SENTINEL_ENGINE, 56, 'board watches keep the first engine released with their operations');
+  const move = prepareEngineMove(box.board, 'proposeSentinel', [{ agentId: box.agent,
+    row: { name: 'new-watch', check: 'false', every: 'hourly', owner: 'core' } }]);
+  let payloadReads = 0;
+  const unread = new Proxy(move, {
+    /** Fail if version negotiation reaches operation-specific data. */
+    get(target, property, receiver) {
+      if (property === 'operation' || property === 'args') {
+        payloadReads += 1;
+        throw new Error('the released reader inspected a newer move payload');
+      }
+      return Reflect.get(target, property, receiver);
+    },
+  });
+  assert.throws(() => requirePublished55Engine(unread), error => error.code === 'ENGINE_VERSION'
+    && error.message.includes(String(move.engine)) && error.message.includes('55'));
+  assert.equal(payloadReads, 0, 'the published version guard rejects before interpreting the new operation or arguments');
 });
 
 test('watch receipts replay deterministically, export without execution and keep older engines unchanged [A6,H16]', async t => {

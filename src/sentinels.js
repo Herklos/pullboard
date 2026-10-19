@@ -9,7 +9,7 @@ import { ENGINE_VERSION } from './machine.js';
 import { Refused } from './refused.js';
 
 /** Coordinator allocation, 18 Oct: all new board-watch moves begin here [H16]. */
-export const BOARD_SENTINEL_ENGINE = 53;
+export const BOARD_SENTINEL_ENGINE = 56;
 const NAME = /^[a-z0-9][a-z0-9._-]{0,63}$/u;
 const INTERVALS = Object.freeze({ '10m': 600_000, hourly: 3_600_000, daily: 86_400_000 });
 

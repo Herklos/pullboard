@@ -37,7 +37,7 @@ test('model declarations and event snapshots retain all supported engine semanti
   assert.ok(ENGINE_VERSION >= VERIFIER_STANDING_ENGINE, 'the current writer retains verifier standing');
   assert.ok(ENGINE_VERSION >= RIGOR_NOTICE_ENGINE, 'the next writer preserves every historical model snapshot through main engine 33');
   assert.ok(ENGINE_VERSION >= HEALTH_SENTINEL_ENGINE, 'the current writer retains the sentinel minimum and historical behavior');
-  assert.equal(BOARD_SENTINEL_ENGINE, 53, 'board watches retain their allocated feature engine');
+  assert.equal(BOARD_SENTINEL_ENGINE, 56, 'board watches retain their allocated feature engine');
   assert.ok(ENGINE_VERSION >= BOARD_SENTINEL_ENGINE, 'the current writer retains board-watch semantics');
   for (const version of Array.from({ length: ENGINE_VERSION }, (_, index) => index + 1)) {
     const board = store.openBoard(':memory:');
