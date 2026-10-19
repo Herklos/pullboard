@@ -312,22 +312,22 @@ test('thirty thousand events open on the phone within three seconds and stream a
   });
   await chrome.navigate(box.origin + '/#board=' + link.board + '&key=' + readFileSync(box.keyFile, 'utf8').trim());
   // Budget: the owner's explicit first-readable-board bar is three seconds, independent of historical streaming.
-  await chrome.waitFor('Number.isFinite(window.__phoneTiming?.firstBoardPaint) && typeof transport !== "undefined" && !!transport?.historyProgress', 3000, 'bounded current board paints before all history');
+  await chrome.waitFor('Number.isFinite(window.__phoneTiming?.firstBoardPaint) && typeof transport !== "undefined" && !!transport?.historyProgress', 3000, 'bounded current board paints before all history'); // budget: declared frozen #903 first-readable-board ceiling is 3000ms; it cannot be relaxed.
   const first = await chrome.evaluate(`({ ...__phoneTiming, phone: document.documentElement.dataset.relayDevice, progress: transport.historyProgress('${link.board}') })`);
   assert.equal(first.phone, 'phone'); assert.ok(first.firstBoardPaint < 3000);
   assert.equal(first.loopbackReads, 0); assert.equal(first.progress.complete, false);
   // Budget: this fixture streams thirty thousand historical records before reaching its deliberately held oldest event leaf.
-  await chrome.waitFor('window.__phoneTiming.historyHeld', 30_000, 'old history is streaming after the first readable board');
+  await chrome.waitFor('window.__phoneTiming.historyHeld', 30_000, 'old history is streaming after the first readable board'); // budget: hang ceiling for the deliberately held oldest-event-page handshake, independent of the 3s boot bar.
   try {
     assert.equal((await box.cli('add', box.lane, liveMarker)).code, 0, 'ordinary native moves continue while old history is pinned');
-    await chrome.waitFor(`document.querySelector('#chain')?.textContent.includes('${liveMarker}')`, 15_000, 'new current state arrives while an older history page is held');
+    await chrome.waitFor(`document.querySelector('#chain')?.textContent.includes('${liveMarker}')`, 15_000, 'new current state arrives while an older history page is held'); // budget: hang ceiling for the live-move handshake while old history is held, not a throughput claim.
   } finally {
     await chrome.evaluate('window.__olderHistoryAllowed = true; window.__releaseOlderHistory?.(); true');
   }
   const expected = relaySnapshot(box.root);
   const finalSequence = Number(expected.tables.board_meta.find(row => row.meta_key === 'relay_applied_sequence').meta_value);
   // Budget: a complete loopback replay includes both the pinned predecessor and its live successor, never the three-second boot bar.
-  await chrome.waitFor(`transport.historyProgress('${link.board}').complete && transport.historyProgress('${link.board}').sequence === ${finalSequence}`, 45_000, 'all sealed history is held at the live checkpoint');
+  await chrome.waitFor(`transport.historyProgress('${link.board}').complete && transport.historyProgress('${link.board}').sequence === ${finalSequence}`, 45_000, 'all sealed history is held at the live checkpoint'); // budget: hang ceiling for two complete pinned background streams; the 3s boot bar is measured separately.
   const oldestHash = createHash('sha256').update(oldestMarker).digest('hex');
   const read = await chrome.evaluate(`(async () => {
     const before = __phoneTiming.objectRequests;
@@ -339,7 +339,7 @@ test('thirty thousand events open on the phone within three seconds and stream a
   assert.equal(read.hash, oldestHash); assert.equal(read.extraObjectReads, 0, 'the oldest shout is already held after the background stream');
   assert.equal(read.progress.loaded, read.progress.total); assert.equal(read.loopbackReads, 0);
   await chrome.evaluate(`location.hash = '#shout-${oldest}'; true`);
-  await chrome.waitFor(`document.body.innerText.includes('${oldestMarker}')`, 3000, 'the actual phone view opens the streamed oldest shout');
+  await chrome.waitFor(`document.body.innerText.includes('${oldestMarker}')`, 3000, 'the actual phone view opens the streamed oldest shout'); // budget: hang ceiling for the addressed-shout render handshake after history completion.
   assert.equal((await second.cli('status')).code, 0, 'an independent paired CLI restores the same paged checkpoint');
   const restored = await second.cli('export');
   assert.equal(restored.code, 0);

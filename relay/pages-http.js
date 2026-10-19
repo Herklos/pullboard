@@ -29,7 +29,7 @@ function cipherBytes(value) {
 }
 
 /** Add the new snapshot transport without changing API1 native board documents or executable move formats. */
-export function createRelayPagesHandler({ directory, now, authorize, withJournal, sender, quota, annotated, enabled = true }) {
+export function createRelayPagesHandler({ directory, now, authorize, withJournal, sender, quota, annotated, refreshStorage, enabled = true }) {
   /** Open objects only while the caller's shared board lifecycle lock and fresh authorization hold. */
   function withPages(id, who, work, create = false) {
     return withJournal(id, journal => {
@@ -61,12 +61,13 @@ export function createRelayPagesHandler({ directory, now, authorize, withJournal
         ? { apiVersion: 2, snapshot: 'sealed-pages', pageBytes: PAGE_BYTES, cipherBytes: PAGE_CIPHER_BYTES, fanout: PAGE_FANOUT }
         : { apiVersion: 1, snapshot: 'legacy' });
       if (!enabled) throw new Refused('RELAY_API_VERSION', 'Upgrade the relay authentication adapter to serve relay API version2.');
-      const route = /^\/api\/v2\/boards\/([0-9a-f]{32})\/(state|uploads(?:\/([A-Za-z0-9-]{1,128})(?:\/(publish|objects\/([0-9a-f]{64})))?)?|objects\/([0-9a-f]{64}))$/u.exec(url.pathname);
+      const route = /^\/api\/v2\/boards\/([0-9a-f]{32})\/(state|storage|uploads(?:\/([A-Za-z0-9-]{1,128})(?:\/(publish|objects\/([0-9a-f]{64})))?)?|objects\/([0-9a-f]{64}))$/u.exec(url.pathname);
       if (!route) throw new Refused('BAD_REQUEST', 'Use a supported relay API version2 sealed-page route.');
       const id = route[1];
       const write = req.method !== 'GET';
       const who = await authorize(req, id, write);
       const principal = sender(who, write ? 'snapshot' : false);
+      if (req.method === 'GET' && route[2] === 'storage') return reply(res, 200, { apiVersion: 2, ...refreshStorage(id, principal) });
       if (req.method === 'GET' && route[2] === 'state') {
         const state = withPages(id, who, (journal, pages) => head(journal, pages, principal, id));
         return reply(res, 200, { apiVersion: 2, state });

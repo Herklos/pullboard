@@ -1,5 +1,7 @@
 /** Native bounded snapshot upload/resume and complete restore; no private cache fingerprint crosses HTTP [H15,H17]. */
 import { Refused } from './refused.js';
+import { relayStorage } from './relay-storage.js';
+export { relayStorage, relayStorageLine } from './relay-storage.js';
 import { createRelayPageCache, snapshotSourceId } from './relay-page-cache.js';
 import { openPagedSnapshot } from './relay-page-layout.js';
 import { writePagedSnapshot } from './relay-page-writer.js';
@@ -16,20 +18,6 @@ function bytes(value) {
   const decoded = Buffer.from(value, 'base64url');
   if (!decoded.byteLength || decoded.byteLength > PAGE_CIPHER_BYTES || decoded.toString('base64url') !== value) throw invalid();
   return Uint8Array.from(decoded);
-}
-
-/** Keep account quota status only after validating its credential-free response fields. */
-export function relayStorage(value) {
-  if (!value || typeof value.account?.id !== 'string' || typeof value.account?.login !== 'string' ||
-      !/^[A-Za-z0-9_-]{1,100}$/u.test(value.account.id) || !/^[A-Za-z0-9_-]{1,100}$/u.test(value.account.login) ||
-      !Number.isSafeInteger(value.usedBytes) || value.usedBytes < 0 || !Number.isSafeInteger(value.limitBytes) || value.limitBytes < 1) return null;
-  return { account: { id: value.account.id, login: value.account.login }, usedBytes: value.usedBytes, limitBytes: value.limitBytes };
-}
-
-/** Print account, used bytes and the operator-set limit without importing server-only quota storage into the CLI. */
-export function relayStorageLine(value) {
-  const storage = relayStorage(value);
-  return storage ? `relay storage: account ${storage.account.login}, ${(storage.usedBytes / 1_000_000).toFixed(1)} MB used of ${(storage.limitBytes / 1_000_000).toFixed(1)} MB` : '';
 }
 
 /** Adapt the old internal pending-record interface only after the new protocol has proved an exact root ACK. */
@@ -168,6 +156,8 @@ export async function relaySnapshotRequest(state, path, options = {}, io, hooks)
   if (snapshot && (state.snapshotApiVersion === 2 || oversized) && await supportsPages()) return paged();
   try { return await hooks.raw(path, options); }
   catch (error) {
+    const storage = relayStorage(error.storage);
+    if (storage) { state.storage = storage; hooks.persist(); }
     if (!snapshot || error.code !== 'RELAY_API_VERSION' || !await supportsPages()) throw error;
     return paged();
   }

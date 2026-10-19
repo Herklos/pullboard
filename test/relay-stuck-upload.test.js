@@ -26,8 +26,9 @@ test('a refused upload never blocks board moves [H16,B26]', async (t) => {
     '--check', gate);
   assert.equal(added.code, 0, `the fixture creates its task; result=${JSON.stringify(added.document)}`);
   const item = added.document.item.item_id;
-  box.rejectSnapshots({ status: 400, code: 'BAD_REQUEST', message: 'the body exceeds 14000000 bytes; send a smaller snapshot' });
-  await box.link();
+  box.rejectSnapshots({ status: 400, code: 'BAD_REQUEST', message: 'fixture refuses the initial baseline until repaired' });
+  const linked = await box.link();
+  assert.equal((linked.document.diagnostics ?? []).filter(line => /relay paused/u.test(line)).length, 1);
   const status = await box.cli('status');
   assert.equal(status.code, 0);
   assertPaused(status.document);
@@ -37,7 +38,7 @@ test('a refused upload never blocks board moves [H16,B26]', async (t) => {
   assert.equal(pausedLink.baselinePause.status, 400);
   assert.ok(pausedLink.baselinePause.message.length <= 240);
   assert.doesNotMatch(JSON.stringify(pausedLink.baselinePause), /(?:ps|pa)_[A-Za-z0-9_-]{20,}/u);
-  assert.equal(pausedLink.snapshot, undefined, 'refused ciphertext is discarded so recovery seals current local state');
+  assert.ok(pausedLink.snapshot, 'refused ciphertext remains durable until a recovered baseline includes all paused local work');
   const diagnosed = await box.cli('doctor');
   assert.ok([0, 1].includes(diagnosed.code));
   assertPaused(diagnosed.document);
@@ -97,9 +98,9 @@ test('a refused upload never blocks board moves [H16,B26]', async (t) => {
 
 
   /** Each internal move in a long-running command retains its own loud pause notice. */
-  await t.test('multiple local moves in one command each name the refused baseline [H16,B26]', async subtest => {
+  await t.test('multiple local moves in one session do not repeat the refused baseline notice [H16,B26]', async subtest => {
     const repeated = await relayClientFixture(subtest);
-    repeated.rejectSnapshots({ status: 400, code: 'BAD_REQUEST', message: 'the body exceeds 14000000 bytes; send a smaller snapshot' });
+    repeated.rejectSnapshots({ status: 400, code: 'BAD_REQUEST', message: 'fixture refuses the initial baseline until repaired' });
     await repeated.link();
     const before = repeated.calls.filter(call => call.method === 'PUT' && call.path.endsWith('/state')).length;
     const result = await repeated.script(`
@@ -115,8 +116,8 @@ test('a refused upload never blocks board moves [H16,B26]', async (t) => {
       } catch (error) { process.stdout.write(JSON.stringify({ error: { code: error.code, message: error.message } })); process.exitCode = 1; }
     `);
     assert.equal(result.code, 0);
-    assert.equal(result.document.diagnostics.filter(line => /relay paused for /u.test(line)).length, 2,
-      'each move gets one notice, with no duplicate preflight or postflight notice');
+    assert.equal(result.document.diagnostics.filter(line => /relay paused for /u.test(line)).length, 0,
+      'the session was already notified when linking; internal moves do not repeat it');
     assert.equal(repeated.calls.filter(call => call.method === 'PUT' && call.path.endsWith('/state')).length - before, 1,
       'one command attempts only one fresh baseline despite multiple local moves');
     assert.equal(repeated.moveAcks.length, 0, 'unaccepted local moves never become sequence-one uploads');
@@ -197,10 +198,11 @@ test('a refused upload never blocks board moves [H16,B26]', async (t) => {
   await t.test('malformed baseline refusals carry their reason and recover [H16]', async (subtest) => {
     const malformed = await relayClientFixture(subtest);
     malformed.rejectSnapshots({ status: 400, code: 'BAD_UPLOAD', message: 'send only a sequence and sealed payload' });
-    await malformed.link();
+    const linked = await malformed.link();
     const paused = await malformed.cli('status');
     assert.equal(paused.code, 0);
-    const notice = (paused.document.diagnostics ?? []).join('\n');
+    assert.equal((paused.document.diagnostics ?? []).filter(line => /relay paused/u.test(line)).length, 0, 'the link already delivered this session notice');
+    const notice = (linked.document.diagnostics ?? []).join('\n');
     assert.match(notice, /BAD_UPLOAD/u);
     assert.match(notice, /send only a sequence and sealed payload/u);
     assert.match(notice, /upgrade pullboard|pullboard relay on/u, 'the malformed-upload notice gives its recovery step');
@@ -377,13 +379,10 @@ test('a refused upload never blocks board moves [H16,B26]', async (t) => {
   });
 });
 
-/** Require the one-line durable baseline pause notice on a local move. */
+/** The session's link already named its pause; later local commands keep working without repeating it. */
 function assertPaused(document) {
-  const notices = (document.diagnostics ?? []).filter(line => /relay paused/u.test(line));
-  assert.equal(notices.length, 1, `each move names the paused relay upload and recovery path in one line; diagnostics=${JSON.stringify(document.diagnostics ?? [])}`);
-  assert.match(notices[0], /BAD_REQUEST/u, 'the notice keeps the relay refusal code');
-  assert.match(notices[0], /body exceeds 14000000 bytes/u, 'the notice keeps the relay refusal reason');
-  assert.match(notices[0], /snapshot.*fits/u, 'the notice says how automatic recovery proceeds');
+  assert.equal((document.diagnostics ?? []).filter(line => /relay paused/u.test(line)).length, 0,
+    'one session does not repeat a durable baseline pause on each command');
 }
 
 /** Authenticate the actual relay checkpoint, accepting both supported plaintext snapshot formats. */

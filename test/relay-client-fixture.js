@@ -112,7 +112,7 @@ function childResult(root, env, argv, observedSnapshotUploads, initialSnapshotUp
 }
 
 /** Start an isolated board and authorized loopback relay; a null coordinatorModel keeps its initial identity unknown. */
-export async function relayClientFixture(t, { cliChildren, coordinatorModel } = {}) {
+export async function relayClientFixture(t, { cliChildren, coordinatorModel, accountStorageBytes } = {}) {
   const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'pullboard-relay-cleanup-')));
   const root = join(scratch, 'repo');
   const home = join(scratch, 'home');
@@ -129,6 +129,7 @@ export async function relayClientFixture(t, { cliChildren, coordinatorModel } = 
   const env = {
     ...process.env, HOME: home, PULLBOARD_HOME: join(home, '.pullboard'),
     PULLBOARD_MACHINE_HOME: join(scratch, 'machine'), PATH: privateBin,
+    TERM_SESSION_ID: createHash('sha256').update(scratch).digest('hex'),
     GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1',
     GIT_AUTHOR_NAME: 'Relay Fixture', GIT_AUTHOR_EMAIL: 'relay-fixture@example.com',
     GIT_COMMITTER_NAME: 'Relay Fixture', GIT_COMMITTER_EMAIL: 'relay-fixture@example.com',
@@ -435,7 +436,7 @@ globalThis.fetch = function tracedFetch(input, init) {
   const origin = 'http://127.0.0.1:' + relayPort;
   auth = createRelayAuth({ database: authDatabase, github: createGitHubClient({ ...provider.config, callbackURL: origin + '/auth/github/callback' }) });
   signIn = createAuthHandler({ auth, publicOrigin: origin });
-  api = createRelayHandler({ directory: join(scratch, 'relay'), auth, publicOrigin: origin, pollMs: 10, maintenanceMs: 0, now: () => Date.now() + timeOffsetMs });
+  api = createRelayHandler({ directory: join(scratch, 'relay'), auth, publicOrigin: origin, pollMs: 10, maintenanceMs: 0, accountStorageBytes, now: () => Date.now() + timeOffsetMs });
   /** Sign a separate phone in over actual OAuth HTTP; its person session stays only in fixture RAM. */
   async function phoneSession() {
     if (phone) return phone;
@@ -607,8 +608,10 @@ globalThis.fetch = function tracedFetch(input, init) {
 
   /** Start a saved real relay link without exposing the pairing fragment. */
   async function link() {
-    assert.equal((await cli('relay', 'on', '--url', origin)).code, 0, 'real device sign-in links the board');
+    const result = await cli('relay', 'on', '--url', origin);
+    assert.equal(result.code, 0, 'real device sign-in links the board');
     privateKeys.add(readFileSync(keyFile, 'utf8').trim());
+    return result;
   }
   /** Raise this fixture board's durable minimum to the current engine before compatibility checks. */
   async function requireEngineThree() {
@@ -702,6 +705,13 @@ globalThis.fetch = function tracedFetch(input, init) {
     overrideDelete(value) { override = value; },
     failTokenMints(count) { mintFailures = count; },
     refuseSnapshotWrites(value) { refuseSnapshotWrites = value; },
+    /** Restart only the private service with a changed operator quota, retaining real journals and credentials. */
+    setStorageQuota(bytes) {
+      assert.ok(Number.isSafeInteger(bytes) && bytes > 0);
+      api.close();
+      api = createRelayHandler({ directory: join(scratch, 'relay'), auth, publicOrigin: origin, pollMs: 10,
+        maintenanceMs: 0, accountStorageBytes: bytes, now: () => Date.now() + timeOffsetMs });
+    },
     /** Return a chosen HTTP refusal for snapshot writes, without inspecting the sealed body. */
     rejectSnapshots(value) { rejectSnapshotWrites = value ? { ...value } : null; },
     /** Model an older relay's capability response without changing the real API1 request and journal bounds. */

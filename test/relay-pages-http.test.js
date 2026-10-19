@@ -31,10 +31,11 @@ async function fixture(t, accountStorageBytes) {
   await auth.linkBoard(signed.token, BOARD, 'fixture/repository');
   await auth.linkBoard(signed.token, OTHER, 'fixture/repository');
   let handler;
+  let clock = Date.now();
   const server = createServer((req, res) => handler(req, res));
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
   const origin = 'http://127.0.0.1:' + server.address().port;
-  handler = createRelayHandler({ directory: join(root, 'boards'), auth, publicOrigin: origin, maintenanceMs: 0, accountStorageBytes });
+  handler = createRelayHandler({ directory: join(root, 'boards'), auth, publicOrigin: origin, maintenanceMs: 0, accountStorageBytes, now: () => clock });
   t.after(() => { server.closeAllConnections(); server.close(); handler.close(); auth.close(); rmSync(root, { recursive: true, force: true }); });
   const key = await generateBoardKey();
   /** Return only protocol responses, never bearer credentials, in assertion diagnostics. */
@@ -80,7 +81,9 @@ async function fixture(t, accountStorageBytes) {
     const directory = await readSealedDescriptor(state.root, context);
     return readSealedValue(directory.value.value, { ...context, parents: [state.root.id] });
   }
-  return { root, auth, signed, origin, key, call, stage, publish, read, handler };
+  return { root, auth, signed, origin, key, call, stage, publish, read, handler,
+    /** Advance the private service clock to observe real staging expiry, without mutating its database. */
+    advance(ms) { clock += ms; } };
 }
 
 test('API2 reads legacy heads and publishes opaque pages while old clients explicitly upgrade [H15,H17]', async t => {
@@ -171,4 +174,30 @@ test('a consistent journal backup carries every opaque page and unlink removes t
   } finally { source.close(); }
   assert.equal((await box.call('DELETE', '/api/v1/boards/' + BOARD)).status, 200);
   assert.equal((await box.call('GET', '/api/v2/boards/' + BOARD + '/state')).status, 404);
+});
+
+
+test('small authenticated storage probes collect expired staging across the account without downloading a snapshot [H15,H17,H18]', async t => {
+  const box = await fixture(t, 12_000);
+  const empty = await box.call('GET', '/api/v2/boards/' + BOARD + '/storage');
+  assert.equal(empty.status, 200); assert.equal(empty.document.storage.usedBytes, 0);
+  const first = await box.stage({ marker: 'retained current head' });
+  assert.equal((await box.publish(first)).status, 200);
+  await box.stage({ text: randomBytes(8_000).toString('base64') });
+  await assert.rejects(box.stage({ text: randomBytes(8_000).toString('base64') }), { code: 'ACCOUNT_STORAGE_LIMIT' });
+  const blocked = await box.call('GET', '/api/v2/boards/' + OTHER + '/storage');
+  assert.ok(blocked.document.storage.usedBytes > 8_000);
+  const own = await box.call('GET', '/api/v2/boards/' + BOARD + '/storage');
+  assert.equal(own.document.warning.code, 'ACCOUNT_STORAGE_LIMIT');
+  box.advance(3_600_001);
+  const collected = await box.call('GET', '/api/v2/boards/' + OTHER + '/storage');
+  assert.ok(collected.document.storage.usedBytes < 2_000, 'another linked board can release expired staging charged to the same account');
+  const ready = await box.call('GET', '/api/v2/boards/' + BOARD + '/storage');
+  assert.equal(ready.document.warning, undefined);
+  assert.ok(JSON.stringify(ready.document).length < 2048);
+  assert.deepEqual(Object.keys(ready.document).sort(), ['apiVersion', 'storage', 'version']);
+  const head = await box.call('GET', '/api/v2/boards/' + BOARD + '/state');
+  assert.equal((await box.read(head.document.state)).marker, 'retained current head');
+  const invalid = await box.call('GET', '/api/v2/boards/' + BOARD + '/storage', undefined, 'pa_' + 'x'.repeat(43));
+  assert.equal(invalid.status, 401);
 });

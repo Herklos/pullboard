@@ -31,6 +31,7 @@ export function createRelayPageCache(state) {
       CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY,value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS object (id TEXT PRIMARY KEY,sequence INTEGER NOT NULL,payload BLOB NOT NULL,children TEXT NOT NULL,ack INTEGER NOT NULL DEFAULT 0);
       CREATE TABLE IF NOT EXISTS fingerprint (hash TEXT PRIMARY KEY,id TEXT NOT NULL REFERENCES object(id) ON DELETE CASCADE,reference TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS notice (session TEXT PRIMARY KEY,created INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS job (source TEXT PRIMARY KEY,reference TEXT NOT NULL,upload TEXT);
       CREATE TABLE IF NOT EXISTS job_object (source TEXT NOT NULL REFERENCES job(source) ON DELETE CASCADE,id TEXT NOT NULL REFERENCES object(id),PRIMARY KEY(source,id));`);
     const saved = db.prepare('SELECT key,value FROM meta ORDER BY key').all();
@@ -153,7 +154,18 @@ export function createRelayPageCache(state) {
     } catch (error) { db.exec('ROLLBACK'); throw error; }
   }
 
+  /** Retain one credential-free pause notice receipt per session across CLI processes, with bounded private metadata. */
+  function firstNotice(session) {
+    if (!/^[0-9a-f]{64}$/u.test(session ?? '')) throw invalid();
+    const inserted = db.prepare('INSERT OR IGNORE INTO notice VALUES (?,?)').run(session, Date.now()).changes;
+    db.exec('DELETE FROM notice WHERE session NOT IN (SELECT session FROM notice ORDER BY created DESC,rowid DESC LIMIT 128)');
+    return inserted === 1;
+  }
+
+  /** A successful upload ends the pause interval for all local sessions. */
+  function clearNotices() { db.exec('DELETE FROM notice'); }
+
   /** Close the private cache after every request, including refused or interrupted uploads. */
   function close() { db.close(); }
-  return { file, object, put, lookup, remember, job, prepare, upload, pending, acknowledge, missing, complete, close };
+  return { file, object, put, lookup, remember, job, prepare, upload, pending, acknowledge, missing, complete, firstNotice, clearNotices, close };
 }

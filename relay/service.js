@@ -13,7 +13,7 @@ import { createPairingStore } from './pairing-store.js';
 import { createPairingHandler } from './pairing-http.js';
 import { createRelayBrowserHandler } from './browser-page.js';
 import { VERIFIER_STANDING_ENGINE } from '../src/machine.js';
-import { createRelayPagesHandler } from './pages-http.js';
+import { createRelayPagesHandler, snapshotPageRoot } from './pages-http.js';
 import { createStorageQuota } from './storage-quota.js';
 
 const SNAPSHOT_BODY = 14_000_000;
@@ -128,7 +128,11 @@ export function createRelayHandler({ directory, auth, pollMs = 200, publicOrigin
 
   /** Expose only a stable failure code to the trusted operator; never log paths, keys or provider errors. */
   function maintain() {
-    try { const result = retention.maintain(); maintenanceError = null; return result; }
+    try {
+      const result = retention.maintain();
+      if (quota) for (const link of auth.linkedBoards()) collectPages(link.id);
+      maintenanceError = null; return result;
+    }
     catch (error) { maintenanceError = error instanceof Refused ? error.code : 'RELAY_MAINTENANCE'; throw error; }
   }
   const timer = maintenanceMs ? setInterval(() => { try { maintain(); } catch { /* operator reads maintenanceStatus */ } }, maintenanceMs) : null;
@@ -212,6 +216,28 @@ export function createRelayHandler({ directory, auth, pollMs = 200, publicOrigin
     });
   }
 
+  /** Collect expired staging and read pins without opening a missing board or decoding its opaque bytes. */
+  function collectPages(id) {
+    try { lstatSync(join(root, identity(id) + '.journal.sqlite')); }
+    catch (error) { if (error.code === 'ENOENT') return; throw error; }
+    auth.withBoard(id, () => {
+      const journal = createRelayJournal({ directory: root, boardId: id, maxBytes: STORED_BYTES, now: () => new Date(now()) });
+      const pages = journal.pages({ now });
+      try { const current = snapshotPageRoot(journal.snapshot()); pages.prune(current ? [current.id] : []); }
+      finally { pages.close(); journal.close(); }
+    });
+  }
+
+  /** Probe only account totals after expired staging is reclaimed, never a full snapshot or a device-supplied account. */
+  function refreshStorage(id, principal) {
+    return auth.withBoard(id, () => {
+      const account = auth.storageAccount(id, principal.userId);
+      if (account) for (const board of auth.storageBoards(account.id)) collectPages(board);
+      const storage = quota.usage(id, principal), warning = quota.notice(id);
+      return { storage, ...(warning ? { warning } : {}) };
+    });
+  }
+
   /**
    * Let token issuance see a published seat receipt under the same board lock that appends it, so
    * a receipt claims its target before, and whether or not, its enrollment finishes (#579). An
@@ -264,7 +290,7 @@ export function createRelayHandler({ directory, auth, pollMs = 200, publicOrigin
   }
 
   const browser = origin ? createRelayBrowserHandler({ authenticate: (req) => auth.authenticate(credential(req, origin)) }) : null;
-  const pagesHandler = createRelayPagesHandler({ directory: root, now, authorize: authorizedRequest, withJournal, sender, quota, annotated, enabled: Boolean(quota) });
+  const pagesHandler = createRelayPagesHandler({ directory: root, now, authorize: authorizedRequest, withJournal, sender, quota, annotated, refreshStorage, enabled: Boolean(quota) });
   const common = createApiHandler({
     authenticate: async (req, { board, write }) => {
       const token = credential(req, origin, write);
