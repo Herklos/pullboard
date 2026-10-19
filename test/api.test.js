@@ -1056,6 +1056,8 @@ test('[A1] every catalog command and subcommand has a real CLI exercise', () => 
   assert.deepEqual(json(source, source.repo, 'lanes').lanes.catalog, { owns: ['catalog/'] });
   const runner = json(source, source.repo, 'runner', ['add', 'fixture-runner', '--slots', '2', '--browser', '1']);
   assert.deepEqual(runner.runner, { host: 'fixture-runner', slots: 2, browser: 1 });
+  const projectGate = JSON.parse(readFileSync(join(source.repo, 'pullboard.json'), 'utf8')).gate;
+  assert.equal(json(source, source.repo, 'gate', ['set', projectGate], 'set').gate, projectGate);
   const missing = Object.keys(JSON_SHAPES.commands).filter((key) => !covered.has(key));
   assert.deepEqual(missing, [], `add real-repo invocations for undocumented coverage gaps: ${missing.join(', ')}`);
   assert.deepEqual([...coveredRoots].sort(), resultCommands(), 'every actual root/factory command has an invocation');

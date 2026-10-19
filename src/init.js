@@ -37,6 +37,11 @@ import {
 } from './config.js';
 import { loadDoctrine } from './doctrine.js';
 import { installHooks } from './hooks.js';
+import {
+  detectGate,
+  settingCommand,
+} from './gate-config.js';
+export { detectGate } from './gate-config.js';
 import { machineHome } from './machine-home.js';
 import { Refused } from './refused.js';
 import { reviewerStartup } from './next-steps.js';
@@ -56,8 +61,6 @@ import {
   practiceTemplate,
   specTemplate,
 } from './templates.js';
-
-const NPM_DEFAULT_TEST = 'echo "Error: no test specified" && exit 1';
 
 /** Resolve a directory through symlinks, retaining a missing suffix for a not-yet-created private home. */
 function canonicalDirectoryPath(candidate) {
@@ -90,29 +93,6 @@ export function machineHomeWriteScopeIsNarrow(machinePath, userHome = userInfo()
   const targetContainsHome = homeFromTarget === '' || (homeFromTarget !== '..'
     && !homeFromTarget.startsWith(`..${sep}`) && !isAbsolute(homeFromTarget));
   return !targetContainsHome;
-}
-
-/**
- * Detect an existing ecosystem's test command without running it during setup (I1, I2).
- *
- * @param {string} root
- * @returns {string}
- */
-export function detectGate(root) {
-  const file = join(root, 'package.json');
-  if (existsSync(file)) {
-    try {
-      const test = JSON.parse(readFileSync(file, 'utf8'))?.scripts?.test;
-      if (typeof test === 'string' && test.trim() && test.trim() !== NPM_DEFAULT_TEST) return 'npm test';
-    } catch { /* An unreadable package does not hide another ecosystem. */ }
-  }
-  if (existsSync(join(root, 'go.mod'))) return 'go test ./...';
-  if (existsSync(join(root, 'Cargo.toml'))) return 'cargo test';
-  if (['pytest.ini', '.pytest.ini', 'pytest.toml', '.pytest.toml', 'pyproject.toml', 'setup.py', 'requirements.txt'].some((name) => existsSync(join(root, name)))) return 'pytest';
-  for (const [name, section] of [['tox.ini', 'pytest'], ['setup.cfg', 'tool:pytest']]) {
-    if (existsSync(join(root, name)) && readFileSync(join(root, name), 'utf8').includes(`[${section}]`)) return 'pytest';
-  }
-  return '';
 }
 
 /** Folders a lane proposal never hands out: dependencies and build output. */
@@ -618,8 +598,8 @@ export function initRepo({ info, openBoardHere, register, closeBoard, model, per
   notes.push(...laneProposalNotes(proposeLanes(root)));
   if (!configuredGate(root)) {
     notes.push(gate
-      ? 'no gate yet: set "gate" in pullboard.json to the command that proves the build'
-      : 'no test command detected; ask the person which command tests this project, then set "gate" in pullboard.json to that command; if this board has no build, use `pullboard spec check` to check its spec and practice files; a second agent review checks the actual work');
+      ? `no gate yet: record the command that proves the build with ${settingCommand(root, gate)}`
+      : `no test command detected; ask the person which command tests this project, then record it with pullboard gate set "<command>"; if this board has no build, use ${settingCommand(root)} to check its spec and practice files; a second agent review checks the actual work`);
   }
   if (written.length) notes.push(`git add -f -- ${written.map((path) => `'${path.replaceAll("'", "'\\''")}'`).join(' ')}`);
   return notes;
