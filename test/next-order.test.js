@@ -299,6 +299,61 @@ test('next follows the rank the coordinator set inside a milestone [N2,B13]', (t
   assert.doesNotMatch(JSON.stringify(beginner.overview ?? beginner), /milestone order|rank the queue/iu, 'newcomer help does not gain scheduling words');
 });
 
+test('pullboard queue lists releases as breakpoints and items in pull order [N2,B13]', (t) => {
+  const box = crossLaneFixture(t);
+  const holder = box.seat('queue-holder', 'web', box.session);
+  const oldest = box.add('web', 'Oldest unranked strong work');
+  const ranked = box.add('api', 'Ranked mid API work', 'mid');
+  const claimed = box.add('web', 'Claimed strong work');
+  const waiting = box.add('web', 'Work after the claimed item');
+  const later = box.add('api', 'Later release work');
+  const loose = box.add('web', 'Work in no release');
+  box.json(box.run(box.repo, 'milestone', 'add', 'current', '--items', `${oldest},${ranked},${claimed},${waiting}`, '--json'));
+  box.milestone('later', later);
+  box.json(box.run(box.repo, 'milestone', 'order', 'current', `${ranked}`, '--json'));
+  box.json(box.run(box.repo, 'edit', String(waiting), '--after', String(claimed), '--json'));
+  box.json(box.runAs(box.session, holder.root, 'claim', String(claimed), '--json'));
+
+  const text = box.run(box.repo, 'queue');
+  assert.equal(text.code, 0, text.out + text.err);
+  const lines = text.out.trim().split('\n');
+  const at = (pattern) => lines.findIndex((line) => pattern.test(line));
+  assert.ok(at(/^current: 0\/4 landed$/u) === 0, `the first release is a breakpoint with its landed count:\n${text.out}`);
+  const order = [ranked, oldest, claimed, waiting].map((id) => at(new RegExp(`^  \\d+\\. #${id} `, 'u')));
+  assert.deepEqual([...order].sort((a, b) => a - b), order, `items follow next's order: rank, then route, then age:\n${text.out}`);
+  assert.ok(order[0] > 0 && at(/^later: 0\/1 landed$/u) > order[3], 'the later release is its own breakpoint after the current one');
+  assert.ok(at(new RegExp(`^  \\d+\\. #${later} `, 'u')) > at(/^later: /u));
+  assert.ok(at(/^in no release$/u) > at(new RegExp(`#${later} `, 'u')) && at(new RegExp(`#${loose} `, 'u')) > at(/^in no release$/u));
+  assert.match(lines[order[0]], new RegExp(`#${ranked} mid api open: Ranked mid API work$`, 'u'), 'each item shows its route, lane and status');
+  assert.match(lines[order[2]], new RegExp(`#${claimed} strong web claimed · ${holder.agent}: `, 'u'), 'a claimed item names its holder');
+  assert.match(lines[order[3] + 1], new RegExp(`^     waits on #${claimed} \\(claimed\\)$`, 'u'), 'an item names what it waits on');
+
+  const document = box.json(box.run(box.repo, 'queue', '--json'));
+  assert.deepEqual(document.releases.map((release) => [release.name, release.landed, release.total, release.items.map((item) => item.id)]),
+    [['current', 0, 4, [ranked, oldest, claimed, waiting]], ['later', 0, 1, [later]]]);
+  assert.deepEqual(document.unreleased.map((item) => item.id), [loose]);
+  assert.deepEqual(document.releases[0].items[2], { id: claimed, title: 'Claimed strong work', route: 'strong', lane: 'web', status: 'claimed', holder: holder.agent, waits: [] });
+});
+
+test('the queue names the first item each route would pull [N2,B13]', (t) => {
+  const box = crossLaneFixture(t);
+  const strongWork = box.add('web', 'Strong release work');
+  const midWork = box.add('api', 'Mid release work', 'mid');
+  const lightWork = box.add('api', 'Light release work', 'light');
+  box.json(box.run(box.repo, 'milestone', 'add', 'current', '--items', `${lightWork},${midWork},${strongWork}`, '--json'));
+  const document = box.json(box.run(box.repo, 'queue', '--json'));
+  assert.deepEqual(document.first, { strong: strongWork, mid: midWork, light: lightWork }, 'each route gets the top item at or below it, its own tier first');
+  const text = box.run(box.repo, 'queue');
+  assert.match(text.out.trim().split('\n').at(-1), new RegExp(`^next now: strong → #${strongWork}, mid → #${midWork}, light → #${lightWork}$`, 'u'));
+  // The queue's answer is what next actually serves each route.
+  for (const [route, lane, id] of [['light', 'api', lightWork], ['mid', 'api', midWork], ['strong', 'web', strongWork]]) {
+    const seat = box.seat(`queue-${route}`, lane, `queue-${route}-session`, route);
+    const next = box.json(box.runAs(`queue-${route}-session`, seat.root, 'next', '--build', '--json'));
+    assert.equal(next.item.item_id, id, `a ${route} agent's next is the queue's ${route} item`);
+  }
+  assert.match(box.run(box.repo, 'queue').out.trim().split('\n').at(-1), /^next now: strong → nothing, mid → nothing, light → nothing$/u, 'claimed work leaves the routes nothing to pull');
+});
+
 test('an unranked item follows the ranked ones [N2,B13]', (t) => {
   const { board, builder } = boardFixture();
   t.after(() => store.closeBoard(board));

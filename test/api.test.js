@@ -1005,6 +1005,7 @@ test('[A1] every catalog command and subcommand has a real CLI exercise', () => 
   assert.deepEqual(landing.landed, []);
   assert.deepEqual(landing.items, []);
   json(source, source.repo, 'roadmap');
+  json(source, source.repo, 'queue');
   json(source, source.repo, 'rigor');
   const watch = json(source, source.repo, 'sentinel', ['propose', 'catalog-watch', '--check', 'true', '--every', 'hourly', '--owner', 'coordinator'], 'propose');
   assert.equal(watch.sentinel.status, 'pending');
