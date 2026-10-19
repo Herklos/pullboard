@@ -77,6 +77,7 @@ const NOT_MOVES = {
   BOARD_NOT_WRITABLE: 'the board folder must be writable before a command opens it for an item move',
   NOT_YOUR_CHECKOUT: 'the caller owns the checkout session, checked before any item move',
   CHECKOUT_SESSION: 'the checkout-local session binding is readable before any item move',
+  CHECKOUT_BUSY: 'a hook gives up waiting for a checkout another command holds, before any item move',
   UNMERGED_SCHEMA: 'shared-board schema compatibility checked before a command opens the database',
 };
 
