@@ -2661,8 +2661,8 @@ function readCommands(io, { first, second, rest, values }) {
 async function rigorDraftHere(io, { second, rest, values }) {
   if (rest.length > 1) throw new Refused('USAGE', 'pullboard rigor draft <key> "<rule>" --check "<command>" --red <commit> --green <commit> [--section <letter>]');
   const ctx = context(io);
-  const { events, actor, reserved } = withBoard(ctx, (board) => ({ events: store.events(board), actor: whoAmI(ctx, board).id, reserved: store.rowDrafts(board).map((draft) => draft.id) }));
-  const result = await rigorDraft({ root: ctx.info.root, config: ctx.config, events, person: store.PERSON, agent: actor, reserved },
+  const { events, actor } = withBoard(ctx, (board) => ({ events: store.events(board), actor: whoAmI(ctx, board).id }));
+  const result = await rigorDraft({ root: ctx.info.root, config: ctx.config, events, person: store.PERSON, agent: actor, reserved: () => (hookRead(ctx, (board) => store.rowDrafts(board)) ?? []).map((draft) => draft.id) },
     { key: second, text: rest[0], check: values.check, red: values.red, green: values.green, section: values.section });
   io.result?.(result);
   io.say(`proved ${result.key}: red at ${result.proof.red.commit.slice(0, 12)} (${result.proof.red.problems} problem lines, exit ${result.proof.red.exit}), green at ${result.proof.green.commit.slice(0, 12)} (exit ${result.proof.green.exit})`);
