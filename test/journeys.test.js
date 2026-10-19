@@ -1086,12 +1086,14 @@ async function everyBoardJourney(t, slow = null) {
 
 test('pullboard.dev shows every board, linked and local [N40]', {
   timeout: relayWorkBudgetMs() * 5 + 180_000,
-  skip: !findChromeExecutable() && 'Chrome is not installed',
+  skip: (!findChromeExecutable() && 'Chrome is not installed')
+    || (process.env.CI && '#835: skipped on CI for the 0.9.1 release (the person, 18 Oct): Chrome on the CI runners drops the session cookie from intercepted requests; its fix un-skips it'),
 }, (t) => everyBoardJourney(t));
 
 test('pullboard.dev shows every board under the CI condition [N40,N26]', {
   timeout: relayWorkBudgetMs() * 5 + 180_000,
-  skip: !findChromeExecutable() && 'Chrome is not installed',
+  skip: (!findChromeExecutable() && 'Chrome is not installed')
+    || (process.env.CI && '#835: skipped on CI for the 0.9.1 release (the person, 18 Oct): Chrome on the CI runners drops the session cookie from intercepted requests; its fix un-skips it'),
 }, (t) => everyBoardJourney(t, { armed: false, ms: 3_500 }));
 
 // ---------------------------------------------------------------------------------------------------------------
