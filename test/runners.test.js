@@ -12,6 +12,8 @@ import { gateSlotEnvironment, listResources, setResourceCapacity, takeResource }
 import { parseProcessCensus } from '../src/process-census.js';
 import { listResources as listPreRunnerResources, takeResource as takePreRunnerResource } from './fixtures/resources-pre-runners.js';
 import { runFixtureChild, runFixtureChildAsync, startFixtureChild } from './fixture-child.js';
+import { readRemoteGateHolders, waitForCondition } from './runner-fixture-state.js';
+import { parentDeathDrainFixture } from './runner-parent-death-fixture.js';
 import { createE2eHelpers } from './e2e-helpers.js';
 import { refuseSandboxBlocked } from '../src/gate.js';
 
@@ -422,30 +424,12 @@ function fixtureResultContext(result) {
   return `${result.context}\nstdout tail:\n${String(result.stdout ?? '').slice(-4_000)}\nstderr tail:\n${String(result.stderr ?? '').slice(-4_000)}`;
 }
 
-/** Read the remote machine's live gate holders without changing its shared admission state. */
-function readRemoteGateHolders(file) {
-  const db = new DatabaseSync(file, { readOnly: true });
-  try {
-    db.exec('PRAGMA busy_timeout = 10000');
-    return db.prepare("SELECT token, pid, agent, browser, item, kind FROM holder WHERE name = 'gate'").all();
-  } finally { db.close(); }
-}
-
 /** Wait for the marker itself: a missed file notification must not hide observable readiness. */
 async function waitForMarker(path) {
   const deadline = Date.now() + 20_000; // budget: unchanged hang ceiling for the queue-to-parent handoff.
   while (!existsSync(path)) {
     if (Date.now() >= deadline) throw new Error(`fixture marker did not arrive: ${path}`);
     await new Promise(resolve => setTimeout(resolve, 20)); // budget: polling interval for the actual readiness marker.
-  }
-}
-
-/** Poll a concrete process/resource state; the deadline only bounds a broken cleanup handshake. */
-async function waitForCondition(check, label) {
-  const deadline = Date.now() + 20_000;
-  while (!check()) {
-    if (Date.now() >= deadline) throw new Error(`fixture cleanup state did not arrive: ${label}`);
-    await new Promise(resolve => setTimeout(resolve, 20)); // budget: polling interval for an observable cleanup condition.
   }
 }
 
@@ -1681,124 +1665,13 @@ syncBuiltinESMExports();\n`);
   }
 });
 
-test('a queued run executes on a registered runner and its result comes back [C7] (parent death drains a detached worker descendant before releasing its lease)', async (t) => {
-  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'pullboard-runner-parent-death-')));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
-  const home = join(dir, 'home');
-  const machineHome = join(home, '.pullboard');
-  const remoteHome = join(dir, 'worker-home');
-  const remoteMachineHome = join(remoteHome, '.pullboard');
-  const remoteDatabase = join(remoteMachineHome, 'resources.sqlite');
-  const repo = join(dir, 'repo');
-  const worker = join(dir, 'second-machine');
-  const bin = join(dir, 'bin');
-  const requests = join(dir, 'ssh-requests.jsonl');
-  const childReady = join(dir, 'detached-child-ready');
-  const childPidFile = join(dir, 'detached-child-pid');
-  const childTerm = join(dir, 'detached-child-term');
-  const releaseChild = join(dir, 'release-detached-child');
-  const childGone = join(dir, 'detached-child-gone');
-  for (const folder of [repo, worker, bin, home, machineHome, remoteHome, remoteMachineHome]) {
-    mkdirSync(folder, { recursive: true });
-  }
-  writeFileSync(join(machineHome, 'settings.json'), JSON.stringify({ gateSlots: 1 }));
-  const env = {
-    ...process.env, HOME: home, PULLBOARD_HOME: home, PULLBOARD_MACHINE_HOME: machineHome,
-    PATH: `${bin}:${process.env.PATH}`, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1',
-    GIT_AUTHOR_NAME: 'Parent Death Fixture', GIT_AUTHOR_EMAIL: 'parent-death@example.invalid',
-    GIT_COMMITTER_NAME: 'Parent Death Fixture', GIT_COMMITTER_EMAIL: 'parent-death@example.invalid',
-  };
-  const initialized = runFixtureChild('git', ['init', '-q', '-b', 'main'], { cwd: repo, env, encoding: 'utf8' });
-  assert.equal(initialized.status, 0, initialized.context);
-  writeFileSync(join(repo, 'pullboard.json'), JSON.stringify({ gate: 'true' }));
-  writeFileSync(join(repo, 'tracked.txt'), 'parent-death runner fixture\n');
-  writeFileSync(join(repo, 'remote-parent-death-launcher.js'), `const { spawn } = require('node:child_process');
-const child = spawn(process.execPath, [require.resolve('./remote-detached-child.js'), ...process.argv.slice(2)], {
-  detached: true, stdio: 'ignore', env: process.env,
-});
-child.unref();
-setInterval(() => {}, 1_000);
-`);
-  writeFileSync(join(repo, 'remote-detached-child.js'), `const { existsSync, writeFileSync } = require('node:fs');
-const [ready, pidFile, term, release, gone] = process.argv.slice(2);
-let handlingTerm = false;
-process.on('SIGTERM', () => {
-  if (handlingTerm) return;
-  handlingTerm = true;
-  writeFileSync(term, 'term\\n');
-  const wait = setInterval(() => {
-    if (!existsSync(release)) return;
-    clearInterval(wait);
-    writeFileSync(gone, 'gone\\n');
-    process.exit(0);
-  }, 5);
-});
-writeFileSync(pidFile, String(process.pid));
-writeFileSync(ready, 'ready\\n');
-setInterval(() => {}, 1_000);
-`);
-  git(repo, env, 'add', 'pullboard.json', 'tracked.txt', 'remote-parent-death-launcher.js', 'remote-detached-child.js');
-  git(repo, env, 'commit', '-q', '-m', 'test: prepare committed detached-child launchers');
-  installSshStandIn({ bin, worker, home: remoteHome, machineHome: remoteMachineHome, requests });
-  const added = cli(repo, env, 'runner', 'add', HOST, '--slots', '1', '--browser', '1', '--json');
-  assert.equal(added.status, 0, added.context);
+const parentDeathTools = { cli, git, installSshStandIn, observe, startQueueController, waitForMarker, processIsAlive, shellQuote, HOST };
+test('a queued run executes on a registered runner and its result comes back [C7] (parent death drains a detached worker descendant before releasing its lease)',
+  { timeout: 90_000 }, t => parentDeathDrainFixture(t, parentDeathTools)); // budget: fixture ceiling covers declared30-second remote cleanup plus startup, transport and final cleanup.
 
-  const previousHome = process.env.PULLBOARD_HOME;
-  const previousMachineHome = process.env.PULLBOARD_MACHINE_HOME;
-  process.env.PULLBOARD_HOME = home;
-  process.env.PULLBOARD_MACHINE_HOME = machineHome;
-  let localHold;
-  let remoteRun;
-  let detachedPid;
-  let remoteAgent;
-  try {
-    localHold = await takeResource({ name: 'gate', capacity: 1, scope: 'machine', root: repo,
-      agent: 'parent-death-local-holder', item: 'parent-death-local-holder', kind: 'fixture-hold', browser: true });
-    const command = ['node remote-parent-death-launcher.js', ...[childReady, childPidFile, childTerm, releaseChild, childGone].map(shellQuote)].join(' ');
-    remoteRun = observe(startQueueController(repo, env, command,
-      { item: 'parent-death-remote-holder', queueMarker: null, firstItem: null }));
-    await waitForMarker(childReady);
-    detachedPid = Number(readFileSync(childPidFile, 'utf8').trim());
-    assert.ok(Number.isSafeInteger(detachedPid) && detachedPid > 0);
-    assert.notEqual(detachedPid, remoteRun.child.pid, 'the committed launcher owns a separate detached child');
-    assert.equal(processIsAlive(detachedPid), true);
-    const held = readRemoteGateHolders(remoteDatabase);
-    assert.equal(held.length, 1, 'the remote worker keeps its physical gate holder while the launcher is live');
-    remoteAgent = held[0].agent;
-    assert.match(remoteAgent, /^pullboard-ssh-/u);
+test('parent death retries a failed remote holder deletion after the real database writer releases [C7]',
+  { timeout: 90_000 }, t => parentDeathDrainFixture(t, parentDeathTools, { holdRelease: true })); // budget: same fixture deadline includes the real10-second SQLite busy attempt and release retry.
 
-    remoteRun.child.kill('SIGTERM');
-    await waitForMarker(childTerm);
-    assert.equal(processIsAlive(detachedPid), true, 'the detached child remains alive in its controlled TERM handler');
-    const duringDrain = readRemoteGateHolders(remoteDatabase);
-    assert.equal(duringDrain.length, 1);
-    assert.equal(duringDrain[0].agent, remoteAgent, 'the physical runner lease remains held during descendant cleanup');
-
-    writeFileSync(releaseChild, 'release\n');
-    await waitForMarker(childGone);
-    await waitForCondition(() => !processIsAlive(detachedPid), 'the detached child PID exits');
-    await waitForCondition(() => readRemoteGateHolders(remoteDatabase).every(holder => holder.agent !== remoteAgent),
-      'the remote physical gate holder is released after child exit');
-    const controller = await remoteRun.closed;
-    remoteRun = null;
-    assert.equal(controller.signal, 'SIGTERM', 'the owned API controller alone received SIGTERM');
-  } finally {
-    if (localHold) localHold.release();
-    writeFileSync(releaseChild, 'cleanup-release\n');
-    if (remoteRun && remoteRun.child.exitCode === null && remoteRun.child.signalCode === null) {
-      remoteRun.child.kill('SIGTERM');
-    }
-    if (detachedPid && processIsAlive(detachedPid)) {
-      try { process.kill(detachedPid, 'SIGTERM'); } catch (error) { if (error.code !== 'ESRCH') throw error; }
-    }
-    if (remoteRun) await remoteRun.closed;
-    if (detachedPid) await waitForCondition(() => !processIsAlive(detachedPid), 'fixture detached child cleanup');
-    if (previousHome === undefined) delete process.env.PULLBOARD_HOME;
-    else process.env.PULLBOARD_HOME = previousHome;
-    if (previousMachineHome === undefined) delete process.env.PULLBOARD_MACHINE_HOME;
-    else process.env.PULLBOARD_MACHINE_HOME = previousMachineHome;
-  }
-});
 
 test('a queued run executes on a registered runner and its result comes back [C7] (unverified cleanup times out as a named red result)', { timeout: 90_000 }, async (t) => { // budget: bounded 30-second remote cleanup timeout plus startup, transport and fixture cleanup ceiling.
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'pullboard-runner-cleanup-timeout-')));
