@@ -12,6 +12,7 @@ import { relayWorkBudgetMs, findChromeExecutable } from './relay-browser-fixture
 import { startFixtureChild } from './fixture-child.js';
 import { apiStatus } from '../src/api-http.js';
 import { NEXT_STEPS } from '../src/next-steps.js';
+import { chromeHealth, networkServicePids } from './cockpit/chrome-health.js';
 import { machine, project, startView, fetchLive, openSnapshotChrome, closeSnapshotChrome, press, pickProject, chromeExecutable, boardOf } from './cockpit/fixture.js';
 
 const JOURNEY_HOSTED = 'https://app.pullboard.dev';
@@ -924,6 +925,7 @@ async function everyBoardJourney(t, slow = null) {
   let stopRoutes;
   let setup;
   const cookiePauses = [];
+  let networkAtStart = null;
   try {
     // A performs one real foreground CLI sign-in and leaves the command waiting at its actual phone enrollment.
     const machineFile = join(machineA.env.PULLBOARD_HOME, 'relay-machine/state.json');
@@ -983,6 +985,7 @@ async function everyBoardJourney(t, slow = null) {
     await chromeB.waitFor("location.hash === '' && document.querySelector('#chain')?.textContent.includes('linked machine A board')", 45_000); // budget: bounded setup wait within this journey test’s declared outer timeout (5x relay-work budget plus 180 seconds).
     await chromeB.send('Page.navigate', { url: 'about:blank' });
     journeyTrace.begin();
+    networkAtStart = networkServicePids(profileB);
     authTrace.begin();
     cookiePauses.length = 0;
     // The CI condition: a slow first discovery answer, and from here Chrome's paused requests arrive without cookies (#835).
@@ -1098,6 +1101,9 @@ async function everyBoardJourney(t, slow = null) {
     assert.equal(existsSync(keyBFile), false, 'the complete journey creates no relay key for B');
     assert.deepEqual(chromeA.exceptions, [], 'A’s real view UI has no browser errors');
     assert.deepEqual(chromeB.exceptions, [], 'B’s hosted mixed-board page has no browser errors');
+  } catch (error) {
+    try { t.diagnostic('chrome health ' + JSON.stringify(chromeHealth(chromeB, profileB, networkAtStart))); } catch { /* The original failure remains the test result. */ }
+    throw error;
   } finally {
     try { await stopRelayAll(setup); }
     finally {
