@@ -52,6 +52,7 @@ jobs:
           RUNS: ${{ inputs.runs }}
           RUNNER: ${{ inputs.os }}
           NODE_VERSION: ${{ inputs.node }}
+          PULLBOARD_HOSTED_JOURNEYS: "1"
         run: |
           case "$RUNS" in ''|*[!0-9]*) echo "runs must be a whole number, saw '$RUNS'"; exit 2;; esac
           [ -f "$FILE" ] || { echo "no such test file: $FILE"; exit 2; }
