@@ -24,7 +24,7 @@ import {
 import { staleChip } from './view/stale.js';
 import {
   pageStartup,
-  validLocalSession,
+  tabValue,
 } from './view/page-startup.js';
 import {
   roadmapHeaders,
@@ -251,16 +251,15 @@ const LOCAL_TRIPS = 'pullboard.local.trips';
 let localSession = null;
 let localProblem = null;
 let localConfirmed = false;
-/** Read, keep or forget a value for this tab only; a browser that refuses keeps nothing, and the page goes on. */
-function tabValue(name, value) {
+const tabValue = (${tabValue.toString()});
+/** Whether a value is a local session this page may use: version 1, a loopback origin with its port, and a secret. */
+function validLocalSession(value) {
+  if (!value || value.version !== 1 || typeof value.key !== 'string' || !/^[\\x21-\\x7e]{1,256}$/.test(value.key) || typeof value.origin !== 'string') return false;
   try {
-    if (value === undefined) return sessionStorage.getItem(name);
-    if (value === null) sessionStorage.removeItem(name);
-    else sessionStorage.setItem(name, value);
-  } catch { return null; }
-  return value;
+    const address = new URL(value.origin);
+    return address.protocol === 'http:' && ['127.0.0.1', 'localhost'].includes(address.hostname) && address.port !== '' && address.origin === value.origin;
+  } catch { return false; }
 }
-const validLocalSession = (${validLocalSession.toString()});
 const pageStartup = (${pageStartup.toString()});
 // A relay pairing link carries its own fragment; that load stays the relay's, as before.
 const relayPairing = hosted.local && ['board', 'key', 'device'].some((name) => new URLSearchParams(location.hash.slice(1)).has(name));

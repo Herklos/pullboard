@@ -3,13 +3,14 @@
  * its arguments and browser globals.
  */
 
-/** Whether a value is a local session this page may use: version 1, a loopback origin with its port, and a secret. */
-export function validLocalSession(value) {
-  if (!value || value.version !== 1 || typeof value.key !== 'string' || !/^[\x21-\x7e]{1,256}$/.test(value.key) || typeof value.origin !== 'string') return false;
+/** Read, keep or forget a value for this tab only; a browser that refuses keeps nothing, and the page goes on. */
+export function tabValue(name, value) {
   try {
-    const address = new URL(value.origin);
-    return address.protocol === 'http:' && ['127.0.0.1', 'localhost'].includes(address.hostname) && address.port !== '' && address.origin === value.origin;
-  } catch { return false; }
+    if (value === undefined) return sessionStorage.getItem(name);
+    if (value === null) sessionStorage.removeItem(name);
+    else sessionStorage.setItem(name, value);
+  } catch { return null; }
+  return value;
 }
 
 /**
