@@ -212,6 +212,7 @@ async function buildBoard(base, env) {
   pb(app, 'inbox');
   pb(repo, 'shout', 'app-1', '#4 can continue while #3 waits for review.');
   pb(repo, 'hold', 'review', '--reason', 'Waiting for the next demo item.');
+  pb(repo, 'milestone', 'add', 'Demo release', '--items', '1,2,3,4,5', '--note', 'A demo release with reviewed, active and future work.');
   if (!/1 withdrawn/.test(pb(repo, 'status'))) throw new Error('The demo board must include a withdrawn item.');
   const item = JSON.parse(pb(repo, 'show', '1', '--json'));
   if (item.item_builder_family !== 'codex' || item.verdicts.at(-1)?.verdict_verifier_family !== 'claude') {
@@ -243,8 +244,62 @@ async function recordTour(env) {
   await writeFile(join(OUTPUT, 'tour.svg'), renderTour(lines));
 }
 
+/** Capture the real demo release and one expanded item, with data and geometry checks before each image. */
+async function captureRoadmap(view, repo, observation) {
+  const output = join(ROOT, 'docs', 'img');
+  await mkdir(output, { recursive: true });
+  await view.viewport(1440, 1000);
+  await view.evaluate("document.querySelector('[data-tab=roadmap]').click()");
+  await view.waitFor(`view.tab === 'roadmap' && data.project.root === ${JSON.stringify(repo)} && document.querySelector('[data-key="m:Demo release"]')`, 'the isolated demo release');
+  await view.evaluate(`(() => {
+    const release = document.querySelector('[data-key="m:Demo release"]');
+    const head = release.querySelector('.milestone-head');
+    if (head.getAttribute('aria-expanded') !== 'true') head.click();
+    return true;
+  })()`);
+  await view.waitFor("document.querySelector('[data-key=\"m:Demo release\"] .milestone-item[data-roadmap-key=\"i:#1\"]')", 'the demo release items');
+  await view.evaluate(`(() => {
+    const release = document.querySelector('[data-key="m:Demo release"]');
+    for (const row of release.querySelectorAll('.milestone-item[aria-expanded="true"]')) row.click();
+    release.querySelector('.milestone-item[data-roadmap-key="i:#1"]').click();
+    return true;
+  })()`);
+  await view.waitFor(`(() => {
+    const release = document.querySelector('[data-key="m:Demo release"]');
+    const row = release?.querySelector('.milestone-item[data-roadmap-key="i:#1"]');
+    const fields = [...(row?.parentElement.querySelectorAll('.roadmap-detail dt') || [])].map(node => node.textContent.trim());
+    return row?.getAttribute('aria-expanded') === 'true' && ['Criterion', 'Agents', 'History', 'Release'].every(name => fields.includes(name))
+      && !!release.querySelector('.roadmap-estimate')?.textContent;
+  })()`, 'the expanded item fields and current time feedback');
+  const readings = [];
+  for (const theme of ['light', 'dark']) {
+    await view.evaluate(`document.documentElement.dataset.theme = ${JSON.stringify(theme)}; localStorage.setItem('pb.theme', ${JSON.stringify(theme)})`);
+    await view.evaluate('document.fonts.ready.then(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))');
+    const reading = JSON.parse(await view.evaluate(`JSON.stringify((() => {
+      const release = document.querySelector('[data-key="m:Demo release"]');
+      const row = release.querySelector('.milestone-item[data-roadmap-key="i:#1"]');
+      const rect = row.parentElement.getBoundingClientRect();
+      return { theme: document.documentElement.dataset.theme, width: innerWidth, height: innerHeight,
+        count: release.querySelector('.roadmap-left')?.textContent, legend: release.querySelectorAll('[data-summary-state]').length,
+        rows: release.querySelectorAll('.milestone-item').length, expanded: release.querySelectorAll('.milestone-item[aria-expanded="true"]').length,
+        fields: [...row.parentElement.querySelectorAll('.roadmap-detail dt')].map(node => node.textContent.trim()),
+        history: row.parentElement.querySelector('.roadmap-history')?.textContent, time: release.querySelector('.roadmap-estimate')?.textContent,
+        itemTop: rect.top, itemBottom: rect.bottom, pageWidth: document.documentElement.scrollWidth };
+    })())`));
+    if (reading.theme !== theme || !/4 remaining.*1 of 5 landed/u.test(reading.count) || reading.legend !== 6 || reading.rows !== 5 || reading.expanded !== 1
+      || !reading.history?.includes('sent back') || !reading.history?.includes('accepted') || !reading.time
+      || reading.itemTop < 0 || reading.itemBottom > reading.height || reading.pageWidth > reading.width) {
+      throw new Error('The demo Roadmap capture is incomplete: ' + JSON.stringify(reading));
+    }
+    readings.push(reading);
+    await view.screenshot(join(output, 'roadmap-' + theme + '.png'));
+  }
+  if (observation) observation.roadmap = readings;
+}
+
 const boardOnly = process.argv.includes('--board-only');
 const screenshotsOnly = process.argv.includes('--screenshots-only');
+const roadmapOnly = process.argv.includes('--roadmap-only');
 const tourOnly = process.argv.includes('--tour-only');
 const chrome = !tourOnly && !boardOnly && CHROME.find((path) => { try { return spawnSync(path, ['--version'], { stdio: 'ignore' }).status === 0; } catch { return false; } });
 if (!chrome && !tourOnly && !boardOnly) { process.stderr.write('pullboard demo: install Google Chrome to capture the board screenshots.\n'); process.exitCode = 1; }
@@ -320,28 +375,31 @@ else {
         }
         view = await browser(chrome, join(base, 'chrome-profile'), url);
         await waitForDemoBoard(view, repo);
-        await view.viewport(1440, 900);
-        await view.evaluate("document.querySelector('#filter-toggle').click(); document.querySelector('#filter-menu [data-filter-choice=\"state:all\"]').click()");
-        await view.waitFor("!!document.querySelector('#chain .row[data-item=\"1\"]')", 'accepted item in All');
-        await view.evaluate("(()=>{document.documentElement.dataset.theme='light'; localStorage.setItem('pb.theme','light'); document.querySelector('#chain .row[data-item=\"1\"]').click()})()");
-        await view.waitFor("view.item === 1 && !!document.querySelector('#chain .row.on[data-item=\"1\"]') && document.querySelector('#detail').textContent.includes('Reviewed and accepted') && document.querySelector('#detail').textContent.includes('REJECT') && document.querySelector('#detail').textContent.includes('ACCEPT')", 'selected accepted item and both verdicts');
-        await view.evaluate("document.querySelector('#filter-toggle').click(); document.querySelector('#filter-menu [data-filter-choice=\"state:active\"]').click()");
-        await view.waitFor("!document.querySelector('#needs').hidden && document.querySelector('#needs').textContent.includes('NEEDS YOU') && document.querySelector('#detail').textContent.includes('ACCEPT')", 'Active items, Needs you and the selected review history');
-        await view.evaluate('document.fonts.ready.then(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))');
-        await view.screenshot(join(OUTPUT, 'desktop.png'));
-        await view.viewport(390, 900);
-        await view.evaluate("(()=>{document.documentElement.dataset.theme='dark'; localStorage.setItem('pb.theme','dark'); const item=document.querySelector('[data-item=\"4\"]'); const detail=document.querySelector('#detail')?.textContent??''; if(document.documentElement.dataset.theme!=='dark'||!item||!detail.includes('ACCEPT')||document.querySelector('#needs').hidden) throw new Error('The phone screenshot must show active work and Needs you in dark mode'); return true})()");
-        await view.screenshot(join(OUTPUT, 'phone.png'));
-        await view.viewport(1440, 900);
-        await view.evaluate("document.documentElement.dataset.theme='light'; localStorage.setItem('pb.theme','light'); document.querySelector('[data-tab=\"shouts\"]').click()");
-        await view.waitFor("!document.querySelector('#shouts-pane').hidden && !!document.querySelector('#feed .heard:not(.not)') && !!document.querySelector('#feed .receipt') && !!document.querySelector('#feed [data-code]') && !!document.querySelector('#feed .band.done')", 'answered conversation, Heard, receipt and code reference');
-        await view.evaluate('document.fonts.ready.then(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))');
-        await view.screenshot(join(OUTPUT, 'shouts.png'));
+        if (!roadmapOnly) {
+          await view.viewport(1440, 900);
+          await view.evaluate("document.querySelector('#filter-toggle').click(); document.querySelector('#filter-menu [data-filter-choice=\"state:all\"]').click()");
+          await view.waitFor("!!document.querySelector('#chain .row[data-item=\"1\"]')", 'accepted item in All');
+          await view.evaluate("(()=>{document.documentElement.dataset.theme='light'; localStorage.setItem('pb.theme','light'); document.querySelector('#chain .row[data-item=\"1\"]').click()})()");
+          await view.waitFor("view.item === 1 && !!document.querySelector('#chain .row.on[data-item=\"1\"]') && document.querySelector('#detail').textContent.includes('Reviewed and accepted') && document.querySelector('#detail').textContent.includes('REJECT') && document.querySelector('#detail').textContent.includes('ACCEPT')", 'selected accepted item and both verdicts');
+          await view.evaluate("document.querySelector('#filter-toggle').click(); document.querySelector('#filter-menu [data-filter-choice=\"state:active\"]').click()");
+          await view.waitFor("!document.querySelector('#needs').hidden && document.querySelector('#needs').textContent.includes('NEEDS YOU') && document.querySelector('#detail').textContent.includes('ACCEPT')", 'Active items, Needs you and the selected review history');
+          await view.evaluate('document.fonts.ready.then(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))');
+          await view.screenshot(join(OUTPUT, 'desktop.png'));
+          await view.viewport(390, 900);
+          await view.evaluate("(()=>{document.documentElement.dataset.theme='dark'; localStorage.setItem('pb.theme','dark'); const item=document.querySelector('[data-item=\"4\"]'); const detail=document.querySelector('#detail')?.textContent??''; if(document.documentElement.dataset.theme!=='dark'||!item||!detail.includes('ACCEPT')||document.querySelector('#needs').hidden) throw new Error('The phone screenshot must show active work and Needs you in dark mode'); return true})()");
+          await view.screenshot(join(OUTPUT, 'phone.png'));
+          await view.viewport(1440, 900);
+          await view.evaluate("document.documentElement.dataset.theme='light'; localStorage.setItem('pb.theme','light'); document.querySelector('[data-tab=\"shouts\"]').click()");
+          await view.waitFor("!document.querySelector('#shouts-pane').hidden && !!document.querySelector('#feed .heard:not(.not)') && !!document.querySelector('#feed .receipt') && !!document.querySelector('#feed [data-code]') && !!document.querySelector('#feed .band.done')", 'answered conversation, Heard, receipt and code reference');
+          await view.evaluate('document.fonts.ready.then(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))');
+          await view.screenshot(join(OUTPUT, 'shouts.png'));
+        }
+        await captureRoadmap(view, repo, observation);
         await view.close(); view = null;
         recordBeforeViewStop(observation);
         await stop(server); server = null;
         await recordAfterViewStop(observation);
-        if (!screenshotsOnly) await recordTour(env);
+        if (!screenshotsOnly && !roadmapOnly) await recordTour(env);
         if (observation) observation.outcome = 'completed';
       }
     }

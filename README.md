@@ -313,6 +313,13 @@ Pullboard exists to keep a team of agents coherent over a long build.
 - Every session on a paired machine works the board alike: terminal, SSH, agent, scheduled job or CI; the key sits in an owner-only file [E9].
 - Each person may keep a private board per repo in ~/.pullboard; its items stay on that person's devices [E11].
 
+The demo roadmap shows release progress and an item expanded in place, with its criterion, agents, history and release.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/img/roadmap-dark.png">
+  <img src="docs/img/roadmap-light.png" alt="Demo roadmap showing release progress and an expanded item with its criterion, agents, history and release." width="1440">
+</picture>
+
 The full plan lives in the Roadmap tab in Pullboard View and `pullboard roadmap`.
 
 ### Docs

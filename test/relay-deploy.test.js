@@ -103,7 +103,36 @@ function copiedServer(t, image, port, provider) {
     child.kill('SIGKILL');
     await childClosesWithin(child, 5000);
   });
-  return { child, privateHome, startedAt: started };
+  return { child, privateHome, startedAt: started, stderr: () => stderr };
+}
+
+/**
+ * Boot the copied relay to health on a fresh port, retrying with another when it exits PORT_BUSY.
+ * unusedPort() closes its socket before the relay listens, so another process can take the port in
+ * between; under parallel gates that turned an unrelated submit red (#883). A final failure names
+ * every port tried.
+ *
+ * @returns {Promise<{ child: any, privateHome: string, startedAt: number, origin: string, deadline: number, tried: { port: number, refused: string | null }[] }>}
+ */
+async function bootCopiedServer(t, image, provider, { pickPort = unusedPort, attempts = 3 } = {}) {
+  const tried = [];
+  let last = '';
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const port = await pickPort();
+    const origin = `http://127.0.0.1:${port}`;
+    const running = copiedServer(t, image, port, provider);
+    const deadline = Date.now() + 5000;
+    if (await copiedServerHealthy(running.child, origin, deadline)) {
+      tried.push({ port, refused: null });
+      return { ...running, origin, deadline, tried };
+    }
+    await childClosesWithin(running.child, 5000);
+    last = running.stderr();
+    const busy = /\[PORT_BUSY\]/u.test(last);
+    tried.push({ port, refused: busy ? 'PORT_BUSY' : null });
+    if (!busy) break;
+  }
+  return assert.fail(`the copied relay did not reach health on ports ${tried.map(({ port, refused }) => `${port}${refused ? ` (${refused})` : ''}`).join(', ')}; last stderr: ${safeFixtureDiagnostic(last)}`);
 }
 
 /** Fetch with the remaining portion of the copied server's shared readiness deadline. */
@@ -628,11 +657,9 @@ test('[H5,H18] Docker COPY sources boot the relay and serve its browser page, wh
   const provider = await githubFixture(t);
   const image = copiedImage(t);
   await assertCopiedChangelog(image);
-  const port = await unusedPort();
-  const origin = `http://127.0.0.1:${port}`;
-  const running = copiedServer(t, image, port, provider);
-  const deadline = Date.now() + 5000;
-  assert.equal(await copiedServerHealthy(running.child, origin, deadline), true, 'the Dockerfile-only copy starts the production entry point and reaches health');
+  // The Dockerfile-only copy starts the production entry point and reaches health.
+  const running = await bootCopiedServer(t, image, provider);
+  const { origin, deadline } = running;
   const failureBudgetMs = damagedServerFailureBudget(performance.now() - running.startedAt);
   const page = await fetchBeforeDeadline(origin, deadline);
   assert.equal(page.status, 200);
@@ -658,6 +685,33 @@ test('[H5,H18] Docker COPY sources boot the relay and serve its browser page, wh
     const damaged = copiedServer(t, damagedImage, damagedPort, provider);
     await requireCopiedServerFailure(damaged.child, failureBudgetMs, omitted);
   }
+});
+
+test('[H5,H18] a copied relay whose port was taken retries on a fresh one, naming every port tried', async (t) => {
+  const provider = await githubFixture(t);
+  const image = copiedImage(t);
+  const holders = [];
+  t.after(() => Promise.all(holders.map((server) => new Promise((ready) => server.close(ready)))));
+  /** Take a port on the relay's own wildcard address and keep it, as another process can before the relay listens. */
+  const heldPort = async () => {
+    const server = createServer();
+    await new Promise((ready, fail) => { server.once('error', fail); server.listen(0, '0.0.0.0', ready); });
+    holders.push(server);
+    return server.address().port;
+  };
+  let picks = 0;
+  const booted = await bootCopiedServer(t, image, provider, { pickPort: () => (picks++ === 0 ? heldPort() : unusedPort()) });
+  assert.equal(booted.tried.length, 2, 'one retry after the held port');
+  assert.equal(booted.tried[0].refused, 'PORT_BUSY', 'the first attempt is refused PORT_BUSY on the held port');
+  assert.equal(booted.tried[1].refused, null, 'the retry boots');
+  assert.equal((await fetchBeforeDeadline(new URL('/health', booted.origin), booted.deadline)).status, 200);
+
+  const held = [];
+  await assert.rejects(
+    bootCopiedServer(t, image, provider, { pickPort: async () => { const port = await heldPort(); held.push(port); return port; } }),
+    (error) => held.length === 3 && held.every((port) => error.message.includes(`${port} (PORT_BUSY)`)),
+    'a final failure names every port tried',
+  );
 });
 
 test('[H5,H18] a damaged relay copy is judged by its own boot time', { timeout: 30_000 }, async (t) => {

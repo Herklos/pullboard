@@ -2,6 +2,7 @@
  * The commit-message rules (C1, C2) and the pre-commit pattern checks on real staged changes.
  */
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { runFixtureExecFile as execFileSync, runFixtureGit } from './fixture-child.js';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -319,4 +320,82 @@ test('a lane draft and a coordinator draft never share an id, in either order [S
   }
   const approve = box.run(box.web, 'spec', 'approve', laneAfter);
   assert.notEqual(approve.code, 0, 'a lane cannot approve its own draft; the person does');
+});
+
+test('a hook names a Pullboard version mismatch instead of running old rules [C1,I2]', (t) => {
+  const box = stagedRepo(t);
+  const hooks = join(box.root, '.githooks'), bin = join(box.root, '.fakebin'), local = join(box.root, 'node_modules', '.bin');
+  mkdirSync(hooks); mkdirSync(bin);
+  box.git('config', 'core.hooksPath', '.githooks');
+  box.git('config', 'user.name', 'Fixture');
+  box.git('config', 'user.email', 'fixture@example.com');
+  writeFileSync(join(hooks, 'commit-msg'), hookScript('commit-msg', '0.9.0'));
+  chmodSync(join(hooks, 'commit-msg'), 0o755);
+  /** A pullboard that reports one version and says so if its rules ever run. */
+  const fake = (dir, version) => {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'pullboard'), `#!/bin/sh\nif [ "$1" = --version ]; then echo ${version}; exit 0; fi\necho "rules of ${version} ran" >&2\nexit 0\n`);
+    chmodSync(join(dir, 'pullboard'), 0o755);
+  };
+  const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
+  const commit = () => spawnSync('git', ['commit', '--allow-empty', '-q', '-m', 'chore: try a commit'], { cwd: box.root, env, encoding: 'utf8' });
+
+  fake(bin, '0.8.4');
+  let result = commit();
+  assert.equal(result.status, 1, 'an older global pullboard is stopped');
+  assert.match(result.stderr, /stopped before running any rule; these hooks were installed by Pullboard 0\.9\.0, but pullboard is Pullboard 0\.8\.4\. Run: npm i -g pullboard@0\.9\.0/u);
+  assert.doesNotMatch(result.stderr, /rules of 0\.8\.4 ran/u, 'the old rules never run');
+
+  fake(local, '0.8.4');
+  result = commit();
+  assert.equal(result.status, 1, 'an older project install is stopped');
+  assert.match(result.stderr, /Pullboard 0\.8\.4\. Run: npm i -D pullboard@0\.9\.0/u, 'a project install is fixed in the project');
+  rmSync(join(box.root, 'node_modules'), { recursive: true, force: true });
+
+  fake(bin, '0.9.9');
+  result = commit();
+  assert.equal(result.status, 1, 'a newer pullboard under older hooks is stopped too');
+  assert.match(result.stderr, /Pullboard 0\.9\.9\. Run: pullboard init/u, 'newer rules rewrite the hooks with init');
+
+  fake(bin, '0.9.0');
+  result = commit();
+  assert.equal(result.status, 0, `the matching version runs: ${result.stderr}`);
+  assert.match(result.stderr, /rules of 0\.9\.0 ran/u, 'the hook runs the version that installed it');
+});
+
+test('pre-push keeps its ref records when the version query reads stdin [C3,L3,I2]', () => {
+  const box = e2e.project('test ! -f RED');
+  writeFileSync(join(box.repo, 'RED'), 'this older commit is red\n');
+  box.git(box.repo, 'add', 'RED');
+  box.git(box.repo, 'commit', '-q', '-m', 'chore: create the red commit');
+  const red = box.git(box.repo, 'rev-parse', 'HEAD').trim();
+  box.git(box.repo, 'rm', '-q', 'RED');
+  box.git(box.repo, 'commit', '-q', '-m', 'chore: check out a green commit');
+  const green = box.git(box.repo, 'rev-parse', 'HEAD').trim();
+  assert.notEqual(red, green);
+  const remote = join(box.dir, 'private-remote.git');
+  box.git(box.dir, 'init', '--bare', '-q', remote);
+  box.git(box.repo, 'remote', 'add', 'private', remote);
+  const wrapper = join(box.dir, 'version-wrapper');
+  mkdirSync(wrapper);
+  /** Quote the controlled Node executable and the real fixture CLI. */
+  const quote = value => `'${value.replaceAll("'", "'\\''")}'`;
+  writeFileSync(join(wrapper, 'pullboard'), '#!/bin/sh\nif [ "$1" = --version ]; then cat > "$HOOK_VERSION_STDIN"; fi\nexec '
+    + quote(process.execPath) + ' ' + quote(e2e.BIN) + ' "$@"\n');
+  chmodSync(join(wrapper, 'pullboard'), 0o755);
+  box.env.PATH = `${wrapper}:${box.env.PATH}`;
+  box.env.HOOK_VERSION_STDIN = join(box.dir, 'version-input');
+
+  const pushed = box.tryGit(box.repo, 'push', 'private', `${red}:refs/heads/main`);
+  assert.notEqual(pushed.status, 0, `the gate on ${green} must not admit ${red}: ${pushed.stdout}${pushed.stderr}`);
+  assert.match(pushed.stderr, /is not checked out/u, pushed.stderr);
+  assert.notEqual(box.tryGit(remote, 'rev-parse', '--verify', 'refs/heads/main').status, 0,
+    'the rejected push leaves the private remote unchanged');
+  assert.equal(readFileSync(box.env.HOOK_VERSION_STDIN, 'utf8'), '', 'the version query receives EOF');
+
+  const matching = box.tryGit(box.repo, 'push', 'private', `${green}:refs/heads/main`);
+  assert.equal(matching.status, 0, matching.failure || matching.stderr || matching.stdout);
+  assert.equal(box.git(remote, 'rev-parse', 'refs/heads/main').trim(), green,
+    'the real hook still admits the checked and gated commit');
+  assert.equal(readFileSync(box.env.HOOK_VERSION_STDIN, 'utf8'), '', 'the successful push also preserves its refs');
 });
