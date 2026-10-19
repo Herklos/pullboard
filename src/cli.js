@@ -2661,8 +2661,8 @@ function readCommands(io, { first, second, rest, values }) {
 async function rigorDraftHere(io, { second, rest, values }) {
   if (rest.length > 1) throw new Refused('USAGE', 'pullboard rigor draft <key> "<rule>" --check "<command>" --red <commit> --green <commit> [--section <letter>]');
   const ctx = context(io);
-  const { events, actor } = withBoard(ctx, (board) => ({ events: store.events(board), actor: whoAmI(ctx, board).id }));
-  const result = await rigorDraft({ root: ctx.info.root, config: ctx.config, events, person: store.PERSON, agent: actor },
+  const { events, actor, reserved } = withBoard(ctx, (board) => ({ events: store.events(board), actor: whoAmI(ctx, board).id, reserved: store.rowDrafts(board).map((draft) => draft.id) }));
+  const result = await rigorDraft({ root: ctx.info.root, config: ctx.config, events, person: store.PERSON, agent: actor, reserved },
     { key: second, text: rest[0], check: values.check, red: values.red, green: values.green, section: values.section });
   io.result?.(result);
   io.say(`proved ${result.key}: red at ${result.proof.red.commit.slice(0, 12)} (${result.proof.red.problems} problem lines, exit ${result.proof.red.exit}), green at ${result.proof.green.commit.slice(0, 12)} (exit ${result.proof.green.exit})`);
@@ -2864,7 +2864,7 @@ async function addBlueprint(ctx, board, me, blueprint, { report = true, result =
   // only: nothing runs and nothing is fetched (#725).
   const plan = planBlueprint(landBlueprint(blueprint, repoAnswers(ctx.info.root)), { source, spec, doctrine: ctx.doctrine,
     existingItems: store.listItems(board, { all: true }).map((item) => ({ id: item.item_id, title: item.item_title, specIds: item.item_spec_ids ? item.item_spec_ids.split(',') : [] })),
-    gate: String(JSON.parse(configSource).gate ?? ''), drafted });
+    gate: String(JSON.parse(configSource).gate ?? ''), drafted, reserved: store.rowDrafts(board).map((draft) => draft.id) });
   for (const row of plan.rows) drafted.set(row.text, row.id);
   // Every starter is checked before anything is written, so a refusal leaves the board as it was.
   // Starters go to a build lane, never the coordinator's; a proposed lane is named, not written (#732).
@@ -3984,7 +3984,7 @@ async function specCommand(io, { first, second, rest, values }) {
       withBoard(ctx, (board) => {
         if (!ctx.info.isMain || whoAmI(ctx, board).id !== COORDINATOR) throw new Refused('COORDINATOR_ONLY', 'only the coordinator proposes standing rulings; ask your coordinator to run spec draft --doctrine --source');
       });
-      const result = proposeDoctrine(ctx, values, second);
+      const result = proposeDoctrine(ctx, values, second, (hookRead(ctx, (board) => store.rowDrafts(board)) ?? []).map((draft) => draft.id));
       io.result?.(result);
       io.say(result.id);
       return 0;

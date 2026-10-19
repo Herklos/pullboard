@@ -144,9 +144,10 @@ export function resumeDoctrineNotes(info, doctrine) {
  * @param {any} ctx the CLI context
  * @param {{ source?: string, section?: string, aim?: boolean, gate?: string }} values
  * @param {string} text the ruling
+ * @param {string[]} [reserved] ids the board's row drafts hold, which a new ruling skips (#878)
  * @returns {{ id: string, row: { id: string, status: string, tier: string, text: string, gate: string, section: string } }}
  */
-export function proposeDoctrine(ctx, values, text) {
+export function proposeDoctrine(ctx, values, text, reserved = []) {
   const doctrine = ctx.doctrine;
   if (!doctrine.repoExists) throw new Refused('NO_SPEC', `no ${doctrine.name}; run pullboard init before proposing doctrine`);
   if (doctrine.repo.problems.length) throw new Refused('SPEC_INVALID', `fix the unparsed row in ${doctrine.name} before proposing a ruling`);
@@ -155,7 +156,7 @@ export function proposeDoctrine(ctx, values, text) {
   const prefix = values.section ?? 'DR';
   const section = sections.find(section => section.prefix === prefix);
   if (!section && values.section) throw new Refused('SPEC_SECTION', `unknown section "${prefix}" in ${doctrine.name}; use a declared section or omit --section for rulings`);
-  const used = [...loadSpec(ctx.info.root, ctx.config).rows, ...doctrine.rows];
+  const used = [...loadSpec(ctx.info.root, ctx.config).rows, ...doctrine.rows, ...reserved.map((id) => ({ id }))];
   const numbers = used.map(row => new RegExp(`^${prefix}(\\d+)$`, 'u').exec(row.id)?.[1]).filter(Boolean).map(Number);
   const id = `${prefix}${Math.max(0, ...numbers) + 1}`;
   const tier = values.aim ? 'aim' : 'must';

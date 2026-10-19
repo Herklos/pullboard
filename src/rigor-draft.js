@@ -19,11 +19,12 @@ import { rigorSource } from './rigor-source.js';
  * has not repeated (pullboard rigor does not list it), the rule text is not one line, or the proof
  * does not hold. Returns the drafts with their evidence and proof.
  *
- * @param {{ root: string, config: any, events: any[], person: string }} board
+ * @param {{ root: string, config: any, events: any[], person: string, reserved?: string[] }} board reserved: ids the board's
+ *   drafts hold, which a new row skips like any written row (#878)
  * @param {{ key: string, text: string, check?: string, red?: string, green?: string, section?: string }} request
  * @returns {Promise<{ key: string, reads: string, evidence: { items: { id: number, commits: string[] }[], occurrences: number, neverAgain: boolean }, proof: object, drafts: object[] }>}
  */
-export async function rigorDraft({ root, config, events, person, agent }, { key, text, check, red, green, section }) {
+export async function rigorDraft({ root, config, events, person, agent, reserved = [] }, { key, text, check, red, green, section }) {
   const malformed = causeProblem(key ?? '');
   if (malformed) throw malformed;
   const cause = rigorReport(events, { person }).causes.find((entry) => entry.key === key);
@@ -36,8 +37,8 @@ export async function rigorDraft({ root, config, events, person, agent }, { key,
   const rowText = `${text.trim()} ${why}`;
   const source = rigorSource(cause, proof);
   const drafts = [];
-  if (cause.reads !== 'product') drafts.push(draftRow(root, config, { target: 'doctrine', text: rowText, gate: `check ${proof.countCheck}`, fields: ['count: 0', `source: ${source}`], section }));
-  if (cause.reads !== 'work') drafts.push(draftRow(root, config, { target: 'spec', text: rowText, gate: proof.check, fields: [`source: ${source}`], section }));
+  if (cause.reads !== 'product') drafts.push(draftRow(root, config, { target: 'doctrine', text: rowText, gate: `check ${proof.countCheck}`, fields: ['count: 0', `source: ${source}`], section, taken: reserved }));
+  if (cause.reads !== 'work') drafts.push(draftRow(root, config, { target: 'spec', text: rowText, gate: proof.check, fields: [`source: ${source}`], section, taken: reserved }));
   return { key, reads: cause.reads, evidence: { items: cause.items, occurrences: cause.occurrences, neverAgain: cause.neverAgain },
     proof: { check: proof.check, red: proof.red, green: proof.green }, drafts };
 }

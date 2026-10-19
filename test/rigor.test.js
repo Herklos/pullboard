@@ -205,6 +205,47 @@ test('a Rigor draft reaches Needs-you with its proof [D1,D3,S1,P6]', () => {
   assert.equal(json(box, 'resume').rigor.undrafted.length, 0);
 });
 
+test('independent Rigor writer respects a lane draft reservation [D1,S1,B26]', () => {
+  const box = freshBoard();
+  const config = join(box.repo, 'pullboard.json');
+  writeFileSync(config, `${JSON.stringify({ ...JSON.parse(readFileSync(config, 'utf8')), lanes: { app: { owns: ['app/'] } } }, null, 2)}\n`);
+  box.git('add', 'pullboard.json'); box.git('commit', '-q', '-m', 'chore: add the app lane');
+  const proof = noticeProof(box);
+  const historyBox = noticeHistory(box);
+  for (const id of ['Product first', 'Product second'].map(historyBox.add)) { historyBox.submit(id, proof.red); historyBox.reject(id, 'row:G1'); }
+  historyBox.close();
+  const lane = join(box.dir, 'lane');
+  box.git('worktree', 'add', '-q', lane, '-b', 'app/rows');
+  /** Run the real CLI in the lane worktree. */
+  const inLane = (...args) => runFixtureChild(process.execPath, [BIN, ...args], { cwd: lane, env: box.env, encoding: 'utf8' });
+  const joined = inLane('join', 'app', '--model', 'Lane model');
+  assert.equal(joined.status, 0, joined.stdout + joined.stderr);
+  /** Draft a spec row from the lane and return its id. */
+  const laneDraft = (text) => {
+    const drafted = inLane('spec', 'draft', text, '--json');
+    assert.equal(drafted.status, 0, drafted.stdout + drafted.stderr);
+    return JSON.parse(drafted.stdout).id;
+  };
+  // Lane first, then Rigor in the main checkout; then the lane again, while Rigor's row is still uncommitted there.
+  const laneFirst = laneDraft('A lane row drafted before Rigor');
+  const rigor = json(box, 'rigor', 'draft', 'row:G1', 'The fixed file exists', '--check', 'test -f fixed.txt', '--red', proof.red, '--green', proof.green);
+  const rigorId = rigor.drafts[0].id;
+  const laneAfter = laneDraft('A lane row drafted after Rigor');
+  assert.equal(new Set([laneFirst, rigorId, laneAfter]).size, 3, `every writer keeps its own id: ${laneFirst}, ${rigorId}, ${laneAfter}`);
+  assert.equal(runFixtureGit(['status', '--porcelain'], { cwd: lane, env: box.env, encoding: 'utf8' }).trim(), '', 'the lane edits no file outside its lane');
+
+  const applied = box.run('spec', 'apply');
+  assert.equal(applied.status, 0, applied.stdout + applied.stderr);
+  assert.doesNotMatch(applied.stdout, /holds other text/u);
+  const rows = json(box, 'spec').rows;
+  const text = (id) => rows.find((row) => row.id === id)?.text ?? '';
+  assert.equal(text(laneFirst), 'A lane row drafted before Rigor');
+  assert.equal(text(laneAfter), 'A lane row drafted after Rigor');
+  assert.match(text(rigorId), /^The fixed file exists Why: rigor row:G1/u);
+  assert.ok([laneFirst, rigorId, laneAfter].every((id) => rows.find((row) => row.id === id)?.status === 'draft'), 'all three stay drafts for the person');
+  assert.notEqual(inLane('spec', 'approve', laneFirst).status, 0, 'a lane cannot approve its own draft; the person does');
+});
+
 test('automatic Rigor notices retain old replay and include reopen and never-again [D1,H16]', () => {
   const box = freshBoard();
   const historyBox = history(box.file);
