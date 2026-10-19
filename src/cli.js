@@ -2426,13 +2426,7 @@ function readCommands(io, { first, second, rest, values }) {
       else filtered.forEach((item) => io.say(itemLine(item, (id) => agentDisplayName(agents, ctx.config, id), merging.has(item.item_id))));
       return 0;
     },
-    queue: () => {
-      if (first || second || rest.length) throw new Refused('USAGE', 'pullboard queue takes no arguments');
-      const queue = withBoard(context(io), (board) => queueView.workQueue(board));
-      io.result?.(queue);
-      queueView.sayQueue(io, queue);
-      return 0;
-    },
+    queue: () => queueView.queueCommand(io, [first, second, ...rest], (work) => withBoard(context(io), work)),
     roadmap: () => {
       if (first || second || rest.length) throw new Refused('USAGE', 'pullboard roadmap takes no arguments');
       const ctx = context(io);

@@ -5,6 +5,7 @@
  * get from next now. The order is the board's own buildOrder, never a second copy, so the queue and
  * next cannot disagree. It is for agents and coordinators; the person reads the Roadmap instead.
  */
+import { Refused } from './refused.js';
 import {
   buildOrder,
   canTake,
@@ -90,4 +91,20 @@ export function sayQueue(io, queue) {
   }
   if (!queue.releases.length && !queue.unreleased.length) io.say('nothing in the queue');
   io.say(`next now: ${Object.entries(queue.first).map(([route, id]) => `${route} → ${id === null ? 'nothing' : `#${id}`}`).join(', ')}`);
+}
+
+/**
+ * The pullboard queue command: no arguments; prints the queue and sets its JSON result.
+ *
+ * @param {any} io
+ * @param {(string | undefined)[]} words
+ * @param {(work: (board: any) => any) => any} read - opens the board for one read
+ * @returns {number}
+ */
+export function queueCommand(io, words, read) {
+  if (words.some((word) => word !== undefined)) throw new Refused('USAGE', 'pullboard queue takes no arguments');
+  const queue = read((board) => workQueue(board));
+  io.result?.(queue);
+  sayQueue(io, queue);
+  return 0;
 }
