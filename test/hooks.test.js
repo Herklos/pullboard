@@ -3,10 +3,10 @@
  */
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { runFixtureExecFile as execFileSync, runFixtureGit } from './fixture-child.js';
+import { runFixtureExecFile as execFileSync, runFixtureChildAsync, runFixtureGit } from './fixture-child.js';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { after, test } from 'node:test';
 import { defaults } from '../src/config.js';
 import { addedLines, blockedPaths, commitCitationWarnings, commitMsgProblems, hookScript, matchesPattern, preCommitProblems, secretsIn, unwiredHookProblems } from '../src/hooks.js';
@@ -258,6 +258,113 @@ test('a spec-less feature commit is told a path that works [S1,B26]', () => {
     assert.match(advice.join('\n'), /\[R9\]/u, 'an approved board names an id that really exists');
     assert.doesNotMatch(advice.join('\n'), /\[G1(?:,G2)?\]/u, 'a fenced example is never suggested as a citation');
   }
+});
+
+test('a lane agent drafts a row and cites it without leaving its lane [S1,B26]', () => {
+  const box = e2e.project('pullboard spec check');
+  assert.equal(box.run(box.repo, 'add', 'web', 'Show the list', '--criterion', 'web/list.html exists').code, 0);
+  const claimed = box.run(box.web, 'claim', '1');
+  assert.equal(claimed.code, 0, claimed.out + claimed.err);
+  const drafted = box.run(box.web, 'spec', 'draft', 'A person sees their list');
+  assert.equal(drafted.code, 0, drafted.out + drafted.err);
+  const id = drafted.out.trim().split('\n').at(-1);
+  assert.match(id, /^G\d+$/u, `spec draft prints the new id: ${drafted.out}`);
+  assert.equal(box.tryGit(box.web, 'status', '--porcelain').stdout, '', 'drafting from the lane leaves its worktree clean');
+  mkdirSync(join(box.web, 'web'), { recursive: true });
+  writeFileSync(join(box.web, 'web', 'list.html'), '<ul></ul>\n');
+  box.git(box.web, 'add', 'web/list.html');
+  const commit = box.tryGit(box.web, 'commit', '-q', '-m', `feat(web): show the list [${id}]`);
+  assert.equal(commit.status, 0, `the lane cites its drafted row in a feature commit: ${commit.stderr}`);
+  const submitted = box.run(box.web, 'submit', '1');
+  assert.equal(submitted.code, 0, `the lane submits with the gate pullboard spec check: ${submitted.out}${submitted.err}`);
+
+  // The coordinator's spec apply writes the board draft into SPEC.md as a draft row, and the person approves it there.
+  const row = () => readFileSync(join(box.repo, 'SPEC.md'), 'utf8').split('\n').find((line) => line.startsWith(`- ${id} `));
+  assert.equal(row(), undefined, 'until apply, SPEC.md does not hold the lane draft');
+  const applied = box.run(box.repo, 'spec', 'apply');
+  assert.equal(applied.code, 0, applied.out + applied.err);
+  assert.match(applied.out, new RegExp(`${id} drafted from a lane, for the person to approve`, 'u'));
+  assert.equal(row(), `- ${id} [draft, must] A person sees their list | gate: review`, 'spec apply writes the draft at its own id');
+  assert.equal(box.run(box.repo, 'spec', 'approve', id).code, 0, 'the person approves the drafted row as before');
+  assert.equal(box.run(box.repo, 'spec', 'apply').code, 0);
+  assert.match(row(), /\[approved, must\]/u, 'the approved row is applied');
+});
+
+test('a lane draft and a coordinator draft never share an id, in either order [S1,B26]', () => {
+  const box = e2e.project('pullboard spec check');
+  const draft = (cwd, text) => {
+    const result = box.run(cwd, 'spec', 'draft', text);
+    assert.equal(result.code, 0, result.out + result.err);
+    return result.out.trim().split('\n').at(-1);
+  };
+  // Lane first: the coordinator's next id skips the lane's board draft.
+  const laneFirst = draft(box.web, 'A lane row drafted first');
+  const coordinatorAfter = draft(box.repo, 'A coordinator row drafted after');
+  // Coordinator first, committed through the installed hooks: the lane's older files lack it, and its next id still skips it.
+  const coordinatorFirst = draft(box.repo, 'A coordinator row drafted first');
+  box.git(box.repo, 'add', 'SPEC.md');
+  const committed = box.tryGit(box.repo, 'commit', '-q', '-m', `docs(spec): draft two rows [${coordinatorAfter},${coordinatorFirst}]`);
+  assert.equal(committed.status, 0, committed.stderr);
+  const laneAfter = draft(box.web, 'A lane row drafted after');
+  const ids = [laneFirst, coordinatorAfter, coordinatorFirst, laneAfter];
+  assert.equal(new Set(ids).size, 4, `every proposal keeps its own id: ${ids.join(', ')}`);
+  assert.equal(box.tryGit(box.web, 'status', '--porcelain').stdout, '', 'the lane edits no file outside its lane');
+
+  const applied = box.run(box.repo, 'spec', 'apply');
+  assert.equal(applied.code, 0, applied.out + applied.err);
+  assert.doesNotMatch(applied.out, /holds other text/u);
+  const spec = readFileSync(join(box.repo, 'SPEC.md'), 'utf8');
+  for (const [id, text] of [[laneFirst, 'A lane row drafted first'], [coordinatorAfter, 'A coordinator row drafted after'],
+    [coordinatorFirst, 'A coordinator row drafted first'], [laneAfter, 'A lane row drafted after']]) {
+    assert.ok(spec.includes(`- ${id} [draft, must] ${text} | gate: review`), `${id} keeps its own text as a draft after apply`);
+  }
+  const approve = box.run(box.web, 'spec', 'approve', laneAfter);
+  assert.notEqual(approve.code, 0, 'a lane cannot approve its own draft; the person does');
+});
+
+test('a lane draft and a main-checkout draft started at the same moment keep distinct ids [S1,B26]', async () => {
+  const box = e2e.project('pullboard spec check');
+  const cli = resolve(import.meta.dirname, '../bin/pullboard.js');
+  /** Start one real spec draft without waiting for it. */
+  const start = (cwd, text) => runFixtureChildAsync(process.execPath, [cli, 'spec', 'draft', text, '--json'], { cwd, env: box.env });
+  const proposals = [];
+  for (let pair = 1; pair <= 4; pair += 1) {
+    const texts = [`A lane row from pair ${pair}`, `A coordinator row from pair ${pair}`];
+    const results = await Promise.all([start(box.web, texts[0]), start(box.repo, texts[1])]);
+    results.forEach((result, index) => {
+      assert.equal(result.status, 0, result.context);
+      proposals.push({ id: JSON.parse(result.stdout).id, text: texts[index] });
+    });
+  }
+  assert.equal(new Set(proposals.map(({ id }) => id)).size, proposals.length, `every proposal keeps its own id: ${proposals.map(({ id }) => id).join(', ')}`);
+  assert.equal(box.tryGit(box.web, 'status', '--porcelain').stdout, '', 'the lane edits no file outside its lane');
+
+  const applied = box.run(box.repo, 'spec', 'apply');
+  assert.equal(applied.code, 0, applied.out + applied.err);
+  assert.doesNotMatch(applied.out, /holds other text/u);
+  const spec = readFileSync(join(box.repo, 'SPEC.md'), 'utf8');
+  for (const { id, text } of proposals) assert.ok(spec.includes(`- ${id} [draft, must] ${text} | gate: review`), `${id} keeps its own text as a draft after apply`);
+  assert.notEqual(box.run(box.web, 'spec', 'approve', proposals[0].id).code, 0, 'a lane cannot approve its own draft; the person does');
+
+  // The same headline with a different gate and tier is another proposal: each writer keeps its own definition.
+  const headline = 'A row both writers name alike';
+  const [lane, main] = await Promise.all([
+    runFixtureChildAsync(process.execPath, [cli, 'spec', 'draft', headline, '--gate', 'true', '--aim', '--json'], { cwd: box.web, env: box.env }),
+    runFixtureChildAsync(process.execPath, [cli, 'spec', 'draft', headline, '--gate', 'false', '--json'], { cwd: box.repo, env: box.env }),
+  ]);
+  assert.equal(lane.status, 0, lane.context);
+  assert.equal(main.status, 0, main.context);
+  const laneRow = JSON.parse(lane.stdout);
+  const mainRow = JSON.parse(main.stdout);
+  assert.notEqual(laneRow.id, mainRow.id, 'two definitions with one headline get two ids');
+  assert.deepEqual([laneRow.row.gate, laneRow.row.tier], ['true', 'aim'], 'the lane gets back its own definition');
+  assert.deepEqual([mainRow.row.gate, mainRow.row.tier], ['false', 'must'], 'the main checkout gets back its own definition');
+  assert.equal(box.tryGit(box.web, 'status', '--porcelain').stdout, '');
+  assert.equal(box.run(box.repo, 'spec', 'apply').code, 0);
+  const both = readFileSync(join(box.repo, 'SPEC.md'), 'utf8');
+  assert.ok(both.includes(`- ${laneRow.id} [draft, aim] ${headline} | gate: true`), 'the lane row is applied as it was asked');
+  assert.ok(both.includes(`- ${mainRow.id} [draft, must] ${headline} | gate: false`), 'the main row stays as it was written');
+  assert.notEqual(box.run(box.web, 'spec', 'approve', laneRow.id).code, 0, 'the person alone approves');
 });
 
 test('a hook names a Pullboard version mismatch instead of running old rules [C1,I2]', (t) => {

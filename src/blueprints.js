@@ -454,15 +454,16 @@ export function landBlueprint(blueprint, answers) {
  * shared, so a text two blueprints share is drafted once (#720).
  *
  * @param {Blueprint} blueprint
- * @param {{ source: string, spec: any, doctrine: any, existingItems: { id: number, title: string, specIds: string[] }[], gate: string, drafted?: Map<string, string> }} board
+ * @param {{ source: string, spec: any, doctrine: any, existingItems: { id: number, title: string, specIds: string[] }[], gate: string, drafted?: Map<string, string>, reserved?: string[] }} board
  *   source is SPEC.md's text and spec its parse; doctrine is loadDoctrine's result; existingItems
- *   are the items on the board; gate is pullboard.json's gate now; drafted maps row text to row id.
+ *   are the items on the board; gate is pullboard.json's gate now; drafted maps row text to row id;
+ *   reserved are the ids the board's row drafts hold.
  * @returns {{ marked: boolean, resumed: boolean, section: { prefix: string, name: string, isNew: boolean }, rows: { key: string, id: string, status: string, text: string, source?: string, line: string }[], shared: { key: string, id: string }[], specRows: string, specAfter: string, ids: Record<string, string>, items: { key: string, title: string, specIds: string[], after: string[], lane?: string, route: string, criterion: string, brief: string }[], existing: Record<string, number>, gate: string | null }}
  *   specRows is the text to write before the items (rows and the under-way marker), specAfter the
  *   text once they are all added (the finished marker); existing maps starter keys already on the
  *   board to their item ids.
  */
-export function planBlueprint(blueprint, { source, spec, doctrine, existingItems = [], gate, drafted = new Map() }) {
+export function planBlueprint(blueprint, { source, spec, doctrine, existingItems = [], gate, drafted = new Map(), reserved = [] }) {
   const marker = blueprintMarker(blueprint);
   const lines = source.split(/\r?\n/u);
   const marked = lines.some((text) => text.trim() === marker);
@@ -490,8 +491,8 @@ export function planBlueprint(blueprint, { source, spec, doctrine, existingItems
   let specRows = source;
   if (resumed) ids = addingIds(addingLine, blueprint);
   else {
-    // The same rows spec draft numbers against: SPEC.md and the repo's own doctrine.
-    const numberedRows = [...spec.rows, ...(doctrine?.repo?.rows ?? [])];
+    // The same rows spec draft numbers against: SPEC.md, the repo's own doctrine and the board's row drafts (#878).
+    const numberedRows = [...spec.rows, ...(doctrine?.repo?.rows ?? []), ...reserved.map((id) => ({ id }))];
     const allocate = () => {
       const id = nextRowId(prefix, numberedRows);
       numberedRows.push({ id });

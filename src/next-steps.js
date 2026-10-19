@@ -495,6 +495,8 @@ export const NEXT_STEPS = Object.freeze({
   RUNNER_TOOLING_SECRET: 'restore a trusted Pullboard installation before transferring runner tooling',
   ROUTE: 'take an item your route covers: pullboard next',
   ROW_DECISION: 'pullboard spec approve <ids>, or pullboard spec decline <ids>',
+  ROW_DRAFT: 'pullboard spec draft "<text>" from an agent seat; the person approves the returned id',
+  ROW_ID_TAKEN: 'run the same command again for the next free id',
   SEAL_AUTH_FAILED: 'fetch the board again, or pair this device again: pullboard relay on --all',
   SEAL_BINDING: 'upgrade Pullboard on this device, then retry',
   SEAL_CRYPTO: 'use Node 22 or newer, or a browser on a secure (https) page',
