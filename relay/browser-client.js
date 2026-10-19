@@ -9,7 +9,7 @@ import { enqueueStream, followStream } from './browser-stream.js';
 import { homeLineDismissed, homeScreenLine, noticeLines, nothingShared, rememberOwnedRequestId, showRelayScreen, storedOwnedRequestState } from './browser-notice.js';
 import { registerApp, requestPairingPersistence } from './install.js';
 import { browserJSON, withBrowserDeadline } from './browser-deadline.js';
-import { phoneApprovalStatus } from './browser-approval-card.js';
+import { phoneApprovalStatus, placePhoneApprovals } from './browser-approval-card.js';
 
 const KEYS = 'pullboard.relay.keys.v1';
 const PENDING = 'pullboard.relay.pair.v1';
@@ -183,6 +183,7 @@ export async function createTransport({ onUpdate = () => {}, onOpenBoard = () =>
     const phoneWaiting = root.dataset.relayDevice === 'phone' && (!rendered || paired.size === 0);
     showRelayScreen(root, phoneWaiting || nothingShared({ paired, waitingBoards, failure }) ? 'share' : null,
       phoneWaiting && (failure || waitingBoards.size) ? lines.join(' ') : '');
+    placePhoneApprovals(document);
   }
 
   /** Ask once after pairing; a refusal leaves one dismissible line under the board, never above it. */

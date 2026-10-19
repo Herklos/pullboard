@@ -1,16 +1,114 @@
 /** Actual relay cockpit request capability and exported read-only guards [H12,H5]. */
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { existsSync, readFileSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { cockpitPage } from '../src/cockpit.js';
 import { ENGINE_VERSION } from '../src/machine.js';
 import { findChromeExecutable, startChrome } from './relay-browser-fixture.js';
 import { relayClientFixture } from './relay-client-fixture.js';
 import { createRelayBrowserHandler } from '../relay/browser-page.js';
+import { runFixtureGit } from './fixture-child.js';
 
 const chromeOptions = { skip: !findChromeExecutable() && 'Chrome is not installed' };
+
+/** Wait for a private native setup transition without repeating its command or weakening an assertion. */
+async function phoneSetupState(read, message) {
+  const deadline = Date.now() + 20_000; // budget: declared hang ceiling for a private enrollment/approval metadata transition.
+  while (Date.now() < deadline) {
+    const value = read();
+    if (value) return value;
+    await new Promise(resolveWait => setTimeout(resolveWait, 25));
+  }
+  assert.fail(message);
+}
+
+test('a phone with no readable board can tap its pending link and open that board [N26,H5,H17]', chromeOptions, async t => {
+  const box = await relayClientFixture(t);
+  const chrome = await startChrome();
+  t.after(() => chrome.close());
+  // Set the input device before navigation; resizing a page after its desktop startup cannot prove the phone path.
+  await chrome.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+  await chrome.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
+  await chrome.send('Page.addScriptToEvaluateOnNewDocument', { source: `const phoneFixtureFetch = window.fetch;
+window.fetch = (input, options) => {
+  const url = new URL(typeof input === 'string' ? input : input.url, location.href);
+  if (['http://127.0.0.1:4890', 'http://localhost:4890'].includes(url.origin)) return Promise.reject(new TypeError('No local view in this private phone fixture'));
+  return phoneFixtureFetch(input, options);
+};` });
+  assert.equal((await chrome.send('Network.setCookie', {
+    name: 'pb_session', value: (await box.phoneSession()).token, url: box.origin, httpOnly: true, sameSite: 'Lax',
+  })).success, true, 'only the synthetic fixture session is installed');
+  const setup = box.startCli(['relay', 'on', '--all', '--url', box.origin]);
+  const machineFile = join(box.env.PULLBOARD_HOME, 'relay-machine/state.json');
+  const pending = await phoneSetupState(() => existsSync(machineFile) && JSON.parse(readFileSync(machineFile, 'utf8')).pending,
+    'the native command publishes its one-time phone enrollment');
+  await chrome.navigate(box.origin + '/#device=' + pending.locator + '.' + pending.secret);
+  const paired = await setup.closed;
+  assert.equal(paired.code, 0, 'native setup authenticates this browser and delivers its original board key');
+  await chrome.waitFor("document.documentElement.dataset.relayDevice === 'phone' && document.querySelector('#phone-approvals') !== null");
+
+  const publisher = JSON.parse(readFileSync(box.linkFile, 'utf8')).board;
+  // Only the phone cannot read its publisher; keep native setup healthy and preserve each real authorization read.
+  await chrome.send('Page.addScriptToEvaluateOnNewDocument', { source: `const authorizedPhoneFetch = window.fetch;
+window.fetch = async (input, options) => {
+  const url = new URL(typeof input === 'string' ? input : input.url, location.href);
+  const response = await authorizedPhoneFetch(input, options);
+  if (url.pathname === ${JSON.stringify('/api/v1/boards/' + publisher + '/state')} && response.ok) {
+    return new Response(JSON.stringify({ version: 1, error: { code: 'NO_SNAPSHOT', message: 'This private phone snapshot is unavailable.' } }), {
+      status: 404, headers: { 'content-type': 'application/json' },
+    });
+  }
+  return response;
+};` });
+  box.providerState.repositories.push('phone-first-link');
+  const target = join(dirname(box.root), 'phone-first-link');
+  mkdirSync(target);
+  for (const args of [['init', '-q', '-b', 'main'], ['-c', 'commit.gpgsign=false', 'commit', '--allow-empty', '-q', '-m', 'fixture base'],
+    ['remote', 'add', 'origin', 'git@github.com:fixture/phone-first-link.git']]) {
+    runFixtureGit(args, { cwd: target, env: box.env, encoding: 'utf8' });
+  }
+  assert.equal((await box.cliAt(target, 'init')).code, 0, 'the actual new-project init publishes its sealed approval');
+  const marker = 'FIRST_READABLE_BOARD_AFTER_ONE_PHONE_TAP_901';
+  assert.equal((await box.cliAt(target, 'add', box.lane, marker)).code, 0);
+  const proposal = JSON.parse(readFileSync(machineFile, 'utf8')).approvals.find(entry => entry.root === target);
+  assert.equal(proposal?.published, true, 'the actual native proposal is waiting for this enrolled browser');
+  const selector = '#phone-approve-' + proposal.context.id;
+  const beforeForeground = box.calls.length;
+  const run = box.startCli(['relay', 'on', '--all', '--url', box.origin], {}, { json: false });
+  await phoneSetupState(() => box.calls.slice(beforeForeground).some(call => call.method === 'GET'
+    && call.path === '/api/v1/devices/approvals/' + proposal.context.id), 'the same foreground command is actually waiting for this approval');
+  await chrome.navigate('about:blank');
+  await chrome.navigate(box.origin);
+  await chrome.waitFor(`document.querySelector(${JSON.stringify(selector)}) !== null && Array.isArray(data?.projects)`);
+  const before = await chrome.evaluate(`(() => {
+    const button = document.querySelector(${JSON.stringify(selector)});
+    const rect = button.getBoundingClientRect();
+    return { phone: document.documentElement.dataset.relayDevice, screen: document.documentElement.dataset.relayScreen,
+      listed: data?.projects?.length ?? null, shown: rect.width > 0 && rect.height > 0, cards: document.querySelectorAll('.phone-approval').length };
+  })()`);
+  console.log(JSON.stringify({ firstPhoneApprovalControl: before }));
+  assert.equal(before.phone, 'phone');
+  assert.equal(before.listed, 0, 'no readable board can dismiss the first screen');
+  assert.equal(run.child.exitCode, null, 'the native foreground command is still waiting for the person');
+  assert.equal(before.shown, true, 'the pending native approval must be visible, not merely present under the hidden board shell');
+  await chrome.evaluate(`document.querySelector(${JSON.stringify(selector)}).scrollIntoView({ block: 'center' })`);
+  const point = await chrome.evaluate(`(() => {
+    const button = document.querySelector(${JSON.stringify(selector)}); const rect = button.getBoundingClientRect();
+    const x = rect.left + rect.width / 2, y = rect.top + rect.height / 2;
+    return { x, y, hit: button.contains(document.elementFromPoint(x, y)) };
+  })()`);
+  assert.equal(point.hit, true, 'the actual input target is the approval button');
+  const authorizations = box.calls.filter(call => call.path.endsWith('/authorize')).length;
+  await chrome.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: point.x, y: point.y }] }, 'touch the visible native approval');
+  await chrome.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] }, 'release the single approval tap');
+  const linked = await run.closed;
+  assert.equal(linked.code, 0, 'the same foreground command finishes after one real phone tap');
+  await chrome.waitFor(`document.body.innerText.includes(${JSON.stringify(marker)}) && data?.root === ${JSON.stringify(proposal.context.board)}`);
+  assert.equal(await chrome.evaluate('document.documentElement.dataset.relayScreen ?? null'), null, 'the readable board replaces the first screen');
+  assert.equal(box.calls.filter(call => call.path.endsWith('/authorize')).length - authorizations, 1, 'one tap authorizes exactly once');
+});
 
 test('a phone draws its saved board while the approvals read never answers [N26,H5,H17]', chromeOptions, async t => {
   const box = await relayClientFixture(t);

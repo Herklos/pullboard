@@ -2,14 +2,23 @@
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { tmpdir } from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
 import { takeResource } from '../src/resources.js';
 import { runFixtureChild } from './fixture-child.js';
 import { readRemoteGateHolders, waitForCondition } from './runner-fixture-state.js';
 
-/** Keep the original custody assertions identical in ordinary and forced database ordering cases. */
-export async function parentDeathDrainFixture(t, tools, { holdRelease = false } = {}) {
+/**
+ * Keep the original custody assertions identical in ordinary and forced ordering cases: `holdRelease` forces a real
+ * release write conflict, `chatty` makes the command keep writing output, so some always arrives after the
+ * transport drops (#888: a forwarded write then waited forever for a drain from a destroyed stdout), and `epermOnce`
+ * makes the worker's repeat signal to one process group answer EPERM, as macOS did when the command group finished
+ * exiting during the TERM grace loop (#888); the launcher lingers 300 ms after TERM so that repeat signal is sent.
+ * `lateGroup` starts the child in the launcher's group and moves it to its own a second later, so the worker's census
+ * always sees it first in the old group, as it did under load when a detached child had not yet called setsid (#888).
+ */
+export async function parentDeathDrainFixture(t, tools, { holdRelease = false, chatty = false, epermOnce = false, lateGroup = false } = {}) {
   const { cli, git, installSshStandIn, observe, startQueueController, waitForMarker, processIsAlive, shellQuote, HOST } = tools;
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'pullboard-runner-parent-death-')));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -28,7 +37,45 @@ export async function parentDeathDrainFixture(t, tools, { holdRelease = false } 
   const releaseChild = join(dir, 'release-detached-child');
   const childGone = join(dir, 'detached-child-gone');
   const workerLog = join(dir, 'worker-stderr.log');
+  const epermAnswered = join(dir, 'eperm-answered');
   let releaseLock;
+  /** The worker's own account of a stalled release: its runner status lines and any cleanup files in its private job (#888). */
+  function workerCleanupReport() {
+    const lines = existsSync(workerLog) ? readFileSync(workerLog, 'utf8').split('\n')
+      .filter(line => /^PULLBOARD_RUNNER_(?!HEARTBEAT)[A-Z_]+ /u.test(line)).slice(-20) : [];
+    const jobs = join(remoteHome, '.pullboard-runner', 'jobs');
+    const files = {};
+    for (const job of existsSync(jobs) ? readdirSync(jobs) : []) {
+      for (const name of ['cleanup-timeout.json', 'release-pending.json']) {
+        const file = join(jobs, job, name);
+        if (existsSync(file)) files[job + '/' + name] = readFileSync(file, 'utf8').slice(0, 2_000);
+      }
+    }
+    return { lines, files };
+  }
+  /**
+   * Report a stalled wait without replacing its error: the controller's result if it ended within `waitMs`, the ssh
+   * stand-in's calls and phases, process liveness, and the worker's cleanup lines and files.
+   */
+  async function reportStall(stage, waitMs) {
+    const deadline = Date.now() + waitMs;
+    let ended = null;
+    while (Date.now() < deadline) {
+      ended ??= await Promise.race([remoteRun.closed, new Promise(done => { setTimeout(() => done(null), 250).unref(); })]); // budget: poll interval inside the bounded wait.
+      if (ended && (stage === 'readiness' || Object.keys(workerCleanupReport().files).length > 0)) break;
+      if (ended) await new Promise(done => { setTimeout(done, 250); }); // budget: poll interval for the worker's cleanup files.
+    }
+    const tail = text => String(text ?? '').slice(-4_000);
+    t.diagnostic(`controller at ${stage} stall ` + JSON.stringify(ended
+      ? { status: ended.status, signal: ended.signal, stdout: tail(ended.stdout), stderr: tail(ended.stderr) } : 'still running'));
+    t.diagnostic('ssh stand-in calls ' + (existsSync(requests) ? tail(readFileSync(requests, 'utf8')) : 'none'));
+    t.diagnostic('ssh stand-in phases ' + (existsSync(requests + '.phases') ? readFileSync(requests + '.phases', 'utf8').trim().split('\n').join(',') : 'none'));
+    const childPid = existsSync(childPidFile) ? Number(readFileSync(childPidFile, 'utf8').trim()) : null;
+    t.diagnostic('liveness ' + JSON.stringify({ child: childPid && processIsAlive(childPid),
+      holders: existsSync(remoteDatabase) ? readRemoteGateHolders(remoteDatabase).map(({ pid, agent }) => ({ pid, agent, alive: processIsAlive(pid) })) : [] }));
+    t.diagnostic('worker cleanup report ' + JSON.stringify(workerCleanupReport()));
+    if (ended) remoteRun = null;
+  }
   /** Release only this fixture's explicit write reservation. */
   function unlockRelease() {
     if (!releaseLock) return;
@@ -51,11 +98,12 @@ export async function parentDeathDrainFixture(t, tools, { holdRelease = false } 
   writeFileSync(join(repo, 'pullboard.json'), JSON.stringify({ gate: 'true' }));
   writeFileSync(join(repo, 'tracked.txt'), 'parent-death runner fixture\n');
   writeFileSync(join(repo, 'remote-parent-death-launcher.js'), `const { spawn } = require('node:child_process');
-const child = spawn(process.execPath, [require.resolve('./remote-detached-child.js'), ...process.argv.slice(2)], {
-  detached: true, stdio: 'ignore', env: process.env,
-});
+const child = ${lateGroup
+    ? "spawn('perl', ['-e', 'select(undef, undef, undef, 1); setpgrp(0, 0); exec @ARGV', process.execPath, require.resolve('./remote-detached-child.js'), ...process.argv.slice(2)], {\n  stdio: 'ignore', env: process.env,\n});"
+    : "spawn(process.execPath, [require.resolve('./remote-detached-child.js'), ...process.argv.slice(2)], {\n  detached: true, stdio: 'ignore', env: process.env,\n});"}
 child.unref();
-setInterval(() => {}, 1_000);
+${chatty ? "setInterval(() => process.stdout.write('launcher output\\n'), 20);" : 'setInterval(() => {}, 1_000);'}
+${epermOnce ? "process.on('SIGTERM', () => setTimeout(() => process.exit(0), 300));" : ''}
 `);
   writeFileSync(join(repo, 'remote-detached-child.js'), `const { existsSync, writeFileSync } = require('node:fs');
 const [ready, pidFile, term, release, gone] = process.argv.slice(2);
@@ -77,7 +125,26 @@ setInterval(() => {}, 1_000);
 `);
   git(repo, env, 'add', 'pullboard.json', 'tracked.txt', 'remote-parent-death-launcher.js', 'remote-detached-child.js');
   git(repo, env, 'commit', '-q', '-m', 'test: prepare committed detached-child launchers');
-  installSshStandIn({ bin, worker, home: remoteHome, machineHome: remoteMachineHome, requests, stderrLog: workerLog });
+  let nodeOptions = '';
+  if (epermOnce) {
+    const preload = join(dir, 'eperm-once.mjs');
+    writeFileSync(preload, `import { writeFileSync } from 'node:fs';
+const kill = process.kill.bind(process);
+const groups = new Map();
+let answered = false;
+process.kill = (pid, signal) => {
+  if (pid < 0) groups.set(pid, (groups.get(pid) ?? 0) + 1);
+  if (!answered && pid < 0 && groups.get(pid) === 2) {
+    answered = true;
+    writeFileSync(${JSON.stringify(epermAnswered)}, 'eperm\\n');
+    throw Object.assign(new Error('kill EPERM'), { code: 'EPERM', errno: -1, syscall: 'kill' });
+  }
+  return kill(pid, signal);
+};
+`);
+    nodeOptions = '--import=' + pathToFileURL(preload).href;
+  }
+  installSshStandIn({ bin, worker, home: remoteHome, machineHome: remoteMachineHome, requests, stderrLog: workerLog, nodeOptions });
   const added = cli(repo, env, 'runner', 'add', HOST, '--slots', '1', '--browser', '1', '--json');
   assert.equal(added.status, 0, added.context);
 
@@ -95,7 +162,12 @@ setInterval(() => {}, 1_000);
     const command = ['node remote-parent-death-launcher.js', ...[childReady, childPidFile, childTerm, releaseChild, childGone].map(shellQuote)].join(' ');
     remoteRun = observe(startQueueController(repo, env, command,
       { item: 'parent-death-remote-holder', queueMarker: null, firstItem: null }));
-    await waitForMarker(childReady);
+    try { await waitForMarker(childReady); }
+    catch (error) {
+      // An early controller exit leaves the detached child unstarted; report why before cleanup erases it (#888 review).
+      await reportStall('readiness', 5_000); // budget: bounded wait for an already-failing controller to report its result.
+      throw error;
+    }
     detachedPid = Number(readFileSync(childPidFile, 'utf8').trim());
     assert.ok(Number.isSafeInteger(detachedPid) && detachedPid > 0);
     assert.notEqual(detachedPid, remoteRun.child.pid, 'the committed launcher owns a separate detached child');
@@ -106,7 +178,12 @@ setInterval(() => {}, 1_000);
     assert.match(remoteAgent, /^pullboard-ssh-/u);
 
     remoteRun.child.kill('SIGTERM');
-    await waitForMarker(childTerm);
+    try { await waitForMarker(childTerm); }
+    catch (error) {
+      // The worker never signalled the child: wait out its 30-second cleanup budget so its own cleanup-timeout.json says why.
+      await reportStall('child TERM', 15_000); // budget: the rest of the worker's declared 30-second cleanup budget.
+      throw error;
+    }
     assert.equal(processIsAlive(detachedPid), true, 'the detached child remains alive in its controlled TERM handler');
     const duringDrain = readRemoteGateHolders(remoteDatabase);
     assert.equal(duringDrain.length, 1);
@@ -153,7 +230,11 @@ setInterval(() => {}, 1_000);
         ({ pid, agent, browser, item, kind, alive: processIsAlive(pid) })) };
       return holders.length === 0;
     }, 'the remote physical gate holder is released after child exit',
-    { signal: t.signal, state: () => lastReleaseState, onTimeout: message => t.diagnostic(message) });
+    { signal: t.signal, state: () => lastReleaseState, onTimeout: message => {
+      t.diagnostic(message);
+      t.diagnostic('worker cleanup report ' + JSON.stringify(workerCleanupReport()));
+    } });
+    if (epermOnce) assert.equal(existsSync(epermAnswered), true, 'a repeat group signal really answered EPERM before the release');
     const controller = await remoteRun.closed;
     remoteRun = null;
     assert.equal(controller.signal, 'SIGTERM', 'the owned API controller alone received SIGTERM');
