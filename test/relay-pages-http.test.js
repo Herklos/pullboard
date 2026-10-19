@@ -6,6 +6,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
+import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 import { createRelayAuth } from '../relay/auth.js';
 import { createGitHubClient } from '../relay/github.js';
@@ -79,7 +80,7 @@ async function fixture(t, accountStorageBytes) {
     const directory = await readSealedDescriptor(state.root, context);
     return readSealedValue(directory.value.value, { ...context, parents: [state.root.id] });
   }
-  return { root, auth, signed, origin, key, call, stage, publish, read };
+  return { root, auth, signed, origin, key, call, stage, publish, read, handler };
 }
 
 test('API2 reads legacy heads and publishes opaque pages while old clients explicitly upgrade [H15,H17]', async t => {
@@ -149,4 +150,20 @@ test('all page reads reauthorize the board and a readable agent cannot replace a
   await box.auth.revoke(box.signed.token, agent.id);
   const after = await box.call('GET', '/api/v2/boards/' + BOARD + '/objects/' + state.document.state.root.id + '?pin=' + state.document.state.read.id, undefined, agent.token);
   assert.equal(after.status, 401, 'a previously issued read pin never bypasses revocation');
+});
+
+test('a consistent journal backup carries every opaque page and unlink removes the complete copy [H15,H18]', async t => {
+  const box = await fixture(t);
+  const staged = await box.stage({ marker: 'BACKUP_HAS_SEALED_HISTORY', text: 'b'.repeat(600_000) });
+  assert.equal((await box.publish(staged)).status, 200);
+  const backups = box.handler.backup();
+  const name = backups.written.find(value => value.startsWith(BOARD + '.'));
+  assert.ok(name, 'the ordinary retention backup includes this board');
+  const source = new DatabaseSync(join(box.root, 'boards-backups', name), { readOnly: true });
+  try {
+    assert.ok(source.prepare('SELECT COUNT(*) AS count FROM page_object').get().count > 1);
+    assert.equal(source.prepare('SELECT api_version FROM journal_snapshot WHERE slot=1').get().api_version, 2);
+  } finally { source.close(); }
+  assert.equal((await box.call('DELETE', '/api/v1/boards/' + BOARD)).status, 200);
+  assert.equal((await box.call('GET', '/api/v2/boards/' + BOARD + '/state')).status, 404);
 });

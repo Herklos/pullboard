@@ -7,20 +7,27 @@ import { Refused } from '../src/refused.js';
 export const ACCOUNT_STORAGE_BYTES = 256_000_000;
 
 /** Read only byte counts from a private relay database; never decode or return stored payloads. */
-function storedBytes(file, query) {
+function storedBytes(file) {
   let stat;
   try { stat = lstatSync(file); } catch (error) { if (error.code === 'ENOENT') return 0; throw error; }
   if (!stat.isFile() || stat.isSymbolicLink() || stat.mode & 0o077) throw new Refused('RELAY_STORAGE', 'Keep account storage in private regular relay databases.');
   const db = new DatabaseSync(file, { readOnly: true });
-  try { return db.prepare(query).get().bytes; } finally { db.close(); }
+  try {
+    const tables = new Set(db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(row => row.name));
+    let bytes = 0;
+    for (const name of ['journal_record', 'journal_snapshot']) {
+      if (tables.has(name)) bytes += db.prepare(`SELECT COALESCE(SUM(length(payload)),0) AS bytes FROM ${name}`).get().bytes;
+    }
+    if (tables.has('page_object')) bytes += db.prepare('SELECT COALESCE(SUM(length(payload)+length(children)),0) AS bytes FROM page_object').get().bytes;
+    return bytes;
+  } finally { db.close(); }
 }
 
 /** Count committed legacy bytes and every staged or committed opaque page for one linked board. */
 export function boardStorageBytes(directory, id) {
   if (!/^[0-9a-f]{32}$/u.test(id ?? '')) throw new Refused('BAD_BOARD', 'Use a persistent board identity for storage accounting.');
   const root = resolve(directory);
-  return storedBytes(join(root, id + '.journal.sqlite'), 'SELECT COALESCE((SELECT SUM(length(payload)) FROM journal_record),0)+COALESCE((SELECT SUM(length(payload)) FROM journal_snapshot),0) AS bytes')
-    + storedBytes(join(root, id + '.pages.sqlite'), 'SELECT COALESCE(SUM(length(payload)+length(children)),0) AS bytes FROM page_object');
+  return storedBytes(join(root, id + '.journal.sqlite'));
 }
 
 /** Format the provisional operator-set account budget without printing a credential or repository path. */

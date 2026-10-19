@@ -3,9 +3,10 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { createRelayPages } from '../relay/page-store.js';
+import { createRelayJournal } from '../relay/journal.js';
 import { Refused } from '../src/refused.js';
 import { generateBoardKey } from '../src/seal.js';
 import { PAGE_BYTES, readSealedValue, writeSealedValue } from '../src/sealed-pages.js';
@@ -26,6 +27,8 @@ async function fixture(t) {
     key, boardId, store: stores[0],
     /** Advance the product lease clock without an elapsed-time performance assertion. */
     advance(ms) { time += ms; },
+    /** Share the fixture clock with a journal borrowing this store's connection. */
+    now() { return time; },
     /** Reopen actual on-disk state after a simulated process restart. */
     reopen() { box.store.close(); box.store = createRelayPages(options); stores.push(box.store); },
     /** Upload actual encrypted objects without publishing a head prematurely. */
@@ -140,4 +143,23 @@ test('published objects and an existing reader pin survive closing the database 
   const pin = box.store.pin(agent, staged.reference);
   box.reopen();
   assert.equal((await box.read(staged.reference, pin)).marker, 'durable encrypted graph');
+});
+
+test('one database transaction rolls back a head and upload cleanup together [H15,H17,H18]', async t => {
+  const box = await fixture(t);
+  const staged = await box.stage({ marker: 'atomic publication fixture' }, 0);
+  const journal = createRelayJournal({ directory: dirname(box.store.file), boardId: box.boardId, now: () => new Date(box.now()) });
+  const pages = journal.pages({ now: box.now });
+  try {
+    // The upload was staged through another connection; the journal and object tables are in the same file.
+    assert.throws(() => pages.publish(staged.upload.id, machine, staged.reference, (reference, bytes) => {
+      journal.saveSnapshot(reference.sequence, bytes, machine, { apiVersion: 2, pageBytes: reference.bytes });
+      throw new Error('Synthetic failure after the head write.');
+    }), /Synthetic failure after the head write/u);
+    assert.equal(journal.snapshot(), null, 'no partial head escaped the failed transaction');
+    const result = pages.publish(staged.upload.id, machine, staged.reference, (reference, bytes) =>
+      journal.saveSnapshot(reference.sequence, bytes, machine, { apiVersion: 2, pageBytes: reference.bytes }));
+    assert.equal(result.apiVersion, 2);
+    assert.equal(journal.snapshot().sequence, 0);
+  } finally { pages.close(); journal.close(); }
 });

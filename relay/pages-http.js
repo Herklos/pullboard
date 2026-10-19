@@ -3,7 +3,6 @@ import { createHash } from 'node:crypto';
 import { apiJson, apiRefusal, apiStatus, readApiBody } from '../src/api-http.js';
 import { Refused } from '../src/refused.js';
 import { PAGE_BYTES, PAGE_CIPHER_BYTES, PAGE_FANOUT, pageReference } from '../src/sealed-pages.js';
-import { createRelayPages } from './page-store.js';
 
 const PAGE_BODY_BYTES = 600_000;
 
@@ -34,7 +33,7 @@ export function createRelayPagesHandler({ directory, now, authorize, withJournal
   /** Open objects only while the caller's shared board lifecycle lock and fresh authorization hold. */
   function withPages(id, who, work, create = false) {
     return withJournal(id, journal => {
-      const pages = createRelayPages({ directory, boardId: id, now });
+      const pages = journal.pages({ now });
       try { return work(journal, pages); } finally { pages.close(); }
     }, create, who.engineVersion);
   }

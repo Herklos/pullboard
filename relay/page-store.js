@@ -24,21 +24,22 @@ function principalKey(principal) {
 }
 
 /** Manage one board's objects; callers authorize and hold the shared auth lifecycle lock around every operation. */
-export function createRelayPages({ directory, boardId, now = Date.now }) {
+export function createRelayPages({ directory, boardId, now = Date.now, database, transaction }) {
   if (typeof directory !== 'string' || !/^[0-9a-f]{32}$/u.test(boardId ?? '') || typeof now !== 'function') throw new Refused('RELAY_CONFIG', 'Configure private page storage for a persistent board id.');
   const root = resolve(directory);
   mkdirSync(root, { recursive: true, mode: 0o700 });
   const parent = lstatSync(root);
   if (!parent.isDirectory() || parent.isSymbolicLink() || parent.mode & 0o077) throw new Refused('RELAY_STORAGE', 'Keep relay page storage in a private directory.');
-  const file = join(root, boardId + '.pages.sqlite');
+  const file = join(root, boardId + '.journal.sqlite');
   try { closeSync(openSync(file, 'wx', 0o600)); } catch (error) { if (error.code !== 'EEXIST') throw error; }
   const entry = lstatSync(file);
   if (!entry.isFile() || entry.isSymbolicLink() || entry.mode & 0o077) throw new Refused('RELAY_STORAGE', 'Keep relay page databases as private regular files.');
-  const db = new DatabaseSync(file);
+  const ownsDatabase = database === undefined;
+  const db = database ?? new DatabaseSync(file);
   let closed = false;
-  try {
-    db.exec(`PRAGMA busy_timeout=30000; PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; BEGIN IMMEDIATE;
-      CREATE TABLE IF NOT EXISTS page_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+  /** Initialize only opaque page tables; a borrowed journal connection owns the enclosing transaction. */
+  function initialize() {
+    db.exec(`CREATE TABLE IF NOT EXISTS page_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS page_object (id TEXT PRIMARY KEY, sequence INTEGER NOT NULL,
         payload BLOB NOT NULL, children TEXT NOT NULL, created INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS page_upload (id TEXT PRIMARY KEY, principal TEXT NOT NULL,
@@ -52,10 +53,21 @@ export function createRelayPages({ directory, boardId, now = Date.now }) {
     else if (saved.length !== 2 || saved[0].key !== 'board' || saved[0].value !== boardId || saved[1].key !== 'format' || saved[1].value !== '1') {
       throw new Refused('RELAY_STORAGE', 'Restore this page database with its original board identity and supported format.');
     }
-    db.exec('COMMIT');
+  }
+  try {
+    if (ownsDatabase) {
+      db.exec('PRAGMA busy_timeout=30000; PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA secure_delete=ON; BEGIN IMMEDIATE');
+      initialize(); db.exec('COMMIT');
+    } else {
+      if (typeof transaction !== 'function') throw new Refused('RELAY_CONFIG', 'Borrow a journal connection with its shared transaction boundary.');
+      transaction(initialize);
+    }
   } catch (error) {
-    try { db.exec('ROLLBACK'); } catch { /* Initialization may have failed before its transaction. */ }
-    db.close(); throw error;
+    if (ownsDatabase) {
+      try { db.exec('ROLLBACK'); } catch { /* Initialization may have failed before its transaction. */ }
+      db.close();
+    }
+    throw error;
   }
 
   /** Refuse invalid clocks and use after shutdown without leaking native database messages. */
@@ -68,7 +80,9 @@ export function createRelayPages({ directory, boardId, now = Date.now }) {
 
   /** Keep staging and collection changes transactional; publication itself is owned by the journal. */
   function atomic(work) {
-    clock(); db.exec('BEGIN IMMEDIATE');
+    clock();
+    if (transaction) return transaction(work);
+    db.exec('BEGIN IMMEDIATE');
     try {
       const result = work();
       if (result && typeof result.then === 'function') throw new Refused('RELAY_CONFIG', 'Finish synchronous page storage before awaiting.');
@@ -239,6 +253,6 @@ export function createRelayPages({ directory, boardId, now = Date.now }) {
   }
 
   /** Close exactly this store; repeated shutdown is harmless. */
-  function close() { if (!closed) { db.close(); closed = true; } }
+  function close() { if (!closed) { if (ownsDatabase) db.close(); closed = true; } }
   return { begin, resume, put, publish, pin, get, prune, usage, close, file };
 }
