@@ -51,6 +51,29 @@ export async function parentDeathDrainFixture(t, tools, { holdRelease = false, c
     }
     return { lines, files };
   }
+  /**
+   * Report a stalled wait without replacing its error: the controller's result if it ended within `waitMs`, the ssh
+   * stand-in's calls and phases, process liveness, and the worker's cleanup lines and files.
+   */
+  async function reportStall(stage, waitMs) {
+    const deadline = Date.now() + waitMs;
+    let ended = null;
+    while (Date.now() < deadline) {
+      ended ??= await Promise.race([remoteRun.closed, new Promise(done => { setTimeout(() => done(null), 250).unref(); })]); // budget: poll interval inside the bounded wait.
+      if (ended && (stage === 'readiness' || Object.keys(workerCleanupReport().files).length > 0)) break;
+      if (ended) await new Promise(done => { setTimeout(done, 250); }); // budget: poll interval for the worker's cleanup files.
+    }
+    const tail = text => String(text ?? '').slice(-4_000);
+    t.diagnostic(`controller at ${stage} stall ` + JSON.stringify(ended
+      ? { status: ended.status, signal: ended.signal, stdout: tail(ended.stdout), stderr: tail(ended.stderr) } : 'still running'));
+    t.diagnostic('ssh stand-in calls ' + (existsSync(requests) ? tail(readFileSync(requests, 'utf8')) : 'none'));
+    t.diagnostic('ssh stand-in phases ' + (existsSync(requests + '.phases') ? readFileSync(requests + '.phases', 'utf8').trim().split('\n').join(',') : 'none'));
+    const childPid = existsSync(childPidFile) ? Number(readFileSync(childPidFile, 'utf8').trim()) : null;
+    t.diagnostic('liveness ' + JSON.stringify({ child: childPid && processIsAlive(childPid),
+      holders: existsSync(remoteDatabase) ? readRemoteGateHolders(remoteDatabase).map(({ pid, agent }) => ({ pid, agent, alive: processIsAlive(pid) })) : [] }));
+    t.diagnostic('worker cleanup report ' + JSON.stringify(workerCleanupReport()));
+    if (ended) remoteRun = null;
+  }
   /** Release only this fixture's explicit write reservation. */
   function unlockRelease() {
     if (!releaseLock) return;
@@ -140,14 +163,7 @@ process.kill = (pid, signal) => {
     try { await waitForMarker(childReady); }
     catch (error) {
       // An early controller exit leaves the detached child unstarted; report why before cleanup erases it (#888 review).
-      const ended = await Promise.race([remoteRun.closed, new Promise(done => { setTimeout(() => done(null), 5_000).unref(); })]); // budget: bounded wait for an already-failing controller to report its result.
-      const tail = text => String(text ?? '').slice(-4_000);
-      t.diagnostic('controller at readiness failure ' + JSON.stringify(ended
-        ? { status: ended.status, signal: ended.signal, stdout: tail(ended.stdout), stderr: tail(ended.stderr) } : 'still running'));
-      t.diagnostic('ssh stand-in calls ' + (existsSync(requests) ? tail(readFileSync(requests, 'utf8')) : 'none'));
-      t.diagnostic('ssh stand-in phases ' + (existsSync(requests + '.phases') ? readFileSync(requests + '.phases', 'utf8').trim().split('\n').join(',') : 'none'));
-      t.diagnostic('worker cleanup report ' + JSON.stringify(workerCleanupReport()));
-      if (ended) remoteRun = null;
+      await reportStall('readiness', 5_000); // budget: bounded wait for an already-failing controller to report its result.
       throw error;
     }
     detachedPid = Number(readFileSync(childPidFile, 'utf8').trim());
@@ -160,7 +176,12 @@ process.kill = (pid, signal) => {
     assert.match(remoteAgent, /^pullboard-ssh-/u);
 
     remoteRun.child.kill('SIGTERM');
-    await waitForMarker(childTerm);
+    try { await waitForMarker(childTerm); }
+    catch (error) {
+      // The worker never signalled the child: wait out its 30-second cleanup budget so its own cleanup-timeout.json says why.
+      await reportStall('child TERM', 15_000); // budget: the rest of the worker's declared 30-second cleanup budget.
+      throw error;
+    }
     assert.equal(processIsAlive(detachedPid), true, 'the detached child remains alive in its controlled TERM handler');
     const duringDrain = readRemoteGateHolders(remoteDatabase);
     assert.equal(duringDrain.length, 1);
