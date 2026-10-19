@@ -35,9 +35,26 @@ export function deletedText(names) {
 
 /** Card spacing for the relay page; served after the shared view styles. */
 export const APPROVAL_CARD_STYLES = `
+#phone-approvals:empty { display: none; }
+.relay-panel #phone-approvals { margin-top: 20px; text-align: left; }
 .phone-approval { display: grid; gap: 10px; padding: 14px 16px; }
 .phone-approval p { margin: 0; overflow-wrap: anywhere; }
 .phone-approval-title { font-weight: 600; }
 .phone-approval-detail { color: var(--ink-muted); }
 .phone-approval button { justify-self: start; }
 `;
+
+/** Keep the same authenticated cards and live handlers on the phone's visible screen until a board can draw. */
+export function placePhoneApprovals(doc) {
+  const panel = doc.getElementById('phone-approvals');
+  if (!panel) return null;
+  const root = doc.documentElement;
+  const frame = root?.dataset.relayDevice === 'phone' && root.dataset.relayScreen === 'share'
+    ? doc.querySelector('#relay-screen .relay-panel[data-screen="share"]') : null;
+  const host = frame ?? doc.querySelector('main');
+  if (!host || panel.parentElement === host) return panel;
+  const mark = frame?.querySelector('.relay-mark');
+  if (mark) mark.after(panel);
+  else host.prepend(panel);
+  return panel;
+}
