@@ -14,11 +14,11 @@ const SIGN_IN_TRANSPORT = '/** Preserve device-only pairing before sign-in witho
 
 /**
  * Name the device before first paint: a phone or tablet (a coarse pointer and no hover) never runs Pullboard, so
- * signed out it shows the sign-in screen and nothing about this computer. A computer keeps the page's own states.
+ * it shows its signed-in or sign-in screen before any asynchronous probe. A computer keeps the page's own states.
  */
 function deviceScript(relaySession) {
   return "(() => { const root = document.documentElement; if (!matchMedia('(pointer: coarse)').matches || !matchMedia('(hover: none)').matches) return;"
-    + " root.dataset.relayDevice = 'phone';" + (relaySession ? '' : " root.dataset.relayScreen = 'sign-in';") + ' })();';
+    + " root.dataset.relayDevice = 'phone'; root.dataset.relayScreen = '" + (relaySession ? 'share' : 'sign-in') + "'; })();";
 }
 
 /** Serve a fixed asset with cache and browser isolation boundaries, never a filesystem-derived URL. */

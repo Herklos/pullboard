@@ -8,8 +8,71 @@ import { cockpitPage } from '../src/cockpit.js';
 import { ENGINE_VERSION } from '../src/machine.js';
 import { findChromeExecutable, startChrome } from './relay-browser-fixture.js';
 import { relayClientFixture } from './relay-client-fixture.js';
+import { createRelayBrowserHandler } from '../relay/browser-page.js';
 
 const chromeOptions = { skip: !findChromeExecutable() && 'Chrome is not installed' };
+
+test('a signed-in phone shows its first screen before a local probe can answer [N26,H5,H17]', chromeOptions, async t => {
+  const handle = createRelayBrowserHandler({ authenticate: async () => ({ kind: 'session' }) });
+  const server = createServer(async (req, res) => {
+    if (!await handle(req, res)) { res.writeHead(404); res.end(); }
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); });
+  const chrome = await startChrome();
+  t.after(() => chrome.close());
+  await chrome.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 2, mobile: true });
+  await chrome.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
+  await chrome.send('Page.addScriptToEvaluateOnNewDocument', {
+    source: 'window.fetch = () => new Promise(() => {});',
+  });
+  const origin = 'http://127.0.0.1:' + server.address().port;
+  await chrome.navigate(origin);
+  await chrome.waitFor("document.readyState === 'complete' && document.documentElement.dataset.relayDevice === 'phone'");
+  const first = await chrome.evaluate(`({
+    screen: document.documentElement.dataset.relayScreen ?? null,
+    visible: document.querySelector('#relay-screen h1')?.getClientRects().length > 0,
+    text: document.body.innerText,
+  })`);
+  assert.equal(first.screen, 'share', 'a signed-in phone gets its screen before any asynchronous probe or board read');
+  assert.equal(first.visible, true, 'the screen heading is painted, not merely present in hidden markup');
+  assert.match(first.text, /One step on your computer/u);
+});
+
+test('a phone keeps its screen and the reason while a saved board fails or waits [N26,H5,H17]', chromeOptions, async t => {
+  let code = 'BAD_SNAPSHOT';
+  const handle = createRelayBrowserHandler({ authenticate: async () => ({ kind: 'session' }) });
+  const server = createServer(async (req, res) => {
+    if (req.url.startsWith('/api/') || req.url.startsWith('/auth/')) {
+      const body = req.url.endsWith('/state') ? { version: 1, error: { code, message: 'Fixture snapshot is unavailable.' } }
+        : { version: 1, boards: [{ id: 'a'.repeat(32), repository: 'fixture/project' }], warnings: [] };
+      res.writeHead(req.url.endsWith('/state') ? 404 : 200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(body));
+    } else if (!await handle(req, res)) { res.writeHead(404); res.end(); }
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); });
+  const chrome = await startChrome();
+  t.after(() => chrome.close());
+  await chrome.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 2, mobile: true });
+  await chrome.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
+  await chrome.send('Page.addScriptToEvaluateOnNewDocument', {
+    source: `localStorage.setItem('pullboard.relay.keys.v1', JSON.stringify({ ['a'.repeat(32)]: btoa('x'.repeat(32)).replaceAll('=', '') }));
+const nativeFetch = window.fetch;
+window.fetch = (input, options) => String(input).startsWith('http://127.0.0.1:4890/')
+  ? Promise.reject(new TypeError('Fixture has no local view')) : nativeFetch(input, options);`,
+  });
+  const origin = 'http://127.0.0.1:' + server.address().port;
+  for (const [failure, expected] of [['BAD_SNAPSHOT', 'Could not open this board'], ['NO_SNAPSHOT', 'waiting for its first snapshot']]) {
+    code = failure;
+    await chrome.navigate('about:blank');
+    await chrome.navigate(origin);
+    await chrome.waitFor(`document.querySelector('#relay-notice')?.textContent.includes(${JSON.stringify(expected)})`);
+    const shown = await chrome.evaluate(`({ text: document.body.innerText, screen: document.documentElement.dataset.relayScreen ?? null })`);
+    assert.equal(shown.screen, 'share', 'an unreadable saved board cannot dismiss the phone screen');
+    assert.ok(shown.text.includes(expected), 'the person can read the actual reason, not just hidden banner markup');
+  }
+});
 
 test("the relay page opens without a session and may call only the local view's default port [N26,H5,A2]", async t => {
   const box = await relayClientFixture(t);

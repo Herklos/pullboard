@@ -169,13 +169,17 @@ export async function createTransport({ onUpdate = () => {}, onOpenBoard = () =>
       try { state = storedOwnedRequestState(localStorage, key, entry.state?.personRequests); } catch { /* Missing device storage can only hide this device's own notice. */ }
       ownedRequestIds.set(id, state.owned);
     }
-    for (const text of noticeLines({ available, paired, ownedRequestIds, waitingBoards, approvedBoards, warnings, failure })) {
+    const lines = noticeLines({ available, paired, ownedRequestIds, waitingBoards, approvedBoards, warnings, failure });
+    for (const text of lines) {
       const paragraph = document.createElement('p');
       paragraph.textContent = text;
       element.append(paragraph);
     }
-    // With nothing this device can open, the one-command screen shows; the page's poll fills the board in by itself.
-    showRelayScreen(document.documentElement, nothingShared({ paired, waitingBoards, failure }) ? 'share' : null);
+    // A phone has no local-view screen to fall back to: keep its shell and the real reason until a board is readable.
+    const root = document.documentElement;
+    const phoneWaiting = root.dataset.relayDevice === 'phone' && paired.size === 0;
+    showRelayScreen(root, phoneWaiting || nothingShared({ paired, waitingBoards, failure }) ? 'share' : null,
+      phoneWaiting && (failure || waitingBoards.size) ? lines.join(' ') : '');
   }
 
   /** Ask once after pairing; a refusal leaves one dismissible line under the board, never above it. */
