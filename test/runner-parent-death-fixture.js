@@ -137,7 +137,19 @@ process.kill = (pid, signal) => {
     const command = ['node remote-parent-death-launcher.js', ...[childReady, childPidFile, childTerm, releaseChild, childGone].map(shellQuote)].join(' ');
     remoteRun = observe(startQueueController(repo, env, command,
       { item: 'parent-death-remote-holder', queueMarker: null, firstItem: null }));
-    await waitForMarker(childReady);
+    try { await waitForMarker(childReady); }
+    catch (error) {
+      // An early controller exit leaves the detached child unstarted; report why before cleanup erases it (#888 review).
+      const ended = await Promise.race([remoteRun.closed, new Promise(done => { setTimeout(() => done(null), 5_000).unref(); })]); // budget: bounded wait for an already-failing controller to report its result.
+      const tail = text => String(text ?? '').slice(-4_000);
+      t.diagnostic('controller at readiness failure ' + JSON.stringify(ended
+        ? { status: ended.status, signal: ended.signal, stdout: tail(ended.stdout), stderr: tail(ended.stderr) } : 'still running'));
+      t.diagnostic('ssh stand-in calls ' + (existsSync(requests) ? tail(readFileSync(requests, 'utf8')) : 'none'));
+      t.diagnostic('ssh stand-in phases ' + (existsSync(requests + '.phases') ? readFileSync(requests + '.phases', 'utf8').trim().split('\n').join(',') : 'none'));
+      t.diagnostic('worker cleanup report ' + JSON.stringify(workerCleanupReport()));
+      if (ended) remoteRun = null;
+      throw error;
+    }
     detachedPid = Number(readFileSync(childPidFile, 'utf8').trim());
     assert.ok(Number.isSafeInteger(detachedPid) && detachedPid > 0);
     assert.notEqual(detachedPid, remoteRun.child.pid, 'the committed launcher owns a separate detached child');

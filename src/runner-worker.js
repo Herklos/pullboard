@@ -1094,7 +1094,8 @@ async function stopOwnedGroup(pid, closed, tracker) {
   if (!pid) return;
   const signal = async type => {
     for (;;) {
-      const sent = tracker?.signalOwnedGroup(pid, type) ?? false;
+      // Keep null (an ambiguous census, or EPERM) distinct from false, so it retries instead of passing as drained.
+      const sent = tracker ? tracker.signalOwnedGroup(pid, type) : false;
       if (sent === true || sent === false) return sent;
       await new Promise(resolvePause => setTimeout(resolvePause, 250));
     }
