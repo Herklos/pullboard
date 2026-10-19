@@ -23,6 +23,10 @@ import {
 } from './view/hosted.js';
 import { staleChip } from './view/stale.js';
 import {
+  pageStartup,
+  validLocalSession,
+} from './view/page-startup.js';
+import {
   roadmapHeaders,
   roadmapSummary,
 } from './view/roadmap-summary.js';
@@ -256,14 +260,8 @@ function tabValue(name, value) {
   } catch { return null; }
   return value;
 }
-/** Whether a value is a local session this page may use: version 1, a loopback origin with its port, and a secret. */
-function validLocalSession(value) {
-  if (!value || value.version !== 1 || typeof value.key !== 'string' || !/^[\\x21-\\x7e]{1,256}$/.test(value.key) || typeof value.origin !== 'string') return false;
-  try {
-    const address = new URL(value.origin);
-    return address.protocol === 'http:' && ['127.0.0.1', 'localhost'].includes(address.hostname) && address.port !== '' && address.origin === value.origin;
-  } catch { return false; }
-}
+const validLocalSession = (${validLocalSession.toString()});
+const pageStartup = (${pageStartup.toString()});
 // A relay pairing link carries its own fragment; that load stays the relay's, as before.
 const relayPairing = hosted.local && ['board', 'key', 'device'].some((name) => new URLSearchParams(location.hash.slice(1)).has(name));
 if (hosted.local && !relayPairing) {
@@ -434,6 +432,8 @@ let localReached = false;
  * computer, so a later screen, such as signing in, stays.
  */
 async function connectLocal(again = false) {
+  // A phone never runs Pullboard: it is unreachable at once, before a permission query or a fetch can wait (#900).
+  if (pageStartup(document.documentElement).phone) return 'unreachable';
   if (localChecking) return 'busy';
   localChecking = true;
   try { return await lookLocal(again); }
@@ -1750,6 +1750,7 @@ async function refresh(fresh = null) {
   if (!snapshot) follow();
   $('live').textContent = snapshot ? 'read-only snapshot' : liveLine();
   sharingReady ??= sharingInvitation();
+  transport?.didRender?.(); // The board drew: a transport holding a phone's shell may clear it; today's has no such call (#900).
 }
 
 // The local view follows the shown boards' events instead of a timer (#545): it reads the board once, waits on its
@@ -3949,11 +3950,11 @@ let transportLoading = null;
 async function loadTransport() {
   if (transport) return transport;
   if (!transportLoading) transportLoading = (async () => {
-    const module = await import(configuredTransportModule);
+    const module = await pageStartup(document.documentElement).within(() => import(configuredTransportModule), 15_000, 'The relay client did not load within 15 seconds.');
     if (typeof module.createTransport !== 'function') throw new Error('The browser transport must export createTransport({ onUpdate }).');
     const configured = await module.createTransport({
       onUpdate: () => transport ? refresh().catch((error) => { $('live').textContent = 'offline: ' + error.message; }) : Promise.resolve(),
-      onOpenBoard: openApprovedBoard,
+      onOpenBoard: openApprovedBoard, waitForRender: true, // A phone's transport keeps its shell until didRender (#899).
     });
     if (!configured || typeof configured.request !== 'function') throw new Error('The browser transport must provide request(path, body).');
     transportModule = configuredTransportModule;
@@ -3961,7 +3962,7 @@ async function loadTransport() {
     return transport;
   })();
   try { return await transportLoading; }
-  catch (error) { transportLoadError = error; throw error; }
+  catch (error) { transportLoadError = error; pageStartup(document.documentElement).say(error.message + ' Check your connection, then reload this page.'); throw error; }
   finally { transportLoading = null; }
 }
 
