@@ -872,6 +872,16 @@ export function inheritedGateSlot({ root = process.cwd(), browser = false, named
   };
 }
 
+/** Whether a live process holds this exact lease token, so a child it started may act under it (#906). */
+export function holdsLease({ name, scope = 'repo', root = process.cwd(), token }) {
+  if (typeof token !== 'string' || !token) return false;
+  const db = open(databaseFile(scope, root), scope === 'machine');
+  try {
+    const holder = update(db, () => db.prepare('SELECT pid FROM holder WHERE name = ? AND token = ?').get(name, token));
+    return Boolean(holder) && alive(holder.pid);
+  } finally { db.close(); }
+}
+
 /** Raise live capacity atomically; a decrease waits for an empty queue without evicting holders. */
 export function setResourceCapacity({ name, capacity, scope = 'machine', root = process.cwd(), persist = () => {} }) {
   if (typeof name !== 'string' || !name.trim() || name.trim() !== name) throw new Refused('BAD_RESOURCE_NAME', 'resource name must be nonempty trimmed text');
