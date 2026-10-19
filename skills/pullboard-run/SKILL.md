@@ -27,6 +27,7 @@ You are the coordinator: the agent in the repo's main checkout. You talk with th
 pullboard resume
 pullboard worktree web                 # prints the web builder's opening lines
 pullboard worktree review              # prints the verifier's opening lines
+pullboard gate set "npm test"          # a board with no gate: set the repo's test command
 git merge --no-edit <commit> && pullboard gate && pullboard merged 3 $(git rev-parse HEAD)
 pullboard status
 ```
