@@ -209,6 +209,7 @@ globalThis.fetch = function tracedFetch(input, init) {
   let refuseSnapshotWrites = false;
   let rejectSnapshotWrites = null;
   let rejectedStateReads = null;
+  let legacySnapshotApi = false;
   let beforeSnapshotWrite = null;
   let refuseRequestWrites = false;
   let refuseBoardLinks = false;
@@ -331,6 +332,11 @@ globalThis.fetch = function tracedFetch(input, init) {
       request: Buffer.concat(requestChunks), response: Buffer.concat(responseChunks) }));
     calls.push({ method: req.method, path: req.url, accept: req.headers.accept ?? '', engine: req.headers['x-pullboard-engine'],
       browser: String(req.headers.cookie ?? '').includes('pb_session=') });
+    if (legacySnapshotApi && req.method === 'GET' && req.url === '/api/v2') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ version: 1, apiVersion: 1, snapshot: 'legacy' }));
+      request.resume(); return;
+    }
     if (req.method === 'POST' && req.url === '/auth/device/confirmation/status' && nextConfirmationStatusHold) {
       const hold = nextConfirmationStatusHold;
       nextConfirmationStatusHold = null;
@@ -698,6 +704,8 @@ globalThis.fetch = function tracedFetch(input, init) {
     refuseSnapshotWrites(value) { refuseSnapshotWrites = value; },
     /** Return a chosen HTTP refusal for snapshot writes, without inspecting the sealed body. */
     rejectSnapshots(value) { rejectSnapshotWrites = value ? { ...value } : null; },
+    /** Model an older relay's capability response without changing the real API1 request and journal bounds. */
+    legacySnapshotApi(value = true) { legacySnapshotApi = value; },
     /** Order a competing real HTTP upload before the next native snapshot reaches the journal. */
     beforeNextSnapshot(value) { beforeSnapshotWrite = value; },
     /** Return a chosen real HTTP state refusal to exercise uncertain-baseline safety. */

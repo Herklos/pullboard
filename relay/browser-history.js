@@ -65,7 +65,10 @@ export function createPhoneHistory({ active, current, install, changed, failed }
   /** Supersede only a waiting job; the pinned current worker can finish without starving under live moves. */
   function queue(page, sequence) {
     if (closed) return;
-    if (complete?.id === page.id) { report({ page, sequence }, page.total, true); return; }
+    if (complete?.id === page.id) {
+      if (!progress.complete || progress.sequence !== sequence) report({ page, sequence }, page.total, true);
+      return;
+    }
     if (running?.page.id === page.id || pending?.page.id === page.id) return;
     pending = { page, sequence };
     progress = { loaded: 0, total: page.total, complete: false, sequence };

@@ -39,10 +39,11 @@ test('history finishes a pinned predecessor while newer moves keep their own cur
   const a = page('a', aGate), b = page('b', bGate);
   let current = { id: 'a', sequence: 7 }, alive = true;
   const installed = [], failures = [], done = deferred();
+  let changes = 0;
   let history;
   history = createPhoneHistory({ active: () => alive, current: () => current,
     install(value, details) { installed.push({ marker: value.state.marker, current: current.id, sequence: current.sequence, full: Boolean(details) }); },
-    changed() { if (history.status().complete && history.status().sequence === 8) done.resolve(); },
+    changed() { changes++; if (history.status().complete && history.status().sequence === 8) done.resolve(); },
     failed(error) { failures.push(error.message); },
   });
   t.after(() => { alive = false; history.close(); aGate.resolve(); bGate.resolve(); });
@@ -60,8 +61,10 @@ test('history finishes a pinned predecessor while newer moves keep their own cur
   assert.deepEqual(failures, []);
   assert.deepEqual(a.counts(), { runs: 1, pruned: 0 });
   assert.deepEqual(b.counts(), { runs: 1, pruned: 1 });
+  const before = changes;
   history.queue(b, 8); history.start();
   assert.equal(b.counts().runs, 1, 'a completed checkpoint is not streamed repeatedly by foreground reads');
+  assert.equal(changes, before, 'a foreground read of completed history cannot emit another refresh and create an RPC feedback loop');
 });
 
 test('access loss discards held details and late background results cannot install or advertise completion [H15,H17]', async () => {

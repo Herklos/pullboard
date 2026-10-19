@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import { test } from 'node:test';
 import { generateBoardKey } from '../src/seal.js';
-import { CURRENT_SNAPSHOT_BYTES, currentSnapshotPresentation, openPagedSnapshot, writePagedSnapshot } from '../src/relay-page-layout.js';
+import { CURRENT_SNAPSHOT_BYTES, currentSnapshotPresentation, openPagedSnapshot } from '../src/relay-page-layout.js';
+import { writePagedSnapshot } from '../src/relay-page-writer.js';
 import { readSealedDescriptor, writeSealedDescriptor } from '../src/sealed-pages.js';
 
 /** Keep synthetic cipher objects and prove every requested history path belongs to the selected root. */
@@ -52,6 +53,11 @@ test('current summaries read before history and a selected old shout follows onl
   const boot = await page.presentation();
   assert.deepEqual(boot.state.items.map(item => item.id), [90, 2, 61]);
   for (const item of boot.state.items) for (const field of ['criterion', 'brief', 'history', 'thread', 'verdicts']) assert.ok(!Object.hasOwn(item, field));
+  for (const item of boot.state.items) {
+    assert.equal(item.stage, 'open', 'summary rows carry the canonical lifecycle stage before their history arrives');
+    assert.deepEqual(item.counts, { verdicts: 0, facts: 0 });
+    assert.equal(item.claim, null);
+  }
   assert.ok(!Object.hasOwn(boot, 'shouts'), 'the complete shout history is not duplicated in phone boot');
   assert.ok(box.reads.length < 5 && total > 70, 'current state reads without downloading the historical page graph');
   box.reads.length = 0;

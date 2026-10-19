@@ -18,6 +18,9 @@ function summary(item) { return Object.fromEntries(Object.entries(item).filter((
 export function currentSnapshotPresentation(presentation) {
   const state = presentation?.state;
   if (!state || !Array.isArray(state.items)) throw invalid();
+  const full = { ...presentation, state: { ...state, items: state.items.map(summary) } };
+  delete full.shouts;
+  if (encoder.encode(JSON.stringify(full)).byteLength <= CURRENT_SNAPSHOT_BYTES) return full;
   for (let step = 0; step < 10; step++) {
     const count = Math.max(1, 128 >> step), text = Math.max(32, 4096 >> step);
     /** Keep schema names while limiting first-screen arrays, nesting and visible text, never the retained source. */
@@ -140,7 +143,7 @@ async function* readRows(reference, field, context, target = null, depth = 0, re
 }
 
 /** Seal native tables once, current summaries separately, and detail/search indexes for on-demand phone reads. */
-export async function writePagedSnapshot(document, context) {
+export async function encodePagedSnapshot(document, context, projectList) {
   const tables = document?.tables;
   const state = document?.presentation?.state;
   const meta = new Map((tables?.board_meta ?? []).map(row => [row.meta_key, row.meta_value]));
@@ -148,11 +151,12 @@ export async function writePagedSnapshot(document, context) {
   if (document?.version !== 1 || meta.get('board_id') !== context.boardId || !Number.isSafeInteger(engine) || engine < 1 ||
       String(context.sequence) !== meta.get('relay_applied_sequence') || !Array.isArray(state?.items) || !Array.isArray(tables.shout)) throw invalid();
   const names = Object.keys(tables);
-  if (!names.length || names.length > PAGE_FANOUT - 5 || names.some(name => !/^[a-z][a-z0-9_]*$/u.test(name))) throw invalid();
+  if (!names.length || names.length > PAGE_FANOUT - 6 || names.some(name => !/^[a-z][a-z0-9_]*$/u.test(name))) throw invalid();
   const full = { ...document.presentation, state: { ...state, items: state.items.map(summary) } };
   delete full.shouts;
-  const boot = currentSnapshotPresentation(full);
-  const references = [await writeSealedValue(boot, context), await writeSealedValue(full, context)];
+  const currentFull = { ...full, state: projectList(state, tables) };
+  const boot = currentSnapshotPresentation(currentFull);
+  const references = [await writeSealedValue(boot, context), await writeSealedValue(full, context), await writeSealedValue(currentFull, context)];
   for (const name of names) references.push(await writeRows(tables[name], name === 'shout' ? 'shout_id' : null, context));
   const items = [...state.items].sort((a, b) => a.id - b.id);
   references.push(await writeRows(items, 'id', context));
@@ -170,7 +174,7 @@ export async function openPagedSnapshot(rawReference, context, { maxEngine } = {
   const { value, links } = await readSealedDescriptor(reference, context);
   if (value?.format !== FORMAT || value.version !== 1 || value.boardId !== context.boardId || value.sequence !== context.sequence ||
       !Number.isSafeInteger(value.engine) || value.engine < 1 || !Number.isSafeInteger(maxEngine) || !Array.isArray(value.tables) ||
-      value.tables.length + 5 !== links.length || new Set(value.tables).size !== value.tables.length ||
+      value.tables.length + 6 !== links.length || new Set(value.tables).size !== value.tables.length ||
       value.tables.some(name => typeof name !== 'string' || !/^[a-z][a-z0-9_]*$/u.test(name))) throw invalid();
   if (value.engine > maxEngine) throw new Refused('ENGINE_VERSION', `This snapshot needs engine ${value.engine}; this device reads ${maxEngine}. Upgrade Pullboard before reading the board.`);
   const counts = value.counts;
@@ -179,8 +183,8 @@ export async function openPagedSnapshot(rawReference, context, { maxEngine } = {
   const historyTotal = counts.items + Object.values(counts.tables).reduce((sum, count) => sum + count, 0);
   if (!Number.isSafeInteger(historyTotal)) throw invalid();
   const childContext = { ...context, parents: [...(context.parents ?? []), reference.id] };
-  const tableReferences = new Map(value.tables.map((name, index) => [name, links[index + 2]]));
-  const [details, search, answers] = links.slice(value.tables.length + 2);
+  const tableReferences = new Map(value.tables.map((name, index) => [name, links[index + 3]]));
+  const [details, search, answers] = links.slice(value.tables.length + 3);
   if (!tableReferences.has('board_meta') || !tableReferences.has('shout')) throw invalid();
   let current;
   /** Cache only the current presentation, not arbitrary historical pages. */
@@ -236,7 +240,7 @@ export async function openPagedSnapshot(rawReference, context, { maxEngine } = {
   }
   /** Stream every retained table and full item detail newest first after current state has already rendered. */
   async function* history() {
-    yield { kind: 'presentation', value: await readSealedValue(links[1], childContext) };
+    yield { kind: 'presentation', value: await readSealedValue(links[2], childContext) };
     const tables = ['shout', 'event', ...value.tables.filter(name => !['shout', 'event'].includes(name))];
     for (const name of tables) {
       const ref = tableReferences.get(name);

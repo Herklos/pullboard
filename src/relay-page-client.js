@@ -1,7 +1,8 @@
 /** Native bounded snapshot upload/resume and complete restore; no private cache fingerprint crosses HTTP [H15,H17]. */
 import { Refused } from './refused.js';
 import { createRelayPageCache, snapshotSourceId } from './relay-page-cache.js';
-import { openPagedSnapshot, writePagedSnapshot } from './relay-page-layout.js';
+import { openPagedSnapshot } from './relay-page-layout.js';
+import { writePagedSnapshot } from './relay-page-writer.js';
 import { PAGE_CIPHER_BYTES, pageReference } from './sealed-pages.js';
 
 const PAGE_CAPABILITIES = new WeakMap();
