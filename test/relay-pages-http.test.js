@@ -135,6 +135,11 @@ test('an account quota refusal preserves the readable head and is named in phone
   const boards = await box.call('GET', '/api/v1/boards');
   assert.ok(boards.document.warnings.some(warning => warning.board === BOARD && warning.code === 'ACCOUNT_STORAGE_LIMIT'));
   assert.equal((await box.call('POST', '/api/v2/boards/' + BOARD + '/uploads', { sequence: 0, account: 'another-account' })).document.error.code, 'BAD_REQUEST');
+  assert.equal((await box.call('DELETE', '/api/v1/boards/' + BOARD)).status, 200);
+  await box.auth.linkBoard(box.signed.token, BOARD, 'fixture/repository');
+  const relinked = await box.call('GET', '/api/v1/boards');
+  assert.ok(!(relinked.document.warnings ?? []).some(warning => warning.board === BOARD && warning.code === 'ACCOUNT_STORAGE_LIMIT'),
+    'unlink clears the prior failed-upload notice before a fresh link has its first snapshot');
 });
 
 test('all page reads reauthorize the board and a readable agent cannot replace a snapshot [H15,H17]', async t => {

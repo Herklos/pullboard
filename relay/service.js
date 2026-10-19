@@ -123,7 +123,7 @@ export function createRelayHandler({ directory, auth, pollMs = 200, publicOrigin
   if (!Number.isSafeInteger(maintenanceMs) || maintenanceMs < 0 || maintenanceMs > 2_147_483_647 || (maintenanceMs > 0 && maintenanceMs < 10)) {
     throw new Refused('RELAY_CONFIG', 'use a maintenance interval of at least ten milliseconds, or zero for an external scheduler');
   }
-  const retention = createRelayRetention({ directory: root, backupsDirectory, auth, now });
+  const retention = createRelayRetention({ directory: root, backupsDirectory, auth, now, onDelete: id => quota?.clear(id) });
   let maintenanceError = null;
 
   /** Expose only a stable failure code to the trusted operator; never log paths, keys or provider errors. */

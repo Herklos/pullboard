@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import { test } from 'node:test';
 import { generateBoardKey } from '../src/seal.js';
-import { openPagedSnapshot, writePagedSnapshot } from '../src/relay-page-layout.js';
+import { CURRENT_SNAPSHOT_BYTES, currentSnapshotPresentation, openPagedSnapshot, writePagedSnapshot } from '../src/relay-page-layout.js';
 import { readSealedDescriptor, writeSealedDescriptor } from '../src/sealed-pages.js';
 
 /** Keep synthetic cipher objects and prove every requested history path belongs to the selected root. */
@@ -123,4 +123,48 @@ test('invalid history ranges and duplicate root tables cannot become a partial b
   await assert.rejects(openPagedSnapshot(bad, arbitrary, { maxEngine: 56 }), { code: 'RELAY_SNAPSHOT' });
   box.document.tables.shout[1].shout_id = 1;
   await assert.rejects(writePagedSnapshot(box.document, box.context), { code: 'RELAY_SNAPSHOT' });
+});
+
+test('bounded current state precedes thirty thousand events and complete background history arrives newest first [H15,H17]', async () => {
+  const box = await fixture();
+  box.document.tables.event = Array.from({ length: 30_000 }, (_, index) => ({ event_id: index + 1, event_detail: 'Preserved historical event ' + index }));
+  box.document.presentation.state.items = Array.from({ length: 2000 }, (_, index) => ({ id: index + 1, title: 'A long item title '.repeat(250),
+    lane: 'core', specs: ['H17'], criterion: 'A full governing requirement '.repeat(100), brief: 'Retained detail', verdicts: [], history: [], thread: [] }));
+  const original = JSON.stringify(box.document.presentation);
+  const root = await box.publish();
+  const page = await openPagedSnapshot(root, box.context, { maxEngine: 56 });
+  const boot = await page.presentation();
+  assert.ok(Buffer.byteLength(JSON.stringify(boot)) < CURRENT_SNAPSHOT_BYTES && CURRENT_SNAPSHOT_BYTES < 1_000_000);
+  assert.ok(boot.state.items.length < 2000);
+  assert.ok(box.reads.length < 8, 'the thirty-thousand-event history is not part of startup');
+  let events = 0, lastEvent = Infinity, shouts = 0, lastShout = Infinity, items = 0, full = null, complete = false;
+  for await (const chunk of page.history()) {
+    if (chunk.kind === 'presentation') full = chunk.value;
+    if (chunk.kind === 'table' && chunk.name === 'event') for (const row of chunk.rows) {
+      assert.ok(row.event_id < lastEvent); lastEvent = row.event_id; events++;
+    }
+    if (chunk.kind === 'table' && chunk.name === 'shout') for (const row of chunk.rows) {
+      assert.ok(row.shout_id < lastShout); lastShout = row.shout_id; shouts++;
+    }
+    if (chunk.kind === 'items') items += chunk.rows.length;
+    if (chunk.kind === 'complete') complete = true;
+  }
+  assert.equal(events, 30_000); assert.equal(lastEvent, 1);
+  assert.equal(shouts, 4200); assert.equal(lastShout, 1);
+  assert.equal(items, 2000); assert.equal(full.state.items.length, 2000); assert.equal(complete, true);
+  assert.equal(page.historyTotal, Object.values(box.document.tables).reduce((sum, rows) => sum + rows.length, 0) + 2000);
+  assert.equal(JSON.stringify(box.document.presentation), original, 'initial-screen bounds never truncate retained source data');
+  assert.equal((await page.shout(1)).shout_text, 'Historical work 0');
+});
+
+test('a huge current field is bounded only on first paint and remains complete in detail [H15,H17]', async () => {
+  const box = await fixture();
+  const text = 'Large current title '.repeat(100_000);
+  box.document.presentation.state.items[0].title = text;
+  const direct = currentSnapshotPresentation(box.document.presentation);
+  assert.ok(Buffer.byteLength(JSON.stringify(direct)) < 1_000_000);
+  const root = await box.publish();
+  const page = await openPagedSnapshot(root, box.context, { maxEngine: 56 });
+  assert.ok((await page.presentation()).state.items[0].title.length < text.length);
+  assert.equal((await page.item(90)).title, text);
 });

@@ -129,6 +129,7 @@ export async function writeSealedValue(value, context) {
 
 /** Authenticate, bound inflation and parse a single object before interpreting its references. */
 async function readPage(reference, context, parents = []) {
+  if (typeof context.bound === 'function') return context.bound(() => readPage(reference, { ...context, bound: undefined }, parents));
   const received = await context.get(reference.id, parents);
   if (!(received instanceof Uint8Array) || received.byteLength > PAGE_CIPHER_BYTES || await pageDigest(received) !== reference.id) throw invalid();
   const compressed = await unseal(context.key, received, { boardId: context.boardId, kind: 'snapshot', sequence: reference.sequence });

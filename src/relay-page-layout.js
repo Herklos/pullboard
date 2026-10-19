@@ -6,12 +6,35 @@ const FORMAT = 'pullboard-paged-snapshot/1';
 const BATCH_BYTES = 131_072;
 const encoder = new TextEncoder();
 const DETAIL = new Set(['criterion', 'brief', 'verdicts', 'history', 'thread']);
+export const CURRENT_SNAPSHOT_BYTES = 900_000;
 
 /** Reject an authenticated but incompatible layout before installing any of its data. */
 function invalid() { return new Refused('RELAY_SNAPSHOT', 'This paged board snapshot is invalid. Refresh it from a linked machine or upgrade Pullboard.'); }
 
 /** Preserve the current item fields while making the existing cockpit request its omitted detail. */
 function summary(item) { return Object.fromEntries(Object.entries(item).filter(([name]) => !DETAIL.has(name))); }
+
+/** Bound just the first screen; the untouched complete projection and full fields remain in background/detail pages. */
+export function currentSnapshotPresentation(presentation) {
+  const state = presentation?.state;
+  if (!state || !Array.isArray(state.items)) throw invalid();
+  for (let step = 0; step < 10; step++) {
+    const count = Math.max(1, 128 >> step), text = Math.max(32, 4096 >> step);
+    /** Keep schema names while limiting first-screen arrays, nesting and visible text, never the retained source. */
+    function limited(value, depth = 0) {
+      if (typeof value === 'string') return value.length > text ? value.slice(0, text) + '…' : value;
+      if (value === null || typeof value !== 'object') return value;
+      if (depth >= 10) return Array.isArray(value) ? [] : {};
+      if (Array.isArray(value)) return value.slice(0, count).map(child => limited(child, depth + 1));
+      return Object.fromEntries(Object.entries(value).filter(([name]) => name.length <= 256).slice(0, 128)
+        .map(([name, child]) => [name, limited(child, depth + 1)]));
+    }
+    const projected = { version: 1, config: limited(presentation.config ?? {}),
+      state: Object.fromEntries(Object.entries(state).map(([name, value]) => [name, limited(name === 'items' ? value.map(summary) : value)])) };
+    if (encoder.encode(JSON.stringify(projected)).byteLength <= CURRENT_SNAPSHOT_BYTES) return projected;
+  }
+  throw invalid();
+}
 
 /** Match the local view's criteria search without making full item histories part of a search read. */
 function searchText(item) { return ('#' + item.id + ' ' + item.title + ' ' + item.lane + ' ' + item.specs.join(' ') + ' ' + (item.criterion || '')).toLowerCase(); }
@@ -89,11 +112,11 @@ async function rowDirectory(reference, context, field) {
 }
 
 /** Read only selected numeric ranges; whole-table restore and point lookup use the same authenticated walk. */
-async function* readRows(reference, field, context, target = null, depth = 0) {
+async function* readRows(reference, field, context, target = null, depth = 0, reverse = false) {
   if (depth >= 32 || (context.parents ?? []).includes(reference.id)) throw invalid();
   const entries = await rowDirectory(reference, context, field);
   const childContext = { ...context, parents: [...(context.parents ?? []), reference.id] };
-  for (const entry of entries) {
+  for (const entry of reverse ? entries.toReversed() : entries) {
     if (target !== null && (target < entry.first || target > entry.last)) continue;
     let count = 0;
     if (entry.leaf) {
@@ -103,11 +126,14 @@ async function* readRows(reference, field, context, target = null, depth = 0) {
       for (const [ordinal, row] of rows.entries()) {
         const key = keyOf(row, field, entry.first + ordinal);
         if (key <= previous || key > entry.last || (ordinal === 0 && key !== entry.first) || (ordinal === rows.length - 1 && key !== entry.last)) throw invalid();
-        previous = key; count++;
-        if (target === null || target === key) yield row;
+        previous = key;
+      }
+      for (const [ordinal, row] of reverse ? [...rows.entries()].reverse() : rows.entries()) {
+        count++;
+        if (target === null || target === keyOf(row, field, entry.first + ordinal)) yield row;
       }
     } else {
-      for await (const row of readRows(entry.reference, field, childContext, target, depth + 1)) { count++; yield row; }
+      for await (const row of readRows(entry.reference, field, childContext, target, depth + 1, reverse)) { count++; yield row; }
     }
     if (target === null && count !== entry.count) throw invalid();
   }
@@ -122,10 +148,11 @@ export async function writePagedSnapshot(document, context) {
   if (document?.version !== 1 || meta.get('board_id') !== context.boardId || !Number.isSafeInteger(engine) || engine < 1 ||
       String(context.sequence) !== meta.get('relay_applied_sequence') || !Array.isArray(state?.items) || !Array.isArray(tables.shout)) throw invalid();
   const names = Object.keys(tables);
-  if (!names.length || names.length > PAGE_FANOUT - 4 || names.some(name => !/^[a-z][a-z0-9_]*$/u.test(name))) throw invalid();
-  const boot = { ...document.presentation, state: { ...state, items: state.items.map(summary) } };
-  delete boot.shouts;
-  const references = [await writeSealedValue(boot, context)];
+  if (!names.length || names.length > PAGE_FANOUT - 5 || names.some(name => !/^[a-z][a-z0-9_]*$/u.test(name))) throw invalid();
+  const full = { ...document.presentation, state: { ...state, items: state.items.map(summary) } };
+  delete full.shouts;
+  const boot = currentSnapshotPresentation(full);
+  const references = [await writeSealedValue(boot, context), await writeSealedValue(full, context)];
   for (const name of names) references.push(await writeRows(tables[name], name === 'shout' ? 'shout_id' : null, context));
   const items = [...state.items].sort((a, b) => a.id - b.id);
   references.push(await writeRows(items, 'id', context));
@@ -133,7 +160,8 @@ export async function writePagedSnapshot(document, context) {
   const answers = new Map();
   for (const row of tables.shout) if (row.shout_answers !== null && !answers.has(row.shout_answers)) answers.set(row.shout_answers, row.shout_id);
   references.push(await writeRows([...answers].sort(([a], [b]) => a - b).map(([id, answer]) => ({ id, answer })), 'id', context));
-  return writeSealedDescriptor({ format: FORMAT, version: 1, boardId: context.boardId, sequence: context.sequence, engine, tables: names }, references, context);
+  const counts = { tables: Object.fromEntries(names.map(name => [name, tables[name].length])), items: items.length };
+  return writeSealedDescriptor({ format: FORMAT, version: 1, boardId: context.boardId, sequence: context.sequence, engine, tables: names, counts }, references, context);
 }
 
 /** Open a snapshot directory without requesting its unrelated historical children. */
@@ -142,16 +170,24 @@ export async function openPagedSnapshot(rawReference, context, { maxEngine } = {
   const { value, links } = await readSealedDescriptor(reference, context);
   if (value?.format !== FORMAT || value.version !== 1 || value.boardId !== context.boardId || value.sequence !== context.sequence ||
       !Number.isSafeInteger(value.engine) || value.engine < 1 || !Number.isSafeInteger(maxEngine) || !Array.isArray(value.tables) ||
-      value.tables.length + 4 !== links.length || new Set(value.tables).size !== value.tables.length ||
+      value.tables.length + 5 !== links.length || new Set(value.tables).size !== value.tables.length ||
       value.tables.some(name => typeof name !== 'string' || !/^[a-z][a-z0-9_]*$/u.test(name))) throw invalid();
   if (value.engine > maxEngine) throw new Refused('ENGINE_VERSION', `This snapshot needs engine ${value.engine}; this device reads ${maxEngine}. Upgrade Pullboard before reading the board.`);
+  const counts = value.counts;
+  if (!counts?.tables || Object.keys(counts.tables).length !== value.tables.length || !Number.isSafeInteger(counts.items) || counts.items < 0 ||
+      value.tables.some(name => !Object.hasOwn(counts.tables, name) || !Number.isSafeInteger(counts.tables[name]) || counts.tables[name] < 0)) throw invalid();
+  const historyTotal = counts.items + Object.values(counts.tables).reduce((sum, count) => sum + count, 0);
+  if (!Number.isSafeInteger(historyTotal)) throw invalid();
   const childContext = { ...context, parents: [...(context.parents ?? []), reference.id] };
-  const tableReferences = new Map(value.tables.map((name, index) => [name, links[index + 1]]));
-  const [details, search, answers] = links.slice(value.tables.length + 1);
+  const tableReferences = new Map(value.tables.map((name, index) => [name, links[index + 2]]));
+  const [details, search, answers] = links.slice(value.tables.length + 2);
   if (!tableReferences.has('board_meta') || !tableReferences.has('shout')) throw invalid();
   let current;
   /** Cache only the current presentation, not arbitrary historical pages. */
-  async function presentation() { return current ??= await readSealedValue(links[0], childContext); }
+  async function presentation() {
+    if (links[0].bytes > CURRENT_SNAPSHOT_BYTES) throw invalid();
+    return current ??= await readSealedValue(links[0], childContext, { maxBytes: CURRENT_SNAPSHOT_BYTES });
+  }
   /** Resolve one keyed row without reading sibling history pages. */
   async function find(ref, field, id) {
     if (!Number.isSafeInteger(id) || id < 0) throw invalid();
@@ -164,10 +200,12 @@ export async function openPagedSnapshot(rawReference, context, { maxEngine } = {
     for (const [name, ref] of tableReferences) {
       tables[name] = [];
       for await (const row of readRows(ref, name === 'shout' ? 'shout_id' : null, childContext)) tables[name].push(row);
+      if (tables[name].length !== counts.tables[name]) throw invalid();
     }
-    const boot = await presentation();
+    const boot = await readSealedValue(links[1], childContext);
     const allItems = new Map();
     for await (const row of readRows(details, 'id', childContext)) allItems.set(row.id, row);
+    if (allItems.size !== counts.items) throw invalid();
     const items = boot.state.items.map(item => { const full = allItems.get(item.id); if (!full) throw invalid(); return full; });
     return { version: 1, tables, presentation: { ...boot, state: { ...boot.state, items }, shouts: tables.shout } };
   }
@@ -196,5 +234,31 @@ export async function openPagedSnapshot(rawReference, context, { maxEngine } = {
     if (!found) throw new Refused('NO_ITEM', `no item #${id}`);
     return found;
   }
-  return { version: 1, engine: value.engine, presentation, native, item, shout, searchItems };
+  /** Stream every retained table and full item detail newest first after current state has already rendered. */
+  async function* history() {
+    yield { kind: 'presentation', value: await readSealedValue(links[1], childContext) };
+    const tables = ['shout', 'event', ...value.tables.filter(name => !['shout', 'event'].includes(name))];
+    for (const name of tables) {
+      const ref = tableReferences.get(name);
+      if (!ref) continue;
+      let rows = [], size = 0, loaded = 0;
+      for await (const row of readRows(ref, name === 'shout' ? 'shout_id' : null, childContext, null, 0, true)) {
+        rows.push(row); loaded++;
+        size += encoder.encode(JSON.stringify(row)).byteLength;
+        if (rows.length === PAGE_FANOUT || size >= BATCH_BYTES) { yield { kind: 'table', name, rows }; rows = []; size = 0; }
+      }
+      if (rows.length) yield { kind: 'table', name, rows };
+      if (loaded !== counts.tables[name]) throw invalid();
+    }
+    let rows = [], size = 0, loaded = 0;
+    for await (const row of readRows(details, 'id', childContext, null, 0, true)) {
+      rows.push(row); loaded++;
+      size += encoder.encode(JSON.stringify(row)).byteLength;
+      if (rows.length === PAGE_FANOUT || size >= BATCH_BYTES) { yield { kind: 'items', rows }; rows = []; size = 0; }
+    }
+    if (rows.length) yield { kind: 'items', rows };
+    if (loaded !== counts.items) throw invalid();
+    yield { kind: 'complete', sequence: value.sequence };
+  }
+  return { version: 1, engine: value.engine, historyTotal, presentation, native, item, shout, searchItems, history };
 }
