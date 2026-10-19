@@ -6,6 +6,11 @@ import { join, resolve } from 'node:path';
 import { test } from 'node:test';
 import { runFixtureChild } from '../fixture-child.js';
 
+/** The import-style test's own time budget: a hang ceiling for compiling the view sources, never a speed claim. */
+const TEST_DEADLINE_MS = 120_000;
+/** The compile child follows that budget with room to report, so a busy machine slows it but never fails it (#881). */
+const COMPILE_LIMIT_MS = TEST_DEADLINE_MS - 10_000;
+
 const GAP = String.raw`(?:\s|/\*[\s\S]*?\*/|//[^\r\n\u2028\u2029]*(?:\r\n|[\r\n\u2028\u2029]|$))*`;
 const NAME = String.raw`[\p{ID_Start}_$][\p{ID_Continue}$\u200c\u200d]*`;
 const NAMED = new RegExp(String.raw`\bimport${GAP}(?:(?<initial>${NAME})${GAP},${GAP})?\{(?<bindings>[^{}]*)\}`, 'dgu');
@@ -34,7 +39,7 @@ function bindingStarts(text) {
 }
 
 /** V8 identifies actual static imports; embedded page text is parsed but never executed. */
-function importsSharingLines(sources) {
+function importsSharingLines(sources, { limitMs = COMPILE_LIMIT_MS } = {}) {
   const candidates = sources.map(({ source }) => [
     ...[...source.matchAll(NAMED)].map((match) => ({ at: match.index, starts: [
       ...(match.groups.initial ? [match.indices.groups.initial[0]] : []),
@@ -56,7 +61,8 @@ function compiles(source) { try { new vm.SourceTextModule(source); return true; 
 process.stdout.write(JSON.stringify(JSON.parse(readFileSync(process.argv[1], 'utf8')).map(compiles)));`;
     const child = runFixtureChild(process.execPath,
       ['--experimental-vm-modules', '--disable-warning=ExperimentalWarning', '--input-type=module', '-e', program, input],
-      { encoding: 'utf8', timeout: 10_000, killSignal: 'SIGKILL', maxBuffer: 2 ** 24 });
+      { encoding: 'utf8', timeout: limitMs, killSignal: 'SIGKILL', maxBuffer: 2 ** 24 }); // budget: the caller's hang ceiling; no throughput claim.
+    if (child.signal === 'SIGKILL' || child.error?.code === 'ETIMEDOUT') throw new Error(`the compile child was stopped after ${child.elapsedMs} ms at its ${limitMs} ms limit`);
     assert.equal(child.status, 0, child.failure ?? child.stderr);
     const compiles = JSON.parse(child.stdout);
     let next = sources.length;
@@ -75,7 +81,7 @@ process.stdout.write(JSON.stringify(JSON.parse(readFileSync(process.argv[1], 'ut
   } finally { rmSync(directory, { recursive: true, force: true }); }
 }
 
-test('the view files import one name per line [C7]', () => {
+test('the view files import one name per line [C7]', { timeout: TEST_DEADLINE_MS }, () => {
   const root = resolve(import.meta.dirname, '../..');
   const sources = ['src/cockpit.js', 'src/serve.js'].map((file) => ({ file, source: readFileSync(join(root, file), 'utf8') }));
   assert.deepEqual(importsSharingLines(sources), [], 'both View-owned files import one binding per line');
@@ -94,4 +100,10 @@ test('the view files import one name per line [C7]', () => {
     { file: 'namespace', line: 1, bindings: 2 },
     { file: 'line-comment', line: 2, bindings: 2 },
   ]);
+});
+
+test('a compile stopped at its limit names the elapsed time and the limit [C7]', { timeout: TEST_DEADLINE_MS }, () => {
+  const sources = [{ file: 'large', source: "import { first } from 'module';\n" + 'const value = 1;\n'.repeat(20_000) }];
+  assert.throws(() => importsSharingLines(sources, { limitMs: 1 }), /^Error: the compile child was stopped after \d+ ms at its 1 ms limit$/u,
+    'a kill says how long the compile ran and what its limit was');
 });
