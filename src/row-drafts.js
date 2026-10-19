@@ -4,7 +4,8 @@
  * relay like any recorded move. Every reader that asks whether a cited id is live counts a board draft
  * as a draft row, so the lane cites the returned id at once and its worktree stays clean. The
  * coordinator's spec apply writes the drafts into SPEC.md, and the person approves them there as before.
- * A draft counts as applied once SPEC.md has its id, so applying needs no second move.
+ * A draft counts as applied once SPEC.md has its id, so applying needs no second move. Every other
+ * writer reserves its new id here too, so no two proposals share an id.
  */
 import {
   atomic,
@@ -28,22 +29,34 @@ export function rowDrafts(board) {
 }
 
 /**
- * Record one drafted spec row on the board. The sender plans the id across SPEC.md, the doctrine file
- * and the board's drafts; the board refuses an id it already holds.
+ * Reserve one new row's id on the board, and for a lane, record the drafted row itself. Every writer
+ * reserves here, in one write transaction, before any file names the id: a lane's spec draft, the
+ * main checkout's spec draft and doctrine rulings, Rigor and blueprints. Writers that planned the same
+ * id at the same moment get distinct ids, because the board takes the planned id or the next number
+ * after it that no draft holds. A reservation marked written is the writer's own to put in its file;
+ * spec apply writes only the unwritten spec drafts, which come from lanes.
  *
  * @param {any} board
- * @param {{ agentId: string, row: { id: string, text: string, gate: string, tier: string, section: string } }} move
+ * @param {{ agentId: string, row: { id: string, text: string, gate?: string, tier?: string, section?: string, target?: string }, written?: boolean }} move
  */
-export function draftSpecRow(board, { agentId, row }) {
+export function draftSpecRow(board, { agentId, row, written = false }) {
   if (!agentId || agentId === PERSON) throw new Refused('ROW_DRAFT', 'an agent drafts a row and the person approves it; run pullboard spec draft "<text>" from an agent seat');
-  if (!row || !/^[A-Z][A-Z0-9]*\d+$/u.test(String(row.id)) || ['text', 'gate', 'tier', 'section'].some((key) => typeof row[key] !== 'string' || !row[key].trim() || /[\r\n|]/u.test(row[key]))) {
+  const needed = written ? ['text'] : ['text', 'gate', 'tier', 'section'];
+  if (!row || !/^[A-Z][A-Z0-9]*\d+$/u.test(String(row.id)) || !['spec', 'doctrine', undefined].includes(row.target)
+    || needed.some((key) => typeof row[key] !== 'string' || !row[key].trim() || /[\r\n|]/u.test(row[key]))) {
     throw new Refused('ROW_DRAFT', 'a drafted row needs its id and a one-line text, gate, tier and section; run pullboard spec draft "<text>"');
   }
   return atomic(board, () => {
     const current = rowDrafts(board);
-    if (current.some((draft) => draft.id === row.id)) throw new Refused('ROW_ID_TAKEN', `${row.id} is already drafted on this board; run pullboard spec draft again for the next free id`);
-    logEvent(board, agentId, 'row_draft', null, { row });
-    const entry = { id: row.id, text: row.text, gate: row.gate, tier: row.tier, section: row.section, by: agentId, event: board.lastEvent.event_id, at: board.lastEvent.event_at };
+    // The same proposal again, as a resumed blueprint add, keeps the id it reserved.
+    const same = current.find((draft) => draft.id === row.id && draft.text === row.text);
+    if (same) return same;
+    const [, prefix, number] = /^(.*?)(\d+)$/u.exec(row.id);
+    let next = Number(number);
+    while (current.some((draft) => draft.id === `${prefix}${next}`)) next += 1;
+    logEvent(board, agentId, 'row_draft', null, { row, written: Boolean(written) });
+    const entry = { id: `${prefix}${next}`, text: row.text, gate: row.gate ?? '', tier: row.tier ?? '', section: row.section ?? '', target: row.target ?? 'spec',
+      written: Boolean(written), by: agentId, event: board.lastEvent.event_id, at: board.lastEvent.event_at };
     board.db.prepare('INSERT INTO board_meta(meta_key,meta_value) VALUES (?,?) ON CONFLICT(meta_key) DO UPDATE SET meta_value=excluded.meta_value')
       .run('row_drafts', JSON.stringify([...current, entry]));
     return entry;
@@ -68,10 +81,15 @@ export function trunkRowIds(root, mainRoot, config) {
   return ids.map((row) => row.id);
 }
 
-/** Board drafts that SPEC.md does not have yet, for spec apply to write. */
+/** A lane's spec drafts: the reservations spec apply writes, unlike a writer's own reservation. */
+function laneDrafts(drafts) {
+  return drafts.filter((draft) => !draft.written && (draft.target ?? 'spec') === 'spec');
+}
+
+/** Board drafts from lanes that SPEC.md does not have yet, for spec apply to write. */
 export function pendingRowDrafts(spec, drafts) {
   const present = new Set(spec.rows.map((row) => row.id));
-  return drafts.filter((draft) => !present.has(draft.id));
+  return laneDrafts(drafts).filter((draft) => !present.has(draft.id));
 }
 
 /**
@@ -79,7 +97,7 @@ export function pendingRowDrafts(spec, drafts) {
  * another writer. spec apply names each one instead of treating it as written.
  */
 export function clashingRowDrafts(spec, drafts) {
-  return drafts.filter((draft) => spec.rows.some((row) => row.id === draft.id && row.status === 'draft' && row.text !== draft.text));
+  return laneDrafts(drafts).filter((draft) => spec.rows.some((row) => row.id === draft.id && row.status === 'draft' && row.text !== draft.text));
 }
 
 /** A parsed spec with the board's pending drafts added as draft rows, for readers deciding whether an id is live. */

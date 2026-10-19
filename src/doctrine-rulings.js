@@ -144,10 +144,11 @@ export function resumeDoctrineNotes(info, doctrine) {
  * @param {any} ctx the CLI context
  * @param {{ source?: string, section?: string, aim?: boolean, gate?: string }} values
  * @param {string} text the ruling
- * @param {string[]} [reserved] ids the board's row drafts hold, which a new ruling skips (#878)
+ * @param {{ id?: string, reserved?: string[], write?: boolean }} [options] id: the id the board reserved, to write
+ *   at (#878); reserved: ids the board's drafts hold, which a planned id skips; write false plans without writing.
  * @returns {{ id: string, row: { id: string, status: string, tier: string, text: string, gate: string, section: string } }}
  */
-export function proposeDoctrine(ctx, values, text, reserved = []) {
+export function proposeDoctrine(ctx, values, text, { id: fixed, reserved = [], write = true } = {}) {
   const doctrine = ctx.doctrine;
   if (!doctrine.repoExists) throw new Refused('NO_SPEC', `no ${doctrine.name}; run pullboard init before proposing doctrine`);
   if (doctrine.repo.problems.length) throw new Refused('SPEC_INVALID', `fix the unparsed row in ${doctrine.name} before proposing a ruling`);
@@ -158,11 +159,13 @@ export function proposeDoctrine(ctx, values, text, reserved = []) {
   if (!section && values.section) throw new Refused('SPEC_SECTION', `unknown section "${prefix}" in ${doctrine.name}; use a declared section or omit --section for rulings`);
   const used = [...loadSpec(ctx.info.root, ctx.config).rows, ...doctrine.rows, ...reserved.map((id) => ({ id }))];
   const numbers = used.map(row => new RegExp(`^${prefix}(\\d+)$`, 'u').exec(row.id)?.[1]).filter(Boolean).map(Number);
-  const id = `${prefix}${Math.max(0, ...numbers) + 1}`;
+  const id = fixed ?? `${prefix}${Math.max(0, ...numbers) + 1}`;
   const tier = values.aim ? 'aim' : 'must';
   const gate = values.gate?.trim() ?? 'review';
   const ruling = `${text.trim()} Source: ${values.source.trim()}`;
   const row = `- ${id} [draft, ${tier}] ${ruling} | gate: ${gate}`;
+  const planned = { id: 'doctrine:' + id, row: { id, status: 'draft', tier, text: ruling, gate, section: section?.name ?? 'DR · Rulings' } };
+  if (!write) return planned;
   const source = readFileSync(doctrine.repo.file, 'utf8');
   const newline = source.includes('\r\n') ? '\r\n' : '\n';
   const lines = source.split(/\r?\n/u);
@@ -177,5 +180,5 @@ export function proposeDoctrine(ctx, values, text, reserved = []) {
   }
   writeRowApply(ctx.info.root, { records: [], files: [{ file: doctrine.name, before: source, after: lines.join(newline) }],
     signoffs: { before: null, receipts: [] } });
-  return { id: 'doctrine:' + id, row: { id, status: 'draft', tier, text: ruling, gate, section: section?.name ?? 'DR · Rulings' } };
+  return planned;
 }
