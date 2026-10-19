@@ -15,8 +15,10 @@ import { readRemoteGateHolders, waitForCondition } from './runner-fixture-state.
  * transport drops (#888: a forwarded write then waited forever for a drain from a destroyed stdout), and `epermOnce`
  * makes the worker's repeat signal to one process group answer EPERM, as macOS did when the command group finished
  * exiting during the TERM grace loop (#888); the launcher lingers 300 ms after TERM so that repeat signal is sent.
+ * `lateGroup` starts the child in the launcher's group and moves it to its own a second later, so the worker's census
+ * always sees it first in the old group, as it did under load when a detached child had not yet called setsid (#888).
  */
-export async function parentDeathDrainFixture(t, tools, { holdRelease = false, chatty = false, epermOnce = false } = {}) {
+export async function parentDeathDrainFixture(t, tools, { holdRelease = false, chatty = false, epermOnce = false, lateGroup = false } = {}) {
   const { cli, git, installSshStandIn, observe, startQueueController, waitForMarker, processIsAlive, shellQuote, HOST } = tools;
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'pullboard-runner-parent-death-')));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -96,9 +98,9 @@ export async function parentDeathDrainFixture(t, tools, { holdRelease = false, c
   writeFileSync(join(repo, 'pullboard.json'), JSON.stringify({ gate: 'true' }));
   writeFileSync(join(repo, 'tracked.txt'), 'parent-death runner fixture\n');
   writeFileSync(join(repo, 'remote-parent-death-launcher.js'), `const { spawn } = require('node:child_process');
-const child = spawn(process.execPath, [require.resolve('./remote-detached-child.js'), ...process.argv.slice(2)], {
-  detached: true, stdio: 'ignore', env: process.env,
-});
+const child = ${lateGroup
+    ? "spawn('perl', ['-e', 'select(undef, undef, undef, 1); setpgrp(0, 0); exec @ARGV', process.execPath, require.resolve('./remote-detached-child.js'), ...process.argv.slice(2)], {\n  stdio: 'ignore', env: process.env,\n});"
+    : "spawn(process.execPath, [require.resolve('./remote-detached-child.js'), ...process.argv.slice(2)], {\n  detached: true, stdio: 'ignore', env: process.env,\n});"}
 child.unref();
 ${chatty ? "setInterval(() => process.stdout.write('launcher output\\n'), 20);" : 'setInterval(() => {}, 1_000);'}
 ${epermOnce ? "process.on('SIGTERM', () => setTimeout(() => process.exit(0), 300));" : ''}

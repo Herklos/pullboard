@@ -597,7 +597,14 @@ function createDescendantTracker(directory) {
       for (const pid of ownedPids) {
         const row = current.get(pid);
         const prior = known.get(pid);
-        if (row && prior?.birth === row.birth) Object.assign(prior, row);
+        if (!row || prior?.birth !== row.birth) continue;
+        Object.assign(prior, row);
+        // A detached child is forked into its parent's group and calls setsid a moment later. A census in that window
+        // records the parent's group; once this proven identity leads its own group, track that group instead (#888).
+        if (!prior.root && row.pgid === row.pid && prior.group !== row.pid) {
+          prior.group = row.pid;
+          detachedGroups.set(row.pid, row.birth);
+        }
       }
       return current;
     } catch {

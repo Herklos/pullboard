@@ -1680,6 +1680,9 @@ test('a queued run executes on a registered runner and its result comes back [C7
 test('a queued run executes on a registered runner and its result comes back [C7] (parent death drains its worker when a group signal answers EPERM)',
   { timeout: 90_000 }, t => parentDeathDrainFixture(t, parentDeathTools, { epermOnce: true })); // budget: same fixture ceiling as the ordinary parent-death case.
 
+test('a queued run executes on a registered runner and its result comes back [C7] (parent death drains a child that leaves its group after the first census)',
+  { timeout: 90_000 }, t => parentDeathDrainFixture(t, parentDeathTools, { lateGroup: true })); // budget: same fixture ceiling as the ordinary parent-death case.
+
 test('a queued run executes on a registered runner and its result comes back [C7] (unverified cleanup times out as a named red result)', { timeout: 90_000 }, async (t) => { // budget: bounded 30-second remote cleanup timeout plus startup, transport and fixture cleanup ceiling.
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'pullboard-runner-cleanup-timeout-')));
   const home = join(dir, 'home');
