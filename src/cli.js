@@ -307,6 +307,7 @@ import {
   registeredProjectRootsSnapshot,
 } from './projects.js';
 import * as roadmapView from './roadmap.js';
+import * as queueView from './queue.js';
 import {
   rigorLines,
   rigorReport,
@@ -2427,6 +2428,7 @@ function readCommands(io, { first, second, rest, values }) {
       else filtered.forEach((item) => io.say(itemLine(item, (id) => agentDisplayName(agents, ctx.config, id), merging.has(item.item_id))));
       return 0;
     },
+    queue: () => queueView.queueCommand(io, [first, second, ...rest], (work) => withBoard(context(io), work)),
     roadmap: () => {
       if (first || second || rest.length) throw new Refused('USAGE', 'pullboard roadmap takes no arguments');
       const ctx = context(io);

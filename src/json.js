@@ -29,6 +29,7 @@ export const JSON_SHAPES = {
     runner: shape({ runner: 'object' }),
     relay: shape({ linked: 'boolean', board: 'string', url: 'string', link: 'string', sequence: 'number', behind: 'number', recovery: 'object' }),
     list: shape({ items: 'array' }),
+    queue: shape({ releases: 'array', unreleased: 'array', first: 'object' }),
     roadmap: shape({ milestones: 'array' }),
     'milestone add': shape({ milestone: 'object' }),
     'milestone items': shape({ milestone: 'object' }),
