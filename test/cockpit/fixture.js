@@ -858,6 +858,7 @@ async function openSnapshotChrome(executable, url, profile, { signal, onOwned } 
     }
     const chrome = await stableChrome({ child, stopped, socket, send, requests, exceptions });
     chrome.launchAttempts = launched.launchAttempts;
+    chrome.stderr = launched.stderr;
     chrome.startedAt = launched.startedAt;
     chrome.close = closeOwned;
     await chrome.send('Page.navigate', { url });
