@@ -2231,7 +2231,7 @@ function postRigorNotices(board, trigger) {
  * @param {any} board
  * @returns {(entry: any) => number}
  */
-function milestonePriorities(board) {
+export function milestonePriorities(board) {
   if ((board.executionEngineVersion ?? ENGINE_VERSION) < 8) return () => 0;
   const ordered = milestones(board);
   const items = new Map(listItems(board, { all: true }).map((entry) => [entry.item_id, entry]));

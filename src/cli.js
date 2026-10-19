@@ -306,6 +306,7 @@ import {
   registeredProjectRootsSnapshot,
 } from './projects.js';
 import * as roadmapView from './roadmap.js';
+import * as queueView from './queue.js';
 import {
   rigorLines,
   rigorReport,
@@ -2417,6 +2418,13 @@ function readCommands(io, { first, second, rest, values }) {
       if (values.json) io.result({ items: filtered });
       else if (!filtered.length) io.say(values.all ? 'no items yet' : 'nothing open; --all shows closed items');
       else filtered.forEach((item) => io.say(itemLine(item, (id) => agentDisplayName(agents, ctx.config, id), merging.has(item.item_id))));
+      return 0;
+    },
+    queue: () => {
+      if (first || second || rest.length) throw new Refused('USAGE', 'pullboard queue takes no arguments');
+      const queue = withBoard(context(io), (board) => queueView.workQueue(board));
+      io.result?.(queue);
+      queueView.sayQueue(io, queue);
       return 0;
     },
     roadmap: () => {
