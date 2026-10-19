@@ -98,8 +98,13 @@ async function releaseDrainedLease(lease) {
       if (!reported) {
         // Parent death can close the transport before stderr arrives; retain this real failed attempt in the private job.
         if (cleanupDirectory) {
-          try { writeFileSync(join(cleanupDirectory, 'release-pending.json'),
-            JSON.stringify({ id: workerId, stage: 'lease release', pending: true, observedAt: new Date().toISOString() }) + '\n', { mode: 0o600 }); }
+          try {
+            const pending = join(cleanupDirectory, 'release-pending.json');
+            const temporary = pending + '.tmp';
+            writeFileSync(temporary,
+              JSON.stringify({ id: workerId, stage: 'lease release', pending: true, observedAt: new Date().toISOString() }) + '\n', { mode: 0o600 });
+            renameSync(temporary, pending);
+          }
           catch { /* The live retry and named cleanup timeout remain authoritative if diagnostic storage fails. */ }
         }
         process.stderr.write(`PULLBOARD_RUNNER_RELEASE_PENDING ${workerId}\n`);
