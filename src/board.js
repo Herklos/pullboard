@@ -102,6 +102,7 @@ import { submissionProof } from './submit-invariants.js';
 import { SUBMISSION_PROOF_ENGINE } from './submit-invariants.js';
 export { landingFlakes, landingWaiverCovers, landingWaiverKind };
 export { acceptCheck } from './check-accept.js';
+export { proposeSentinel, decideSentinel, beginSentinelRun, finishSentinelRun } from './sentinels.js';
 
 /** The seat readers live in seats.js; the board re-exports them so `store.*` callers keep one import. */
 export { agentAt, agentCreator, listAgents, nextSeatId, seatEnrolled, seatLineage, withVerifierStanding } from './seats.js';

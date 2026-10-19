@@ -158,7 +158,7 @@ Each move checks its guards in this order and refuses with the first one that do
 | NOTE_REQUIRED | a review release gives a nonempty one-line reason, engine 5 or newer, only when freeing a submitted review reservation | release with --note "why", or --note-file <file> |
 | REVIEW_COOLDOWN | the reviewer has not released this submission within the past hour, engine 5 or newer, only for the same reviewer and current submission | let another reviewer take it, or wait an hour or for a new submission |
 | NOTE_REQUIRED | the move carries a note: what failed, what was tried, or why | --note "..." or --note-file <file> |
-| BAD_CAUSE | a cause, when given, is test:<file>::<title>, refusal:<CODE>, row:<id> or doctrine:<id> | fix --cause, or leave it out |
+| BAD_CAUSE | a cause, when given, is test:<file>::<title>, refusal:<CODE>, row:<id>, doctrine:<id> or sentinel:<name> | fix --cause, or leave it out |
 | ALREADY_MERGED | the item has no recorded merge receipt | a merged item cannot be reopened |
 | SUBMISSION_PROOF | recorded test selection names literal project files and its full-fallback policy, engine 38 or later; absent legacy selection remains unknown | rerun submit with the current CLI |
 | LANDING_FAILURE_REQUIRED | a verified item note names the failing test and landing merge commit, unless the reopen names a trunk conflict | cite the recorded batch, or name the test and merge commit in a manual note; work that only conflicts with the trunk reopens with --conflict <file> for each conflicting file |

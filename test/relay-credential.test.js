@@ -24,6 +24,15 @@ test('every current operation selects its native actor credential without a seco
     if (['claim', 'refreeze'].includes(operation)) args = [box.before.tables.item[0].item_id, options];
     if (operation === 'reserveNextReview') args = [options];
     if (operation === 'recordHealthFindings') args = [{ agentId: actor, observedRevision: 0, findings: [] }];
+    if (operation === 'proposeSentinel') args = [{ agentId: actor,
+      row: { name: 'credential-watch', check: 'true', every: 'hourly', owner: actor } }];
+    if (['beginSentinelRun', 'finishSentinelRun'].includes(operation)) {
+      args = [{ agentId: actor, name: 'credential-watch', digest: 'f'.repeat(64), run: 'credential-run' }];
+    }
+    if (operation === 'decideSentinel') {
+      args = [{ agentId: 'person', channel: 'terminal', name: 'credential-watch', digest: 'f'.repeat(64), decision: 'approve' }];
+      kind = 'person';
+    }
     // This missing-item fixture still supplies modern proof metadata before testing submit's transport credential.
     if (operation === 'submit') args = [999999, { ...options, submissionProof: { version: 1, files: [], full: false, deferred: false, reason: '' } }];
     if (operation === 'completeCheckBaseline') args = [999999, { ...options,

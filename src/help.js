@@ -88,6 +88,11 @@ Work
   pullboard milestone remove <name>                            remove a milestone without changing its items
   pullboard doctor                     check board integrity without changing it
   pullboard health                     every stuck item: why, since when, the next step and who takes it
+  pullboard sentinel propose <name> --check "<command>" --every 10m|hourly|daily --owner <seat or lane> [--directory <path>] [--timeout <milliseconds>] [--next "<step>"]
+                                        propose an exact board watch; only the person may approve it
+  pullboard sentinel approve <name>     person: approve this command, directory and schedule
+  pullboard sentinel decline <name> --reason "<why>"   person: prevent future runs
+  pullboard sentinels                   approvals, owners and the last result; does not run checks
                                         reads the board and changes nothing; exits 1 when something is stuck
                                         pullboard.json health.stuck (default 1h), health.holds (1d), health.release (1d)
   pullboard skills --update            refresh unchanged Claude Code skills from shipped versions

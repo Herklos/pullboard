@@ -9,6 +9,7 @@ export function relayMoveActor(move) {
   if (move.operation === 'register' && move.engine >= VERIFIER_STANDING_ENGINE) return args[0]?.createdBy === 'machine' ? null : args[0]?.createdBy ?? null;
   if (move.operation === 'addItem') return args[0]?.by ?? null;
   if (move.operation === 'shout') return args[0]?.from ?? null;
+  if (['proposeSentinel', 'decideSentinel', 'beginSentinelRun', 'finishSentinelRun'].includes(move.operation)) return args[0]?.agentId ?? null;
   if (move.operation === 'recordHealthFindings') return args[0]?.agentId ?? null;
   if (['holdLane', 'releaseLane'].includes(move.operation) && args[1]?.asPerson) return 'person';
   if (move.operation === 'release') return args[1] ?? null;
@@ -62,7 +63,7 @@ export function relaySenderProblem(move, sender, kind, { phoneReceipt = false } 
         move.operation === 'ensureCoordinator' && typeof move.args?.[0] === 'string')) return null;
     return new Refused('RELAY_PERSON_ONLY', 'a machine cannot act as the person; approve this action on the paired phone');
   }
-  if (kind === 'snapshot' || move?.operation === 'recordRowDecisions' || move?.operation === 'answerDecision' && move.args?.[1]?.asPerson ||
+  if (kind === 'snapshot' || move?.operation === 'recordRowDecisions' || move?.operation === 'decideSentinel' || move?.operation === 'answerDecision' && move.args?.[1]?.asPerson ||
     move?.operation === 'shout' && move.args?.[0]?.request || relayMoveActor(move) === 'person') {
     return new Refused('RELAY_PERSON_ONLY', `agent ${sender.agent} cannot make a person-only relay ${kind}; use the person's authenticated session`);
   }

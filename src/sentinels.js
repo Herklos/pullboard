@@ -1,0 +1,177 @@
+/** Person-approved board watches and their append-only run history [A6,D1,D3]. */
+import { createHash } from 'node:crypto';
+import { atomic } from './board.js';
+import { listAgents } from './board.js';
+import { logEvent } from './board.js';
+import { PERSON } from './board.js';
+import { shout } from './board.js';
+import { ENGINE_VERSION } from './machine.js';
+import { Refused } from './refused.js';
+
+/** Coordinator allocation, 18 Oct: all new board-watch moves begin here [H16]. */
+export const BOARD_SENTINEL_ENGINE = 56;
+const NAME = /^[a-z0-9][a-z0-9._-]{0,63}$/u;
+const INTERVALS = Object.freeze({ '10m': 600_000, hourly: 3_600_000, daily: 86_400_000 });
+
+/** Normalize the exact row the person approves; no execution settings live outside its digest. */
+export function sentinelDefinition(value) {
+  if (!value || typeof value.name !== 'string' || !NAME.test(value.name) || typeof value.check !== 'string' || !value.check.trim()
+      || value.check.length > 8_192 || typeof value.every !== 'string' || !Object.hasOwn(INTERVALS, value.every)
+      || typeof value.owner !== 'string' || !value.owner.trim() || /\s/u.test(value.owner)) {
+    throw new Refused('BAD_SENTINEL', 'name a watch, its check, owner and --every 10m, hourly or daily: pullboard sentinel propose <name> --check "<command>" --owner <seat or lane> --every 10m');
+  }
+  const directory = value.directory ?? '.';
+  if (typeof directory !== 'string' || !directory || directory.startsWith('/') || directory.includes('\\')
+      || directory.split('/').some(part => part === '..') || /[\r\n\0]/u.test(directory)) {
+    throw new Refused('BAD_SENTINEL', 'use a working directory inside this project with --directory <relative path>');
+  }
+  const timeoutMs = value.timeoutMs ?? 30_000; // budget: default hang ceiling for an approved external check.
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 300_000) {
+    throw new Refused('BAD_SENTINEL', 'set --timeout to a whole number of milliseconds from 100 through 300000');
+  }
+  const next = value.next ?? `inspect the check and propose a repair for sentinel ${value.name}`;
+  if (typeof next !== 'string' || !next.trim() || next.length > 1_024 || /[\r\n\0]/u.test(next)) {
+    throw new Refused('BAD_SENTINEL', 'give one readable next step with --next "<what to do>"');
+  }
+  return { name: value.name, check: value.check, directory, every: value.every, owner: value.owner,
+    timeoutMs, next: next.trim() };
+}
+
+/** Bind approval to every execution and notification field, including schedule and timeout. */
+export function sentinelDigest(value) {
+  return createHash('sha256').update(JSON.stringify(sentinelDefinition(value))).digest('hex');
+}
+
+/** Read only allocated receipts; legacy events with similar names never enable command execution. */
+export function sentinels(board) {
+  const rows = new Map();
+  const events = board.db.prepare("SELECT * FROM event WHERE event_kind IN ('sentinel-proposal','sentinel-decision','sentinel-start','sentinel-run') ORDER BY event_id").all();
+  for (const event of events) {
+    const detail = JSON.parse(event.event_detail);
+    if (detail.engine !== BOARD_SENTINEL_ENGINE) continue;
+    if (event.event_kind === 'sentinel-proposal') {
+      rows.set(detail.row.name, { ...detail.row, digest: detail.digest, status: 'pending', proposedBy: event.event_by,
+        proposedAt: event.event_at, lastRun: null, activeRun: null, history: [] });
+      continue;
+    }
+    const row = rows.get(detail.name);
+    if (!row || row.digest !== detail.digest) continue;
+    if (event.event_kind === 'sentinel-decision' && event.event_by === PERSON) {
+      row.status = detail.decision === 'approve' ? 'approved' : 'declined';
+      row.reason = detail.reason; row.decidedAt = event.event_at; row.activeRun = null;
+    } else if (event.event_kind === 'sentinel-start') {
+      row.activeRun = { id: detail.run, by: event.event_by, startedAt: event.event_at, until: detail.until };
+    } else if (event.event_kind === 'sentinel-run' && row.activeRun?.id === detail.run) {
+      row.lastRun = { ...detail.result, id: detail.run, at: event.event_at };
+      row.history.push(row.lastRun); row.activeRun = null;
+    }
+  }
+  return [...rows.values()];
+}
+
+/** All mutations retain their allocated replay minimum and require a registered actor. */
+function requireSentinelActor(board, agentId, person = false) {
+  if ((board.executionEngineVersion ?? ENGINE_VERSION) < BOARD_SENTINEL_ENGINE) {
+    throw new Refused('ENGINE_VERSION', `board watches require engine ${BOARD_SENTINEL_ENGINE}; upgrade Pullboard`);
+  }
+  if (person ? agentId !== PERSON : !listAgents(board).some(agent => agent.agent_id === agentId)) {
+    throw new Refused(person ? 'B26_PERSON_APPROVAL' : 'NOT_JOINED', person
+      ? 'only the person approves or declines a sentinel; use their terminal or Pullboard View'
+      : 'join this board before proposing or running a sentinel: pullboard join <lane>');
+  }
+}
+
+/** Read one current proposal, refusing a replaced approval or run receipt before any mutation. */
+function currentSentinel(board, name, digest) {
+  const row = sentinels(board).find(entry => entry.name === name);
+  if (!row || row.digest !== digest) throw new Refused('STALE_SENTINEL', 'read the current proposal with pullboard sentinels; the person approves its exact command, directory and schedule');
+  return row;
+}
+
+/** Propose or replace a watch; every replacement becomes pending and loses all prior approval. */
+export function proposeSentinel(board, { agentId, row: value }) {
+  return atomic(board, () => {
+    requireSentinelActor(board, agentId);
+    const row = sentinelDefinition(value);
+    const agents = listAgents(board);
+    if (row.owner !== 'coordinator' && !agents.some(agent => [agent.agent_id, agent.agent_lane].includes(row.owner))) {
+      throw new Refused('BAD_SENTINEL', 'choose the coordinator, a registered seat or a lane as the sentinel owner');
+    }
+    const digest = sentinelDigest(row);
+    logEvent(board, agentId, 'sentinel-proposal', null, { row, digest, engine: BOARD_SENTINEL_ENGINE });
+    return sentinels(board).find(entry => entry.name === row.name);
+  });
+}
+
+/** Approve or decline precisely the row the person saw, through the same person channels as spec rows. */
+export function decideSentinel(board, { agentId, channel, name, digest, decision, reason = '' }) {
+  return atomic(board, () => {
+    requireSentinelActor(board, agentId, true);
+    if (!['terminal', 'view'].includes(channel)) throw new Refused('B26_PERSON_CHANNEL', 'sentinel decisions use the person’s terminal or Pullboard View');
+    if (!['approve', 'decline'].includes(decision) || typeof reason !== 'string'
+        || /[\r\n]/u.test(reason) || decision === 'decline' && !reason.trim()) {
+      throw new Refused('BAD_SENTINEL', 'approve the current sentinel, or decline it with --reason "<why>"');
+    }
+    const row = currentSentinel(board, name, digest);
+    if (decision === 'approve' && row.status === 'approved') return row;
+    logEvent(board, PERSON, 'sentinel-decision', null, { name, digest, decision, reason: reason.trim(), channel, engine: BOARD_SENTINEL_ENGINE });
+    return sentinels(board).find(row => row.name === name);
+  });
+}
+
+/** Atomically claim a due approved check, so simultaneous resume/view workers cannot run it twice. */
+export function beginSentinelRun(board, { agentId, name, digest, run }) {
+  return atomic(board, () => {
+    requireSentinelActor(board, agentId);
+    const row = currentSentinel(board, name, digest);
+    const now = board.clock.now().getTime();
+    if (typeof run !== 'string' || !/^[a-zA-Z0-9-]{1,80}$/u.test(run)) throw new Refused('BAD_SENTINEL', 'start a sentinel with a unique run id');
+    if (row.status !== 'approved' || row.activeRun && Date.parse(row.activeRun.until) > now
+        || row.lastRun && !row.lastRun.aborted && Date.parse(row.lastRun.at) + INTERVALS[row.every] > now) return null;
+    const until = new Date(now + row.timeoutMs + 10_000).toISOString(); // budget: command hang ceiling plus exact-child shutdown grace.
+    logEvent(board, agentId, 'sentinel-start', null, { name, digest, run, until, engine: BOARD_SENTINEL_ENGINE });
+    return { ...row, run, until };
+  });
+}
+
+/** Keep completed receipts small and internally consistent before writing any event or consuming a lease. */
+function completedWatchResult(value) {
+  const fields = ['green', 'code', 'timedOut', 'signal', 'aborted', 'durationMs', 'output'];
+  const result = value && {
+    green: value.green, code: value.code, timedOut: value.timedOut,
+    signal: value.signal ?? null, aborted: value.aborted ?? false,
+    durationMs: value.durationMs, output: value.output,
+  };
+  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(key => !fields.includes(key))
+      || typeof result.green !== 'boolean' || typeof result.timedOut !== 'boolean' || typeof result.aborted !== 'boolean'
+      || result.code !== null && (!Number.isInteger(result.code) || result.code < 0 || result.code > 255)
+      || result.signal !== null && (typeof result.signal !== 'string' || !/^SIG[A-Z0-9]+$/u.test(result.signal) || result.code !== null)
+      || !Number.isFinite(result.durationMs) || result.durationMs < 0 || typeof result.output !== 'string' || result.output.length > 16_384
+      || result.green !== (result.code === 0 && !result.timedOut && !result.aborted && result.signal === null)) {
+    throw new Refused('BAD_SENTINEL', 'record a completed check with its exit status, bounded final output, timeout and elapsed time');
+  }
+  return result;
+}
+
+/** Retain every red receipt for Rigor, but notify the owner only on the red/green transitions. */
+export function finishSentinelRun(board, { agentId, name, digest, run, result }) {
+  return atomic(board, () => {
+    requireSentinelActor(board, agentId);
+    const row = currentSentinel(board, name, digest);
+    if (row.status !== 'approved' || row.activeRun?.id !== run || row.activeRun.by !== agentId) {
+      throw new Refused('STALE_SENTINEL', 'this sentinel run no longer owns the approved proposal; read pullboard sentinels and retry when due');
+    }
+    result = completedWatchResult(result);
+    logEvent(board, agentId, 'sentinel-run', null, { name, digest, run, result, engine: BOARD_SENTINEL_ENGINE });
+    if (!result.green && !result.aborted) logEvent(board, 'sentinel', 'sentinel-failure', null, {
+      name, digest, run, cause: `sentinel:${name}`, engine: BOARD_SENTINEL_ENGINE,
+    });
+    const previous = row.history.findLast(entry => !entry.aborted);
+    if (!result.aborted && (!result.green && previous?.green !== false || result.green && previous?.green === false)) {
+      const cleared = result.green;
+      const text = `${cleared ? 'Cleared' : 'Sentinel failed'}: ${name}\n${row.check}\n${result.output || '(no output)'}\nNext: ${row.next}`;
+      shout(board, { from: 'sentinel', to: row.owner, text, lanes: [...new Set(listAgents(board).map(agent => agent.agent_lane))] });
+    }
+    return sentinels(board).find(entry => entry.name === name);
+  });
+}

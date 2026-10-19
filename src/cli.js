@@ -343,6 +343,10 @@ import { serveApi } from './api.js';
 import { watchCommand } from './watch.js';
 import { serveMcp } from './mcp.js';
 import { scanHealthSentinel } from './health-sentinel.js';
+import { SENTINEL_OPTIONS } from './sentinel-command.js';
+import { resumeSentinels } from './sentinel-command.js';
+import { sentinelCommand } from './sentinel-command.js';
+import { sentinelListCommand } from './sentinel-command.js';
 import {
   doctorProblems,
   doctrineProblems,
@@ -620,6 +624,7 @@ const OPTIONS = {
   model: { type: 'string' },
   as: { type: 'string' },
   check: { type: 'string' },
+  ...SENTINEL_OPTIONS,
   yes: { type: 'boolean' },
   landing: { type: 'boolean' },
   adopt: { type: 'boolean' },
@@ -1702,6 +1707,7 @@ async function resumeHere(io, view) {
       catch (error) { if (!(error instanceof Refused) || error.code !== 'HEALTH_SCAN_STALE') throw error; }
     }
   });
+  await resumeSentinels({ ctx, withBoard, whoAmI, ordered });
   const { root, isMain } = ctx.info;
   const mainRoot = primaryCheckoutRoot(ctx.info);
   const worktreeConfig = mainRoot ? (isMain ? ctx.config : loadConfig(mainRoot)) : null;
@@ -4369,6 +4375,8 @@ async function runCommand(argv, io) {
     if (values.as === 'person' && !['answer', 'decisions', 'fact'].includes(command)) {
       throw new Refused('USAGE', '--as person works only with pullboard answer, decisions, or fact --never-again');
     }
+    if (command === 'sentinel') return await sentinelCommand({ ctx: context(io), words: [first, second, ...rest].filter(value => value !== undefined), values, withBoard, whoAmI, ordered });
+    if (command === 'sentinels') return sentinelListCommand(first, () => context(io), withBoard);
     if (command === 'tour') return tour(io);
     if (command === 'lifecycle') {
       io.result?.({ markdown: lifecycleMarkdown().trimEnd() });
@@ -4682,7 +4690,7 @@ export function resultCommands() {
     ...Object.keys(setupCommands({}, args)),
     ...Object.keys(readCommands({}, args)),
     ...Object.keys(workCommands({}, args)),
-    'help', 'version', 'tour', 'lifecycle', 'view', 'serve', 'watch', 'forget', 'spec', 'prompt', 'hook', 'gate', 'settings', 'runner', 'relay',
+    'help', 'version', 'tour', 'lifecycle', 'view', 'serve', 'watch', 'forget', 'spec', 'prompt', 'hook', 'gate', 'settings', 'runner', 'relay', 'sentinel', 'sentinels',
   ])].sort();
 }
 

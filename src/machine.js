@@ -31,6 +31,7 @@ export const ENGINE_VERSION = Math.max(
   WITHDRAW_MILESTONE_ENGINE,
   STRONG_REJECTION_NOTICE_ENGINE,
   52,
+  56,
 );
 
 /**
@@ -179,7 +180,7 @@ export const GUARDS = [
   { id: 'reviewReleaseExplained', refuse: 'NOTE_REQUIRED', rule: 'a review release gives a nonempty one-line reason', next: 'release with --note "why", or --note-file <file>', source: 'board', when: 'engine 5 or newer, only when freeing a submitted review reservation' },
   { id: 'reviewCooldownElapsed', refuse: 'REVIEW_COOLDOWN', rule: 'the reviewer has not released this submission within the past hour', next: 'let another reviewer take it, or wait an hour or for a new submission', source: 'board', when: 'engine 5 or newer, only for the same reviewer and current submission' },
   { id: 'noteGiven', refuse: 'NOTE_REQUIRED', rule: 'the move carries a note: what failed, what was tried, or why', next: '--note "..." or --note-file <file>', source: 'board' },
-  { id: 'causeWellFormed', refuse: 'BAD_CAUSE', rule: 'a cause, when given, is test:<file>::<title>, refusal:<CODE>, row:<id> or doctrine:<id>', next: 'fix --cause, or leave it out', source: 'board' },
+  { id: 'causeWellFormed', refuse: 'BAD_CAUSE', rule: 'a cause, when given, is test:<file>::<title>, refusal:<CODE>, row:<id>, doctrine:<id> or sentinel:<name>', next: 'fix --cause, or leave it out', source: 'board' },
   { id: 'notMerged', refuse: 'ALREADY_MERGED', rule: 'the item has no recorded merge receipt', next: 'a merged item cannot be reopened', source: 'board' },
   { id: 'submissionProofValid', refuse: 'SUBMISSION_PROOF', rule: 'recorded test selection names literal project files and its full-fallback policy', next: 'rerun submit with the current CLI', source: 'board', when: 'engine 38 or later; absent legacy selection remains unknown' },
   { id: 'landingFailureRecorded', refuse: 'LANDING_FAILURE_REQUIRED', rule: 'a verified item note names the failing test and landing merge commit', next: 'cite the recorded batch, or name the test and merge commit in a manual note; work that only conflicts with the trunk reopens with --conflict <file> for each conflicting file', source: 'board', when: 'unless the reopen names a trunk conflict' },

@@ -6,11 +6,12 @@
 import { COORDINATOR } from './config.js';
 import { Refused } from './refused.js';
 import { HEALTH_SENTINEL_ENGINE } from './health-receipts.js';
+import { BOARD_SENTINEL_ENGINE } from './sentinels.js';
 
-/** The four kinds of cause key and their shapes, in the order help and refusals name them. */
-export const CAUSE_FORMS = Object.freeze(['test:<file>::<title>', 'refusal:<CODE>', 'row:<id>', 'doctrine:<id>']);
+/** The kinds of cause key and their shapes, in the order help and refusals name them. */
+export const CAUSE_FORMS = Object.freeze(['test:<file>::<title>', 'refusal:<CODE>', 'row:<id>', 'doctrine:<id>', 'sentinel:<name>']);
 
-const CAUSE = /^(?:test:(?<file>[^\s:][^\r\n:]*)::(?<title>\S[^\r\n]*)|refusal:(?<code>[A-Z][A-Z0-9_]*)|row:(?<row>[A-Z][A-Za-z0-9.]*)|doctrine:(?<doctrine>[A-Z][A-Za-z0-9.]*))$/u;
+const CAUSE = /^(?:test:(?<file>[^\s:][^\r\n:]*)::(?<title>\S[^\r\n]*)|refusal:(?<code>[A-Z][A-Z0-9_]*)|row:(?<row>[A-Z][A-Za-z0-9.]*)|doctrine:(?<doctrine>[A-Z][A-Za-z0-9.]*)|sentinel:(?<sentinel>[a-z0-9][a-z0-9._-]{0,63}))$/u;
 
 /** Refusal codes that name a merge conflict: a collision between branches, never a repeated error. */
 const CONFLICT_CODES = new Set(['MERGE_CONFLICT']);
@@ -96,9 +97,10 @@ export function causeReading(key) {
  * @returns {string[]}
  */
 export function eventCauses(event) {
-  if (!['reject', 'reopen', 'health-failure'].includes(event.event_kind)) return [];
+  if (!['reject', 'reopen', 'health-failure', 'sentinel-failure'].includes(event.event_kind)) return [];
   const detail = JSON.parse(event.event_detail);
   if (event.event_kind === 'health-failure' && (event.event_by !== 'sentinel' || detail.engine !== HEALTH_SENTINEL_ENGINE)) return [];
+  if (event.event_kind === 'sentinel-failure' && (event.event_by !== 'sentinel' || detail.engine !== BOARD_SENTINEL_ENGINE)) return [];
   const keys = [];
   if (typeof detail.cause === 'string' && !causeProblem(detail.cause)) keys.push(detail.cause);
   const tests = Array.isArray(detail.landingFailure?.tests) ? detail.landingFailure.tests : [];
@@ -143,6 +145,8 @@ export function rigorReport(events, { person }) {
   for (const event of events) {
     if (event.event_kind === 'health-failure'
       && (event.event_by !== 'sentinel' || JSON.parse(event.event_detail)?.engine !== HEALTH_SENTINEL_ENGINE)) continue;
+    if (event.event_kind === 'sentinel-failure'
+      && (event.event_by !== 'sentinel' || JSON.parse(event.event_detail)?.engine !== BOARD_SENTINEL_ENGINE)) continue;
     const never = neverAgainCause(event, person);
     if (never && !isMergeConflict(never)) {
       const found = entry(never);
@@ -150,7 +154,7 @@ export function rigorReport(events, { person }) {
       if (event.item_id !== null && !found.items.has(event.item_id)) found.items.set(event.item_id, new Set());
       continue;
     }
-    if (!['reject', 'reopen', 'health-failure'].includes(event.event_kind)) continue;
+    if (!['reject', 'reopen', 'health-failure', 'sentinel-failure'].includes(event.event_kind)) continue;
     const keys = eventCauses(event);
     if (!keys.length) {
       uncaused += 1;
@@ -160,7 +164,7 @@ export function rigorReport(events, { person }) {
     for (const key of keys.filter((candidate) => !isMergeConflict(candidate))) {
       const found = entry(key);
       found.occurrences += 1;
-      if (event.event_kind === 'health-failure') found.healthOccurrences += 1;
+      if (['health-failure', 'sentinel-failure'].includes(event.event_kind)) found.healthOccurrences += 1;
       if (event.item_id === null) continue;
       const commits = found.items.get(event.item_id) ?? new Set();
       if (commit) commits.add(commit);

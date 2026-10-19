@@ -20,6 +20,7 @@ import {
 } from './trunk-conflict.js';
 import { CHECK_ACCEPT_ENGINE } from './check-accept.js';
 import { HEALTH_SENTINEL_ENGINE } from './health-receipts.js';
+import { BOARD_SENTINEL_ENGINE } from './sentinels.js';
 import {
   CAUSE_ENGINE,
   ENGINE_VERSION,
@@ -57,7 +58,7 @@ export const ENGINE_OPERATIONS = Object.freeze([
   'addMilestone', 'editMilestoneItems', 'orderMilestoneItems', 'moveMilestone', 'editMilestone', 'removeMilestone', 'shipMilestone',
   'recordRowDecisions', 'applyRowDecisions', 'draftSpecRow', 'appendFact',
   'recordLandingBatch', 'recordLandingWaiver', 'recordLandingFlake', 'finishLandingBatch', 'acceptCheck',
-  'recordHealthFindings',
+  'recordHealthFindings', 'proposeSentinel', 'decideSentinel', 'beginSentinelRun', 'finishSentinelRun',
 ]);
 
 /** Engine version at which each ordered operation first has stable replay semantics. */
@@ -66,6 +67,7 @@ const OPERATION_ENGINE = Object.freeze({ draftSpecRow: ROW_DRAFT_ENGINE, orderMi
 
 /** Dependency edits, causes, sealed reviews, submission proofs, trunk conflicts, health observations and milestone targets retain distinct recorded engine meanings. */
 function minimumOperationEngine(operation, args, board) {
+  if (['proposeSentinel', 'decideSentinel', 'beginSentinelRun', 'finishSentinelRun'].includes(operation) || typeof args[1]?.cause === 'string' && args[1].cause.startsWith('sentinel:')) return BOARD_SENTINEL_ENGINE;
   if (operation === 'recordHealthFindings') return HEALTH_SENTINEL_ENGINE;
   const options = args[1];
   if (carriesConflict(operation, args)) return CONFLICT_ENGINE;

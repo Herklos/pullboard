@@ -7,6 +7,10 @@ import { join, relative } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 import { submitFixture } from '../test/board-submit-fixture.js';
+import { proposeSentinel } from '../src/sentinels.js';
+import { decideSentinel } from '../src/sentinels.js';
+import { beginSentinelRun } from '../src/sentinels.js';
+import { finishSentinelRun } from '../src/sentinels.js';
 import { COORDINATOR } from '../src/config.js';
 import { JSON_SHAPES } from '../src/json.js';
 import { exportView } from '../src/serve.js';
@@ -360,6 +364,12 @@ function recordEventContract() {
   const revision = () => events(board).at(-1)?.event_id ?? 0;
   recordHealthFindings(board, { agentId: coordinator, observedRevision: revision(), findings: [healthFinding] });
   recordHealthFindings(board, { agentId: coordinator, observedRevision: revision(), findings: [] });
+  // Explicitly synthetic event-contract history; no external command or gate is claimed.
+  const watch = proposeSentinel(board, { agentId: coordinator, row: { name: 'format-watch', check: 'false', every: 'daily', owner: 'coordinator' } });
+  decideSentinel(board, { agentId: PERSON, channel: 'view', name: watch.name, digest: watch.digest, decision: 'approve' });
+  beginSentinelRun(board, { agentId: coordinator, name: watch.name, digest: watch.digest, run: 'format-run' });
+  finishSentinelRun(board, { agentId: coordinator, name: watch.name, digest: watch.digest, run: 'format-run',
+    result: { green: false, code: 1, timedOut: false, durationMs: 0, output: 'synthetic format receipt' } });
   const rows = events(board).map((row) => ({ ...row, detail: JSON.parse(row.event_detail) }));
   closeBoard(board);
   return { rows, actors: { [coordinator]: 'coordinator', [builder]: 'builder', [returnedBuilder]: 'builder', [reviewer]: 'reviewer', [PERSON]: 'person', board: 'board' } };
@@ -635,6 +645,11 @@ test('[A5] schema, versions, event kinds and event detail fields match live beha
     'health-scan': 'observing agent',
     'health-failure': 'sentinel',
     'health-resolved': 'sentinel',
+    'sentinel-proposal': 'proposing agent',
+    'sentinel-decision': 'person',
+    'sentinel-start': 'running agent',
+    'sentinel-run': 'running agent',
+    'sentinel-failure': 'sentinel',
   };
   for (const row of actualRows) {
     const kind = row.event_kind;

@@ -1007,6 +1007,11 @@ test('[A1] every catalog command and subcommand has a real CLI exercise', () => 
   json(source, source.repo, 'roadmap');
   json(source, source.repo, 'queue');
   json(source, source.repo, 'rigor');
+  const watch = json(source, source.repo, 'sentinel', ['propose', 'catalog-watch', '--check', 'true', '--every', 'hourly', '--owner', 'coordinator'], 'propose');
+  assert.equal(watch.sentinel.status, 'pending');
+  assert.equal(json(source, source.repo, 'sentinel', ['approve', 'catalog-watch'], 'approve').sentinel.status, 'approved');
+  assert.equal(json(source, source.repo, 'sentinel', ['decline', 'catalog-watch', '--reason', 'Catalog coverage complete'], 'decline').sentinel.status, 'declined');
+  assert.equal(json(source, source.repo, 'sentinels').sentinels[0].name, 'catalog-watch');
   json(source, source.repo, 'milestone', ['add', 'Catalog', '--items', String(catalog.item_id)], 'add');
   json(source, source.repo, 'milestone', ['items', 'Catalog', '--remove', String(catalog.item_id)], 'items');
   json(source, source.repo, 'milestone', ['items', 'Catalog', '--add', String(catalog.item_id)], 'items');
