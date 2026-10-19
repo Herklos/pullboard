@@ -4,6 +4,92 @@ Notable changes to Pullboard, for people using it. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-10-19
+
+### pullboard.dev opens your board, and pairing just works
+
+Open pullboard.dev on any device and it takes you to your board one clear step at a time. `pullboard init` offers to share the board with your phone in one Enter, and `pullboard view` keeps running in the background, so your phone always has a board to open.
+
+### Added
+
+- Relay and pairing:
+  - `pullboard init` offers to share your board with your phone in one Enter.
+  - `pullboard view` keeps running in the background.
+  - The view links this machine's boards to pullboard.dev in one sign-in, from a card you can close and bring back.
+  - Approving a link on your phone delivers the board without another command.
+  - `pullboard relay devices` lists phones and joined computers by name.
+  - A lost phone can be revoked without that phone's approval.
+  - A revoked browser is refused and told it was removed.
+  - `pullboard relay on --all` says who signed in, what it linked and what it waits for.
+  - The hosted page says how far behind this machine Pullboard is.
+- Roadmap:
+  - Each milestone sums its items by state, with an estimate at today's pace; on a slow day it estimates from the last 24 hours, or says it's too early to tell.
+  - Finished milestones sit under Shipped, and the Roadmap opens on the current release.
+  - A blocked item shows a dot and expands in place to say why.
+  - `pullboard roadmap` lists the work to ship first.
+- Rigor:
+  - `pullboard rigor` notices a failure cause that repeats.
+  - `pullboard rigor draft` turns a repeated cause into a draft row with its proof, waiting in Needs you.
+- `pullboard health` names every stuck item, why it's stuck, and who moves it next.
+- `pullboard digest` writes a readable briefing of one board.
+- `pullboard gate set "<command>"` sets the project gate in one step. A board without a gate is told that command with the test command Pullboard found (such as `make test`), never a hand edit of pullboard.json.
+- `pullboard watch` follows the board's live event stream.
+- `pullboard next`:
+  - follows the coordinator's ranking inside a release;
+  - names the item and the seat to work in across an agent's lanes;
+  - in the main checkout, points a newcomer to their lane.
+- A newcomer working alone can start their reviewer with one command.
+- An agent in a lane worktree can draft a spec row and cite it at once without editing a file outside its lane; every writer takes its row id from one allocator on the board, so two drafts never share an id.
+- An item that fails twice at one route moves up a route by itself; at the strongest route it stays with its builder.
+- An accepted item that conflicts with the trunk reopens for a main merge with `pullboard reopen <id> --conflict <file>`, and its accept stays recorded.
+- A person's waiver also covers the submit and landing gates.
+- A ruling the person approves becomes doctrine every agent reads, and a decision names the items it changes.
+- A test that escapes to landing is proposed as a submit invariant.
+- `pullboard init`:
+  - takes a product and an architecture blueprint together;
+  - grants the agent the permissions the Pullboard loop needs;
+  - commits its own setup files, or offers to in one Enter.
+- Blueprints:
+  - A blueprint fits the repo before you approve it.
+  - Its questions default from the repo they land in.
+  - Each rule names its source.
+  - Its starter items land in a build lane.
+
+### Changed
+
+- `pullboard submit` runs the static style checks first, in seconds.
+- `pullboard init` says the one line that matters first, and folds the rest.
+- A board building without spec rows is no longer told to draft the spec first.
+- Only test files that start a browser wait for a browser slot, and a short check never waits behind whole suites.
+- The gate pool serves the current release first.
+- A check that's already green on main holds the item until the person accepts it.
+- Agents ask the person only through the coordinator.
+
+### Fixed
+
+- An agent can't mint relay tokens from its worktree.
+- Pullboard's git hooks never silently run a different Pullboard version from the one that installed them; a mismatch names both versions and the command that fixes it.
+- Pairing again after a device joins isn't refused as busy.
+- A joined computer keeps working locally after the relay copy is deleted.
+- A relay read survives one reset connection.
+- `pullboard resume` and `pullboard health` no longer crash on Node 22.13 with "statement has been finalized" while reading item history.
+- A verdict reads stale when main moves under its files, and the view shows a stale chip on it.
+- An item claimed before the board had a gate can submit once a gate exists.
+- A landing gate that stops early at the first failure keeps that test's own report (its message, expected and actual, and location) in its output and log, and counts it as a failure.
+- When the gate goes red on submit, the refusal shows what the gate said, and `pullboard spec check` says to merge main when main already has the cited row.
+- A check that isn't valid shell is refused when it's set, and `pullboard gate` with a stray word refuses instead of running.
+- A busy view port names the program holding it, with a fix the hosted page can still find.
+- The view catches up with what changed instead of re-reading the board, and an unchanged board doesn't redraw.
+- A row detail no longer repeats who approves rows.
+- An approval whose row's gate or tier changed afterward shows as stale on every surface, in the view and the CLI, and asks you to approve the row again.
+- On a board with no approved spec rows, a feature commit is told a path that works: draft the row and cite its id at once, while the person approves it. The format example in SPEC.md is never read as a row.
+- An approved row that isn't applied yet names `pullboard spec apply`, and pending questions name `pullboard spec answer`.
+- `pullboard worktree` suggests an install only when the project has dependencies.
+- `pullboard init` in a repo without package.json finds the test command for its stack, or asks for one, instead of leaving it without a gate.
+- A sandbox denial inside a child process still reads as sandbox blocked, and a view a sandbox can't bind says how to allow it.
+- A review waiting in the gate pool keeps its lease.
+- The relay link in the invitation has a 44px tap target on phones.
+
 ## [0.9.0] - 2026-10-16
 
 ### Open your board from pullboard.dev
