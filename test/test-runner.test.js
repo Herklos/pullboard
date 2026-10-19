@@ -104,7 +104,7 @@ test('default discovery runs one fixture and does not recurse into the runner [C
   copyFileSync(runner, join(bin, 'run-tests.js'));
   const source = join(root, 'src');
   mkdirSync(source);
-  for (const name of ['person.js', 'config.js', 'refused.js']) {
+  for (const name of ['config.js', 'person.js', 'refused.js']) {
     copyFileSync(fileURLToPath(new URL('../src/' + name, import.meta.url)), join(source, name));
   }
   const marker = join(root, 'ran-once');
