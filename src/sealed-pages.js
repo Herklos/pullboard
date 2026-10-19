@@ -136,16 +136,17 @@ async function readPage(reference, context, parents = []) {
   if (plain.byteLength <= PREFIX.byteLength || PREFIX.some((byte, index) => plain[index] !== byte)) throw invalid();
   const kind = plain[PREFIX.byteLength];
   const body = plain.subarray(PREFIX.byteLength + 1);
+  const fingerprint = await pageDigest(plain);
   if (kind === 1) {
     if (body.byteLength !== reference.bytes) throw invalid();
-    return { body };
+    return { body, fingerprint };
   }
   if (kind === 2) {
     if (body.byteLength !== reference.bytes) throw invalid();
     let descriptor;
     try { descriptor = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(body)); } catch { throw invalid(); }
     if (!descriptor || !Object.hasOwn(descriptor, 'value') || !Array.isArray(descriptor.links) || descriptor.links.length > PAGE_FANOUT) throw invalid();
-    return { descriptor: { value: descriptor.value, links: descriptor.links.map(pageReference) } };
+    return { descriptor: { value: descriptor.value, links: descriptor.links.map(pageReference) }, fingerprint };
   }
   if (kind !== 0) throw invalid();
   let children;
@@ -154,8 +155,11 @@ async function readPage(reference, context, parents = []) {
   children = children.map(pageReference);
   const length = children.reduce((sum, child) => sum + child.bytes, 0);
   if (!Number.isSafeInteger(length) || length !== reference.bytes) throw invalid();
-  return { children };
+  return { children, fingerprint };
 }
+
+/** Authenticate a private cache hit before trusting its plaintext fingerprint; never upload the result. */
+export async function sealedPageFingerprint(reference, context) { return (await readPage(pageReference(reference), context)).fingerprint; }
 
 /**
  * Yield authenticated JSON bytes one bounded leaf at a time. A shared subtree may appear twice; only ancestor cycles refuse.

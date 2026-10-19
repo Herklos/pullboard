@@ -186,7 +186,11 @@ export function createRelayPages({ directory, boardId, now = Date.now, database,
       const staged = upload(id, principal);
       if (reference.sequence !== staged.sequence) throw new Refused('BAD_SEQUENCE', 'Publish the coverage sequence named when this upload began.');
       const root = db.prepare('SELECT sequence,payload FROM page_object WHERE id=?').get(reference.id);
-      if (!root || root.sequence !== reference.sequence) throw new Refused('SNAPSHOT_PAGE_MISSING', 'Upload this snapshot’s sealed root before publishing it.');
+      if (!root || root.sequence !== reference.sequence) {
+        const error = new Refused('SNAPSHOT_PAGE_MISSING', 'Upload this snapshot’s sealed root before publishing it.');
+        error.page = reference.id;
+        throw error;
+      }
       graph([reference.id], true);
       const result = publishHead(reference, Buffer.from(root.payload));
       if (result && typeof result.then === 'function') throw new Refused('RELAY_CONFIG', 'Commit the journal head synchronously before finishing publication.');

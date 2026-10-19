@@ -43,11 +43,11 @@ export function createRelayPagesHandler({ directory, now, authorize, withJournal
     const snapshot = journal.snapshot();
     if (!snapshot) throw new Refused('NO_SNAPSHOT', 'Upload a sealed snapshot before reading this board.');
     const root = snapshotPageRoot(snapshot);
-    if (!root) return { ...annotated(snapshot, id), apiVersion: 1 };
+    if (!root) return { ...annotated(snapshot, id), apiVersion: 1, storage: quota.usage(id) };
     const read = pages.pin(principal, root);
     const warning = quota.notice(id);
     return { apiVersion: 2, sequence: snapshot.sequence, receivedAt: snapshot.receivedAt, sender: snapshot.sender,
-      root, read, ...(warning ? { warning } : {}) };
+      root, read, storage: quota.usage(id), ...(warning ? { warning } : {}) };
   }
 
   /** Route only bounded opaque operations; no request supplies the account charged for them. */

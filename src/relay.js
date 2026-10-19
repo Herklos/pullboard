@@ -101,10 +101,13 @@ import {
   requireRelayOnChannel,
 } from './person.js';
 import { listApiProjects } from './projects.js';
+import { relaySnapshotRequest, relayStorage, relayStorageLine } from './relay-page-client.js';
+export { relayStorageLine };
 
 export const DEFAULT_RELAY = 'https://app.pullboard.dev';
 const SEALED_SNAPSHOT_LIMIT = 10_000_000;
 const LINK_FILES = new WeakMap();
+const STATE_FILES = new WeakMap();
 const WARNED_COMMANDS = new WeakSet();
 const KEY_WARNED_COMMANDS = new WeakSet();
 const BASELINE_ATTEMPTS = new WeakMap();
@@ -283,11 +286,13 @@ function loadLink(file) {
     state.personReauth = true;
     saveLink(file, state);
   }
+  STATE_FILES.set(state, file);
   return state;
 }
 
 /** Atomically persist acknowledgements and an exact sealed retry before attempting its send. */
 export function saveLink(file, state) {
+  STATE_FILES.set(state, file);
   mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
   const temporary = file + '.' + randomUUID() + '.tmp';
   try {
@@ -347,10 +352,21 @@ function transportFailure(error) {
   return typeof code === 'string' && /^[A-Z][A-Z0-9_]{1,40}$/u.test(code) ? code : 'no connection';
 }
 
-/** The sole outbound transport in the CLI: explicit sign-in or a saved, opted-in board link. */
-export async function request(state, path, { method = 'GET', body, allowMissing = false, initialBaseline = false, signal } = {}, io) {
+/** Use the page adapter only for snapshot requests; the saved opt-in still owns every network call. */
+export async function request(state, path, options = {}, io) {
+  return relaySnapshotRequest(state, path, options, io, {
+    raw: (target, settings) => rawRequest(state, target, settings, io), key: () => readBoardKey(state.board),
+    decode: (record, key) => decoded(key, record, state, 'snapshot', record.sequence),
+    encode: (value, sequence, key) => sealedRecord(key, value, state, 'snapshot', sequence),
+    maxEngine: ENGINE_VERSION, legacyLimit: SEALED_SNAPSHOT_LIMIT,
+    persist: () => { const file = STATE_FILES.get(state); if (file) saveLink(file, state); },
+  });
+}
+
+/** The sole raw HTTP transport: explicit sign-in or a saved, opted-in board link, with bounded deadlines. */
+async function rawRequest(state, path, { method = 'GET', body, allowMissing = false, initialBaseline = false, signal } = {}, io) {
   const supplied = io?.ignoreRelayEnvironmentToken ? undefined : process.env.PULLBOARD_RELAY_TOKEN;
-  const readToken = method === 'GET' && path.startsWith('/api/v1/boards/') ? supplied : undefined;
+  const readToken = method === 'GET' && /^\/api\/v[12]\/boards\//u.test(path) ? supplied : undefined;
   if (readToken !== undefined && !/^pa_[A-Za-z0-9_-]{43}$/.test(readToken)) throw new Refused('AUTH_REQUIRED', 'supply a current scoped board token without including it in command arguments');
   const token = readToken ?? state.token;
   let response;
@@ -394,6 +410,9 @@ export async function request(state, path, { method = 'GET', body, allowMissing 
     error.relayVersion = document.version;
     error.relayCode = document.error?.code;
     error.relayMessage = document.error?.message;
+    if (/^[0-9a-f]{64}$/u.test(document.error?.page ?? '')) error.page = document.error.page;
+    const storage = relayStorage(document.error?.storage);
+    if (storage) error.storage = storage;
     throw error;
   }
   if (document.version !== 1) throw new Refused('RELAY_VERSION', 'the relay API version is unsupported; upgrade Pullboard before syncing');
@@ -456,6 +475,7 @@ function summary(root, state, { pairing = false } = {}) {
     link: 'https://app.pullboard.dev/#board=' + state.board + fragment,
     sequence: state.sequence, behind: (state.baselinePause ? behind(root, state) : state.mode === 'ordered' ? Number(Boolean(state.pending)) : behind(root, state)) + Number(Boolean(state.snapshot || state.checkpoint)),
     recovery: recoverySummary(state),
+    ...(relayStorage(state.storage) ? { storage: relayStorage(state.storage) } : {}),
     ...(oversizedSnapshot ? { oversizedSnapshot } : {}),
     ...(state.baselinePause ? { pausedUpload: structuredClone(state.baselinePause) } : {}),
     ...(state.checkpointRefusal ? { refusedCheckpoint: checkpointProblem(state) } : {}) };
@@ -463,6 +483,7 @@ function summary(root, state, { pairing = false } = {}) {
 
 /** Measure a pending sealed snapshot against the relay's decoded journal limit. */
 function snapshotSize(state) {
+  if (state?.snapshotApiVersion === 2) return null;
   const sealed = state?.snapshot?.sealed ?? state?.checkpoint?.sealed;
   if (typeof sealed !== 'string') return null;
   const bytes = Buffer.from(sealed, 'base64url');
