@@ -157,7 +157,8 @@ export function landingShardCount(root) {
  * lines under it that say why, then the end of the output, within one cap, so a refusal or a retry
  * carries the reason and not the whole log. Passing tests are skipped however they are named. The
  * end has its own share of the cap and every line is cut short, so no single long line can push the
- * summary out.
+ * summary out. Unstructured commands keep their first diagnostic, and omitted nonempty lines are
+ * counted so the excerpt never looks like the complete output.
  *
  * @param {string} output
  * @returns {string}
@@ -174,7 +175,7 @@ export function digestOf(output) {
     tail.unshift(lines[at]);
     room -= lines[at].length + 1;
   }
-  room = DIGEST_CHARS - (TAIL_CHARS - room);
+  room = DIGEST_CHARS - (TAIL_CHARS - room) - 80; // Reserve the omission count inside the same cap.
   const body = lines.slice(0, lines.length - tail.length);
   const failing = [];
   for (let at = 0; at < body.length && failing.length < 40; at += 1) {
@@ -188,7 +189,16 @@ export function digestOf(output) {
     }
     at += (end === -1 ? block.length : end) - 1;
   }
-  return [...failing, ...tail].join('\n');
+  if (!failing.length) {
+    for (const line of body.filter(line => !PASSING_RE.test(line)).slice(0, CONTEXT_LINES + 1)) {
+      if (line.length >= room) break;
+      failing.push(line);
+      room -= line.length + 1;
+    }
+  }
+  const omitted = lines.length - failing.length - tail.length;
+  const notice = omitted ? [`… ${omitted} nonempty output lines omitted …`] : [];
+  return [...failing, ...notice, ...tail].join('\n');
 }
 
 /**
@@ -528,7 +538,7 @@ export async function withGateSlot(root, action, { landing = false, itemCheck = 
  */
 export async function runGate(root, config, { trustStamp = true, onWait, landing = false, agent, item = '', stages = false, waivers = [] } = {}) {
   if (!config.gate.trim()) {
-    throw new Refused('NO_GATE', 'no gate configured; set "gate" in pullboard.json, e.g. "npm test"');
+    throw new Refused('NO_GATE', 'no gate configured; set "gate" in pullboard.json to "pullboard spec check"', 'set "gate" in pullboard.json to "pullboard spec check", then commit it');
   }
   if (trustStamp && isStampedGreen(root)) return { isGreen: true, isCached: true, output: '', seconds: 0, log: '' };
   return await withGateSlot(root, (lease) => fullGateRun(root, config, trustStamp, { waitMs: lease.waitMs, gateLease: lease, landing, stages, waivers }), {
@@ -576,7 +586,7 @@ export async function runStaticChecks(root, config, { agent, item = '', onWait, 
  * @returns {Promise<any>}
  */
 export async function runSubmitGate(root, config, { base, trunk, changed, check, agent, item = '', kind = 'submit', onWait, onBrowserFallback }) {
-  if (!config.gate.trim()) throw new Refused('NO_GATE', 'no gate configured; set "gate" in pullboard.json, e.g. "npm test"');
+  if (!config.gate.trim()) throw new Refused('NO_GATE', 'no gate configured; set "gate" in pullboard.json to "pullboard spec check"', 'set "gate" in pullboard.json to "pullboard spec check", then commit it');
   await runStaticChecks(root, config, { agent, item, onWait, onBrowserFallback });
   const selection = config.affectedTests
     ? selectAffectedTests(root, { base, trunk, changed })
@@ -693,5 +703,5 @@ export function gateReport(gate) {
     if (!gate.profile?.files?.length) return timings ? `${summary}; ${timings.replaceAll('\n', '; ')}${gate.profilePath ? `; timing profile: ${gate.profilePath}` : ''}` : summary;
     return `${summary}\n${timings}${profilePath}`;
   }
-  return `gate red in ${gate.seconds}s:\n${digestOf(gate.output).replace(/^/gm, '  ')}\n${timings ? `${timings}\n` : ''}the whole output is in ${gate.log}${profilePath}`;
+  return `gate red in ${gate.seconds}s:\n${(digestOf(gate.output) || '(gate produced no output)').replace(/^/gm, '  ')}\n${timings ? `${timings}\n` : ''}the whole output is in ${gate.log}${profilePath}`;
 }

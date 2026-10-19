@@ -106,7 +106,7 @@ function citationGuide(spec, type) {
     .map(row => row.id).filter(id => !idProblems(spec, [id]).length))].slice(0, 2);
   return ids.length
     ? `end the header with the spec rows this ${type} serves, like [${ids.join(',')}]; docs, test and chore commits may cite none`
-    : `no approved spec row is available to cite; fenced format examples are not spec rows; run pullboard spec draft "<text>" for this requirement, ask the person to approve the returned id, then cite it in this ${type || 'commit'} header`;
+    : `no approved spec row is available to cite; fenced format examples are not spec rows; run pullboard spec draft "<text>" for this requirement and cite the returned id now in this ${type || 'commit'} header; the person approves it in parallel`;
 }
 
 /**
@@ -260,10 +260,10 @@ export function blockedPaths(paths, protect) {
  * changes outside its folders. The main checkout is the coordinator's and may change anything; any
  * other worktree must have joined a lane.
  *
- * @param {{ root: string, isMain: boolean, config: any, agent: any, boardFile?: string }} context
+ * @param {{ root: string, isMain: boolean, config: any, agent: any, boardFile?: string, preMergeHook?: boolean, onNotice?: (message: string) => void }} context
  * @returns {string[]}
  */
-export function preCommitProblems({ root, isMain, config, agent, boardFile }) {
+export function preCommitProblems({ root, isMain, config, agent, boardFile, preMergeHook = false, onNotice }) {
   if (!isMain) refuseGrafts(root);
   const { touched, written } = stagedPaths(root);
   const problems = blockedPaths(written, config.protect).map(
@@ -286,15 +286,27 @@ export function preCommitProblems({ root, isMain, config, agent, boardFile }) {
     problems.push('this worktree has not joined a lane: pullboard join <lane> --model "<model name>"');
     return problems;
   }
-  const mergeBase = mainMergeBase(root);
+  const mergeHeads = mainMergeHeads(root, preMergeHook);
   const ownershipConfig = committedLaneConfig(root);
-  const ownershipTouched = mergeBase
-    ? [...new Set([...touched, ...stagedPaths(root, mergeBase).touched])]
-      .filter((path) => !outOfLane(ownershipConfig, agent.agent_lane, [path]).length || !unchangedMergePath(root, path, mergeBase))
+  const mergeTouched = mergeHeads ? [...new Set([...touched, ...mergeHeads.flatMap((mergeHead) => stagedPaths(root, mergeHead).touched)])] : touched;
+  // Keeping either parent's exact content of a foreign file is accepted unchanged; when that file had a real conflict
+  // in this merge, the resolution still names its owner (#860).
+  const kept = mergeHeads && !preMergeHook
+    ? mergeTouched.filter((path) => outOfLane(ownershipConfig, agent.agent_lane, [path]).length && unchangedMergePath(root, path, mergeHeads) && conflictedInMerge(root, path))
+    : [];
+  kept.forEach((path) => onNotice?.(`resolved accepted-main conflict in ${path}; the coordinator owns ${path}`));
+  const ownershipTouched = mergeHeads
+    ? mergeTouched.filter((path) => !outOfLane(ownershipConfig, agent.agent_lane, [path]).length || !unchangedMergePath(root, path, mergeHeads))
     : touched;
-  const foreign = outOfLane(ownershipConfig, agent.agent_lane, ownershipTouched);
+  const foreignPaths = ownershipTouched.filter((path) => outOfLane(ownershipConfig, agent.agent_lane, [path]).length);
+  const resolved = mergeHeads && !preMergeHook
+    ? foreignPaths.filter((path) => resolvedMergeConflictPath(root, path, mergeHeads))
+    : [];
+  resolved.forEach((path) => onNotice?.(`resolved accepted-main conflict in ${path}; the coordinator owns ${path}`));
   problems.push(
-    ...foreign.map((path) => `outside the ${agent.agent_lane} lane: ${path}; shout its owner instead`),
+    ...foreignPaths.filter((path) => !resolved.includes(path))
+      .flatMap((path) => outOfLane(ownershipConfig, agent.agent_lane, [path]))
+      .map((path) => `outside the ${agent.agent_lane} lane: ${path}; shout its owner instead`),
   );
   return problems;
 }
@@ -439,24 +451,37 @@ export function unwiredHookProblems(root) {
 }
 
 /**
- * The commit being merged, only when it is already part of the primary checkout's history.
+ * Validate incoming commit candidates against primary main, using Git's pre-MERGE_HEAD inputs only
+ * for the merge hook; GITHEAD is ordinary environment data, not proof of who invoked this hook.
  *
  * @param {string} root
- * @returns {string | null}
+ * @param {boolean} preMergeHook Whether the CLI was invoked for pre-merge-commit.
+ * @returns {string[] | null}
  */
-function mainMergeBase(root) {
+function mainMergeHeads(root, preMergeHook) {
   const gitPath = tryGit(root, ['rev-parse', '--git-path', 'MERGE_HEAD']);
   if (gitPath.status !== 0) return null;
-  let merge;
-  try { merge = readFileSync(resolve(root, gitPath.stdout.trim()), 'utf8').split(/\r?\n/u, 1)[0]; } catch { return null; }
-  if (!/^[0-9a-f]{40}$/i.test(merge ?? '')) return null;
-  if (tryGit(root, ['cat-file', '-e', `${merge}^{commit}`]).status !== 0) return null;
-  if (tryGit(root, ['merge-base', '--is-ancestor', merge, 'HEAD']).status === 0) return null;
+  let merges;
+  const mergeFile = resolve(root, gitPath.stdout.trim());
+  try {
+    if (existsSync(mergeFile)) merges = readFileSync(mergeFile, 'utf8').split(/\r?\n/u).filter(Boolean);
+    else if (preMergeHook) {
+      const names = Object.keys(process.env).filter((name) => name.startsWith('GITHEAD_'));
+      if (names.some((name) => !/^GITHEAD_(?:[0-9a-f]{40}|[0-9a-f]{64})$/iu.test(name))) return null;
+      merges = names.map((name) => name.slice('GITHEAD_'.length));
+    } else return null;
+  } catch { return null; }
+  if (!merges.length || merges.some((merge) => !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/iu.test(merge))) return null;
+  merges = [...new Set(merges)];
+  for (const merge of merges) {
+    if (tryGit(root, ['cat-file', '-e', `${merge}^{commit}`]).status !== 0) return null;
+    if (tryGit(root, ['merge-base', '--is-ancestor', merge, 'HEAD']).status !== 1) return null;
+  }
   let main;
   try { main = mainCheckout(root)?.commit; } catch { return null; }
   if (!main) return null;
-  return tryGit(root, ['merge-base', '--is-ancestor', merge, main]).status === 0
-    ? merge
+  return merges.every((merge) => tryGit(root, ['merge-base', '--is-ancestor', merge, main]).status === 0)
+    ? merges
     : null;
 }
 
@@ -481,10 +506,56 @@ function committedObject(root, commit, path) {
   return fields ? fields[1] + ' ' + fields[2] : null;
 }
 
-/** Main integration may preserve either parent's exact foreign object; a new resolution remains lane-owned. */
-function unchangedMergePath(root, path, mergeBase) {
+/** Main integration may preserve either parent's exact foreign object. */
+function unchangedMergePath(root, path, mergeHeads) {
   const staged = stagedObject(root, path);
-  return staged !== null && (staged === committedObject(root, mergeBase, path) || staged === committedObject(root, 'HEAD', path));
+  return staged !== null && (mergeHeads.some((mergeHead) => staged === committedObject(root, mergeHead, path)) || staged === committedObject(root, 'HEAD', path));
+}
+
+/** Whether Git's resolve-undo index records a real conflict for this path in the merge being committed. */
+function conflictedInMerge(root, path) {
+  return git(root, ['ls-files', '--resolve-undo', '--stage', '-z', '--', ':(literal)' + path]).split('\0').filter(Boolean)
+    .some((record) => record.slice(record.indexOf('\t') + 1) === path && /^\d{6} [0-9a-f]{40,64} [123]\t/iu.test(record));
+}
+
+/**
+ * Allow a new foreign object, or the file's removal, only when Git records both exact parents in the
+ * resolved conflict index. Removing the file is a resolution like any other (#860): `git rm` after a
+ * real conflict leaves no staged entry, so a missing side compares as absent rather than refusing.
+ */
+function resolvedMergeConflictPath(root, path, mergeHeads) {
+  const staged = stagedObject(root, path);
+  if (staged === null) return false;
+  const removed = staged === '';
+  const records = git(root, ['ls-files', '--resolve-undo', '--stage', '-z', '--', ':(literal)' + path])
+    .split('\0').filter(Boolean);
+  const stages = new Map();
+  for (const record of records) {
+    const separator = record.indexOf('\t');
+    if (separator === -1 || record.slice(separator + 1) !== path) continue;
+    const fields = /^(\d{6}) ([0-9a-f]{40,64}) ([0123])$/iu.exec(record.slice(0, separator));
+    if (fields?.[3] === '0') {
+      if (removed || fields[1] + ' ' + fields[2] !== staged) return false;
+      continue;
+    }
+    if (!fields || stages.has(fields[3])) return false;
+    stages.set(fields[3], fields[1] + ' ' + fields[2]);
+  }
+  const bases = mergeHeads.flatMap((mergeHead) => {
+    const result = tryGit(root, ['merge-base', '--all', 'HEAD', mergeHead]);
+    return result.status === 0 ? result.stdout.trim().split(/\r?\n/u).filter(Boolean) : [];
+  });
+  if (!bases.length) return false;
+  const baseStage = stages.get('1');
+  const hasBaseProvenance = baseStage
+    ? bases.some((base) => baseStage === committedObject(root, base, path))
+    : bases.every((base) => committedObject(root, base, path) === '');
+  const parentModes = [stages.get('2'), stages.get('3')].filter(Boolean).map((entry) => entry.split(' ', 1)[0]);
+  // A side the conflict lacks, as in modify/delete, is the parent's absent path, compared as ''.
+  return (stages.has('2') || stages.has('3')) && hasBaseProvenance
+    && (stages.get('2') ?? '') === committedObject(root, 'HEAD', path)
+    && mergeHeads.some((mergeHead) => (stages.get('3') ?? '') === committedObject(root, mergeHead, path))
+    && (removed || parentModes.includes(staged.split(' ', 1)[0]));
 }
 
 /**

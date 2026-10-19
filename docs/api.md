@@ -225,7 +225,7 @@ The health sentinel runs this read-only scan on `pullboard resume` and every ten
 
 ## Automatic escalation
 
-Starting with engine 50, the second REJECT verdict since an item's latest route change records the existing escalation move automatically. Releases do not count as failed attempts. One `escalate` event carries both rejection records, including their reason, note, commit, digest, checked head and timestamp. A hand escalation or a route edit starts a new count; strong remains the ceiling. Sealed operations from engines below 50 retain their prior replay behavior.
+Starting with engine 50, the second REJECT verdict since an item's latest route change records the existing escalation move automatically. Releases do not count as failed attempts. One `escalate` event carries both rejection records, including their reason, note, commit, digest, checked head and timestamp. A hand escalation or a route edit starts a new count; strong remains the ceiling. Sealed operations from engines below 50 retain their prior replay behavior. Starting with engine 54, a pair at the strongest route records a `strong-rejection-notice` and sends the coordinator one message naming the builder and both rejection receipts, without an `escalate` event or route change. The notice starts the next pair count; ordinary reject, owner and lease behavior is unchanged. Engine 50 through 53 replay retains its ceiling escalation.
 
 ## Item threads
 

@@ -4105,6 +4105,10 @@ async function specCommand(io, { first, second, rest, values }) {
       const cited = name === ctx.config.spec ? citations(ctx, history) : new Map();
       const lost = permanenceProblems(parsed === practice ? practice.repo : parsed, { committed: history.ids, cited });
       if (name === ctx.config.spec) {
+        const mainRows = new Set((previousSources.get(name) ?? []).map(row => row.id));
+        for (const problem of lost) {
+          if (mainRows.has(problem.id)) problem.message = 'is present on main but missing from this worktree; run git merge main, then pullboard spec check';
+        }
         const answered = handAnsweredQuestions(previousSources.get(name) ?? [], parsed.rows, () => hookRead(ctx, (board) => store.rowDecisions(board)) ?? []);
         lost.push(...answered.map((id) => ({ id, message: io.guidance(`pending question answered by hand; ask the person to run pullboard spec answer ${id} "<choice or text>" and restore the pending row`) })));
       }
@@ -4272,7 +4276,7 @@ async function hookCommand(io, { first, second }) {
     const landing = hookRead(ctx, (board) => store.landingBatches(board).some((batch) => batch.root === info.root && !['landed', 'blocked'].includes(batch.state)));
     if (landing) io.caller('coordinator', info.root);
     else if (agent) io.caller('seat', info.root);
-    problems = preCommitProblems({ root: info.root, isMain: info.isMain || landing, config: ctx.config, agent, boardFile: ctx.file });
+    problems = preCommitProblems({ root: info.root, isMain: info.isMain || landing, config: ctx.config, agent, boardFile: ctx.file, preMergeHook: first === 'pre-merge-commit', onNotice: (message) => io.err(`pullboard pre-commit: warning: ${message}`) });
   } else if (first === 'commit-msg') {
     const message = readFileSync(second ?? '', 'utf8');
     const spec = loadSpec(info.root, ctx.config);

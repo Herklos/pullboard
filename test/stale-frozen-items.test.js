@@ -64,7 +64,7 @@ function project(t) {
   git(root, 'config', 'user.name', 'Stale-frozen fixture');
   git(root, 'config', 'user.email', 'stale-frozen@example.invalid');
   const initialized = pullboard(root, 'init');
-  assert.equal(initialized.status, 0, `${initialized.stdout}${initialized.stderr}`);
+  assert.equal(initialized.status, 0, `${initialized.stdout}${initialized.context}`);
   writeFileSync(join(root, 'pullboard.json'), `${JSON.stringify({
     gate: 'true', spec: 'SPEC.md', verify: 'coordinator', lease: '2h',
     lanes: { web: { owns: ['web/'], specs: ['G1', 'G3'] } }, shared: [],
@@ -73,25 +73,45 @@ function project(t) {
   mkdirSync(join(root, 'web'));
   git(root, 'add', '-A');
   const initial = runFixtureChild('git', ['commit', '-q', '-m', 'chore: initialize stale-frozen fixture'], { cwd: root, env, encoding: 'utf8' });
-  assert.equal(initial.status, 0, `${initial.stdout}${initial.stderr}`);
+  assert.equal(initial.status, 0, `${initial.stdout}${initial.context}`);
   git(root, 'worktree', 'add', '-q', web, '-b', 'web/stale-frozen');
   const joined = pullboard(web, 'join', 'web');
-  assert.equal(joined.status, 0, `${joined.stdout}${joined.stderr}`);
+  assert.equal(joined.status, 0, `${joined.stdout}${joined.context}`);
   return { dir, root, web, env, git, pullboard };
 }
 
 /** Create a real item that cites one frozen row and return its persisted id. */
 function addItem(box, title, specId = 'G1') {
   const result = box.pullboard(box.root, 'add', 'web', title, '--criterion', `Check ${title}.`, '--specs', specId, '--json');
-  assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
-  return JSON.parse(result.stdout).item.item_id;
+  assert.equal(result.status, 0, `${result.stdout}${result.context}`);
+  return jsonOf(result).item.item_id;
+}
+
+/**
+ * Require a fixture child's exit status: a number, or 'refused' for any nonzero exit. A killed child has
+ * no status, so the message carries its signal and elapsed time, never a bare null [S19].
+ */
+function requireExit(result, status) {
+  const message = `${result.stdout}${result.context}`;
+  if (status === 'refused') assert.ok(Number.isInteger(result.status) && result.status !== 0, `expected a refusal\n${message}`);
+  else assert.equal(result.status, status, message);
+  return result;
+}
+
+/** Require a fixture child's success; a killed child names its signal and elapsed time [S19]. */
+function requireSuccess(result) {
+  return requireExit(result, 0);
+}
+
+/** Parse a fixture child's JSON output; output a killed child cut short names its signal and elapsed time [S19]. */
+function jsonOf(result) {
+  try { return JSON.parse(result.stdout); }
+  catch (error) { return assert.fail(`${error.message}\n${result.stdout}${result.context}`); }
 }
 
 /** Run a CLI command and require its successful result. */
 function succeeds(box, cwd, ...args) {
-  const result = box.pullboard(cwd, ...args);
-  assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
-  return result;
+  return requireSuccess(box.pullboard(cwd, ...args));
 }
 
 /** Freeze an item's cited text by claiming it in the real agent worktree. */
@@ -108,7 +128,7 @@ function submit(box, id, name) {
   writeFileSync(join(box.web, relative), `${name}\n`);
   box.git(box.web, 'add', relative);
   const committed = runFixtureChild('git', ['commit', '-m', `feat(web): build ${name} [G1]`], { cwd: box.web, env: box.env, encoding: 'utf8' });
-  assert.equal(committed.status, 0, `${committed.stdout}${committed.stderr}`);
+  assert.equal(committed.status, 0, `${committed.stdout}${committed.context}`);
   const head = box.git(box.web, 'rev-parse', 'HEAD');
   succeeds(box, box.web, 'submit', String(id));
   return head;
@@ -174,11 +194,11 @@ test('[S19,V3] doctor and resume list stale frozen items in every lifecycle stat
   claim(box, ids.claimed);
 
   const decision = box.pullboard(box.root, 'spec', 'approve', 'G1', '--text', NEW_TEXT, '--json');
-  assert.equal(decision.status, 0, `${decision.stdout}${decision.stderr}`);
+  assert.equal(decision.status, 0, `${decision.stdout}${decision.context}`);
   succeeds(box, box.root, 'spec', 'apply', '--json');
   box.git(box.root, 'add', 'SPEC.md');
   const appliedCommit = runFixtureChild('git', ['commit', '-m', 'docs: update approved G1 wording [G1]'], { cwd: box.root, env: box.env, encoding: 'utf8' });
-  assert.equal(appliedCommit.status, 0, `${appliedCommit.stdout}${appliedCommit.stderr}`);
+  assert.equal(appliedCommit.status, 0, `${appliedCommit.stdout}${appliedCommit.context}`);
   assert.ok(readFileSync(join(box.root, 'SPEC.md'), 'utf8').includes(NEW_TEXT));
 
   const expected = [ids.open, ids.claimed, ids.submitted, ids.verified, ids.merged, ids.withdrawn].sort((a, b) => a - b);
@@ -190,8 +210,8 @@ test('[S19,V3] doctor and resume list stale frozen items in every lifecycle stat
   const bytesBeforeDoctor = boardBytes(box);
 
   const doctorJson = box.pullboard(box.root, 'doctor', '--json');
-  assert.notEqual(doctorJson.status, 0, doctorJson.stderr || doctorJson.stdout);
-  const doctorDocument = JSON.parse(doctorJson.stdout);
+  requireExit(doctorJson, 'refused');
+  const doctorDocument = jsonOf(doctorJson);
   const findings = doctorDocument.problems.filter((problem) => problem.code === 'STALE_ITEM');
   assert.deepEqual(findings.map((finding) => Number(/item #(\d+)/u.exec(finding.message)?.[1])).sort((a, b) => a - b), expected);
   for (const finding of findings) {
@@ -205,11 +225,11 @@ test('[S19,V3] doctor and resume list stale frozen items in every lifecycle stat
   assert.deepEqual(boardBytes(box), bytesBeforeDoctor, 'doctor did not write or migrate any board bytes');
 
   const doctorText = box.pullboard(box.root, 'doctor');
-  assert.equal(doctorText.status, 1, doctorText.stderr || doctorText.stdout);
+  requireExit(doctorText, 1);
   for (const id of expected) assert.match(doctorText.stdout, new RegExp(`item #${id}\\b`));
   const afterResumeBaseline = receiptSnapshot(box);
   const resumeJson = succeeds(box, box.root, 'resume', '--json');
-  const resumeDocument = JSON.parse(resumeJson.stdout);
+  const resumeDocument = jsonOf(resumeJson);
   assert.deepEqual(resumeDocument.stale.map((item) => item.id).sort((a, b) => a - b), expected);
   for (const item of resumeDocument.stale) {
     if (['open', 'claimed', 'submitted'].includes(item.status)) assert.match(item.next, new RegExp(`pullboard refreeze ${item.id}\\b`));
@@ -229,7 +249,7 @@ test('[S19,V3] doctor and resume list stale frozen items in every lifecycle stat
   assert.deepEqual(receiptSnapshot(box), before, 'diagnostics do not alter accepted receipts or frozen bars');
   assert.ok(!findings.some((finding) => finding.message.includes(`item #${ids.unaffected} `)), 'the item frozen on G3 remains unaffected');
   succeeds(box, box.root, 'refreeze', String(ids.open));
-  const afterRefreeze = JSON.parse(succeeds(box, box.root, 'resume', '--json').stdout);
+  const afterRefreeze = jsonOf(succeeds(box, box.root, 'resume', '--json'));
   assert.deepEqual(afterRefreeze.stale.map((item) => item.id).sort((a, b) => a - b), expected.filter((id) => id !== ids.open), 'explicit refreeze clears only the active item repaired against new text');
   const historical = (snapshot) => snapshot.items.filter((item) => item.item_status === 'verified');
   assert.deepEqual(historical(receiptSnapshot(box)), historical(before), 'refreezing active work preserves every accepted historical receipt');
@@ -245,17 +265,26 @@ test('[A5,S19,V3] doctor and resume distinguish unchanged doctrine citations fro
   claim(box, specItem);
   succeeds(box, box.web, 'release', String(specItem));
   const baseline = receiptSnapshot(box);
-  const before = JSON.parse(succeeds(box, box.root, 'resume', '--json').stdout);
+  const before = jsonOf(succeeds(box, box.root, 'resume', '--json'));
   assert.deepEqual(before.stale, [], 'a namespaced citation with unchanged inherited text is current');
-  const doctorBefore = JSON.parse(box.pullboard(box.root, 'doctor', '--json').stdout);
+  const doctorBefore = jsonOf(box.pullboard(box.root, 'doctor', '--json'));
   assert.deepEqual(doctorBefore.problems.filter(problem => problem.code === 'STALE_ITEM'), []);
   const path = join(box.root, 'DOCTRINE.md');
   writeFileSync(path, readFileSync(path, 'utf8') + '\n## Local override\n- PB1 [approved, must] Updated inherited rule. | gate: true\n');
-  const after = JSON.parse(succeeds(box, box.root, 'resume', '--json').stdout);
+  const after = jsonOf(succeeds(box, box.root, 'resume', '--json'));
   assert.deepEqual(after.stale.map(item => [item.id, item.rows]), [[doctrineItem, ['doctrine:PB1']]]);
-  const doctorAfter = JSON.parse(box.pullboard(box.root, 'doctor', '--json').stdout);
+  const doctorAfter = jsonOf(box.pullboard(box.root, 'doctor', '--json'));
   const findings = doctorAfter.problems.filter(problem => problem.code === 'STALE_ITEM');
   assert.equal(findings.length, 1);
   assert.match(findings[0].message, /old text of doctrine:PB1/);
   assert.deepEqual(receiptSnapshot(box), baseline, 'diagnostics preserve frozen evidence and unrelated SPEC citations');
+});
+
+test('[S19] a killed fixture child names its signal and elapsed time', () => {
+  const killed = runFixtureChild('sh', ['-c', 'kill -KILL $$'], { encoding: 'utf8' });
+  const named = (error) => /status: null\nsignal: SIGKILL\nelapsed: \d+ms/u.test(error.message);
+  assert.throws(() => requireSuccess(killed), named, 'an expected success');
+  assert.throws(() => requireExit(killed, 1), named, 'an expected exit status, as text doctor');
+  assert.throws(() => requireExit(killed, 'refused'), named, 'an expected refusal, as JSON doctor');
+  assert.throws(() => jsonOf(killed), named, 'JSON output cut short');
 });

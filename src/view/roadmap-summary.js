@@ -19,8 +19,14 @@ export function roadmapSummary(milestone, context = {}) {
   const legend = '<div class="roadmap-summary-legend">'+states.map(([key,label]) => '<span data-summary-state="'+key+'"><i class="roadmap-summary-swatch '+key+'" aria-hidden="true"></i><b>'+escape(summary[key])+'</b> '+label+'</span>').join('')+'</div>';
   const target = milestone.target ? '<span class="roadmap-target">Target <time datetime="'+escape(milestone.target)+'">'+escape(context.time ? context.time(milestone.target) : milestone.target)+'</time>'+(milestone.pastTarget?' <span class="chip warn">past target</span>':'')+'</span>' : '';
   const estimate = summary.estimate, pace = summary.pace;
-  const measured = estimate && Number.isFinite(estimate.low) && Number.isFinite(estimate.high) && pace && number(pace.last6h) && number(pace.last2h);
-  const forecast = measured ? '<span class="roadmap-estimate">About '+escape(estimate.low)+(estimate.low === estimate.high ? '' : ' to '+escape(estimate.high))+' h at today’s pace</span><span class="roadmap-pace">'+escape(pace.last6h)+' landed in the last 6 h, '+escape(pace.last2h)+' in the last 2 h</span>' : '';
+  // The time line reads the summary's estimate, window and reason as given (#853): today's pace for the 6 h
+  // window, the last day's for the 24 h window, and plain words when too few items have landed to estimate.
+  const bounds = estimate && Number.isFinite(estimate.low) && Number.isFinite(estimate.high)
+    ? escape(estimate.low)+(estimate.low === estimate.high ? '' : ' to '+escape(estimate.high))+' h' : '';
+  const when = bounds ? 'About '+bounds+(summary.window === '24h' ? ' at the last day’s pace' : ' at today’s pace')
+    : summary.reason === 'few-landings' ? 'Too few landings yet to estimate' : '';
+  const paced = pace && number(pace.last6h) && number(pace.last2h);
+  const forecast = when ? '<span class="roadmap-estimate">'+when+'</span>'+(paced ? '<span class="roadmap-pace">'+escape(pace.last6h)+' landed in the last 6 h, '+escape(pace.last2h)+' in the last 2 h</span>' : '') : '';
   const meta = target || forecast ? '<div class="roadmap-summary-meta">'+target+forecast+'</div>' : '';
   const needs = Array.isArray(summary.needsYou) ? summary.needsYou.map(id => {
     const item = context.lookup ? context.lookup(id) : null;

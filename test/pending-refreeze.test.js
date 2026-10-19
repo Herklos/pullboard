@@ -11,6 +11,7 @@ import { exportBoard, importBoard } from '../src/exchange.js';
 import {
   AUTO_ESCALATE_ENGINE,
   ENGINE_VERSION,
+  STRONG_REJECTION_NOTICE_ENGINE,
   VERIFIER_STANDING_ENGINE,
 } from '../src/machine.js';
 import {
@@ -272,6 +273,8 @@ async function checkDependencyLegacyClients(cleanup, directory, snapshot, target
 }
 
 test('dependency edits replay the same on every engine [B3,V2,H16]', async (t) => {
+  assert.equal(STRONG_REJECTION_NOTICE_ENGINE, 54, 'ceiling notices retain their allocated feature engine');
+  assert.ok(ENGINE_VERSION >= STRONG_REJECTION_NOTICE_ENGINE, 'the current writer retains paired ceiling notices');
   assert.equal(AUTO_ESCALATE_ENGINE, 50, 'automatic escalation retains its allocated engine');
   assert.equal(WITHDRAW_MILESTONE_ENGINE, 51, 'withdraw retains its allocated feature engine');
   assert.ok(ENGINE_VERSION >= WITHDRAW_MILESTONE_ENGINE, 'the current writer includes the withdraw feature');
