@@ -1,0 +1,359 @@
+/** Real board watches: exact person approval, automatic execution, owner notices and replay [A6,D1,D3,H16]. */
+import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
+import { mkdirSync } from 'node:fs';
+import { mkdtempSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
+import { realpathSync } from 'node:fs';
+import { rmSync } from 'node:fs';
+import { symlinkSync } from 'node:fs';
+import { writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname } from 'node:path';
+import { join } from 'node:path';
+import { test } from 'node:test';
+import * as store from '../src/board.js';
+import { main } from '../src/cli.js';
+import { appliedSequence } from '../src/engine.js';
+import { applyEngineMove } from '../src/engine.js';
+import { applyRelayMove } from '../src/engine.js';
+import { prepareEngineMove } from '../src/engine.js';
+import { exportBoard } from '../src/exchange.js';
+import { importBoard } from '../src/exchange.js';
+import { eventCauses } from '../src/rigor.js';
+import { rigorReport } from '../src/rigor.js';
+import { executeSentinel } from '../src/sentinel-runner.js';
+import { runDueSentinels } from '../src/sentinel-runner.js';
+import { startServeSentinel } from '../src/serve-sentinel.js';
+import { BOARD_SENTINEL_ENGINE } from '../src/sentinels.js';
+import { sentinelDefinition } from '../src/sentinels.js';
+import { sentinelDigest } from '../src/sentinels.js';
+import { sentinels } from '../src/sentinels.js';
+import { machineSettingsFile } from '../src/settings.js';
+import { runFixtureChild } from './fixture-child.js';
+import { runFixtureGit } from './fixture-child.js';
+import { parseProcessCensus } from '../src/process-census.js';
+
+/** Isolate actual SQLite, Git, settings and subprocess files; due time is explicitly injected. */
+function fixture(t) {
+  const directory = realpathSync(mkdtempSync(join(tmpdir(), 'pullboard-board-watch-')));
+  const root = join(directory, 'repo'); mkdirSync(root);
+  const overrides = { PULLBOARD_HOME: join(directory, 'home'), PULLBOARD_MACHINE_HOME: join(directory, 'machine'),
+    GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
+  const original = Object.fromEntries(Object.keys(overrides).map(key => [key, process.env[key]]));
+  Object.assign(process.env, overrides);
+  const env = { ...process.env, GIT_AUTHOR_NAME: 'Fixture', GIT_AUTHOR_EMAIL: 'fixture@example.invalid',
+    GIT_COMMITTER_NAME: 'Fixture', GIT_COMMITTER_EMAIL: 'fixture@example.invalid' };
+  runFixtureGit(['init', '-q', '-b', 'main'], { cwd: root, env });
+  writeFileSync(join(root, 'pullboard.json'), JSON.stringify({ gate: 'true', lanes: { core: { owns: ['src/'] } } }));
+  writeFileSync(join(root, 'SPEC.md'), '# Fixture\n\n## A\n- A6 [approved, must] Watch the board. | gate: review\n');
+  writeFileSync(join(root, 'DOCTRINE.md'), '# Fixture\n\n## PB\n- PB1 [approved, must] Keep the fixture private. | gate: review\n');
+  runFixtureGit(['add', '-A'], { cwd: root, env });
+  runFixtureGit(['commit', '-q', '-m', 'chore: private watch fixture [A6]'], { cwd: root, env });
+  const settings = machineSettingsFile(); mkdirSync(dirname(settings), { recursive: true });
+  writeFileSync(settings, JSON.stringify({ view: { background: false }, relay: { offerAtInit: false } }));
+  const clock = { time: Date.parse('2026-10-18T03:00:00Z'), now() { return new Date(this.time); } };
+  const board = store.openBoard(join(root, '.git/pullboard/board.sqlite'), clock);
+  store.register(board, { lane: 'coordinator', path: root });
+  const agent = store.register(board, { lane: 'core', path: join(directory, 'agent') });
+  /** Apply the actual ordered board engine with deterministic injected receipt time. */
+  const ordered = async (operation, args) => {
+    const move = prepareEngineMove(board, operation, args);
+    const receipt = applyEngineMove(board, move, { sequence: appliedSequence(board) + 1, at: clock.now().toISOString() });
+    assert.equal(receipt.error, undefined, JSON.stringify(receipt)); return receipt.result;
+  };
+  /** Run the actual CLI against this real board; view means the explicit test person adapter. */
+  const cli = async (args, personChannel) => {
+    let output = ''; let error = '';
+    const code = await main([...args, '--json'], { cwd: root, clock, personChannel,
+      stdout: { isTTY: false, write: text => { output += text; } }, stderr: { write: text => { error += text; } } });
+    return { code, document: output ? JSON.parse(output) : null, error };
+  };
+  t.after(() => {
+    store.closeBoard(board); rmSync(directory, { recursive: true, force: true });
+    for (const [key, value] of Object.entries(original)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
+  });
+  return { root, directory, board, agent, clock, ordered, cli,
+    run: () => runDueSentinels({ root, board, agentId: 'coordinator', ordered }) };
+}
+
+/** Quote only a controlled fixture path as a shell word. */
+function quote(word) { return `'${word.replaceAll("'", "'\\''")}'`; }
+
+/** Write one actual checker and return the command the person will approve. */
+function checker(box, source, name = 'check.mjs') {
+  const path = join(box.root, name); writeFileSync(path, source);
+  return `${quote(process.execPath)} ${quote(path)}`;
+}
+
+test('an approved sentinel runs by itself and reports to its owner once [A6,D1,D3]', async t => {
+  const box = fixture(t);
+  mkdirSync(join(box.root, 'watch'));
+  const check = checker(box, "import {existsSync,appendFileSync} from 'node:fs'; appendFileSync('runs','run\\n'); console.log('check receipt'); process.exit(existsSync('green')?0:1);");
+  const proposal = await box.cli(['sentinel', 'propose', 'staging', '--check', check, '--every', '10m', '--owner', box.agent,
+    '--directory', 'watch', '--next', 'repair the staging check']);
+  assert.equal(proposal.code, 0, proposal.error);
+  assert.equal(proposal.document.sentinel.status, 'pending');
+  await box.run(); assert.equal(existsSync(join(box.root, 'watch/runs')), false, 'unapproved commands never execute');
+  const approved = await box.cli(['sentinel', 'approve', 'staging'], 'view');
+  assert.equal(approved.code, 0, approved.error);
+  assert.equal(approved.document.sentinel.status, 'approved');
+  assert.equal((await box.cli(['resume'])).code, 0, 'the real automatic resume caller executes the due approved watch');
+  let notices = store.allShouts(box.board).filter(row => row.shout_from === 'sentinel');
+  assert.equal(notices.length, 1); assert.equal(notices[0].shout_to, box.agent);
+  assert.match(notices[0].shout_text, /staging[\s\S]*check receipt[\s\S]*Next: repair the staging check/u);
+  assert.equal(readFileSync(join(box.root, 'watch/runs'), 'utf8'), 'run\n', 'execution uses the approved per-watch directory');
+  await box.run(); assert.equal(readFileSync(join(box.root, 'watch/runs'), 'utf8'), 'run\n', 'not due means no child');
+  box.clock.time += 600_001;
+  await box.run();
+  assert.equal(store.allShouts(box.board).filter(row => row.shout_from === 'sentinel').length, 1, 'a second red run sends no duplicate notice');
+  assert.equal(store.events(box.board).filter(row => row.event_kind === 'sentinel-failure').length, 2, 'every actual red run retains its own cause receipt');
+  const report = rigorReport(store.events(box.board), { person: store.PERSON });
+  assert.equal(report.causes.find(row => row.key === 'sentinel:staging')?.occurrences, 2);
+  writeFileSync(join(box.root, 'watch/green'), 'yes'); box.clock.time += 600_001;
+  await box.run();
+  notices = store.allShouts(box.board).filter(row => row.shout_from === 'sentinel');
+  assert.equal(notices.length, 2); assert.match(notices[1].shout_text, /^Cleared: staging/u);
+  box.clock.time += 600_001; await box.run();
+  assert.equal(store.allShouts(box.board).filter(row => row.shout_from === 'sentinel').length, 2, 'staying green sends no duplicate cleared notice');
+  const listed = await box.cli(['sentinels']);
+  assert.equal(listed.code, 0, listed.error);
+  assert.equal(listed.document.sentinels[0].lastRun.green, true);
+  assert.equal(listed.document.sentinels[0].owner, box.agent);
+  assert.equal(listed.document.sentinels[0].history.length, 4);
+});
+
+test('an agent cannot approve a sentinel [A6,D3,H16]', async t => {
+  const box = fixture(t);
+  const row = store.proposeSentinel(box.board, { agentId: box.agent, row: { name: 'private-check', check: 'true', every: 'hourly', owner: 'core' } });
+  const before = exportBoard(box.board);
+  assert.throws(() => store.decideSentinel(box.board, { agentId: box.agent, channel: 'view', name: row.name, digest: row.digest, decision: 'approve' }), error => error.code === 'B26_PERSON_APPROVAL');
+  assert.deepEqual(exportBoard(box.board), before);
+  const forged = prepareEngineMove(box.board, 'decideSentinel', [{ agentId: store.PERSON, channel: 'view', name: row.name, digest: row.digest, decision: 'approve' }]);
+  for (const sender of [{ kind: 'agent', agent: box.agent, userId: 'fixture' }, { kind: 'machine', machine: 'fixture', userId: 'fixture' }]) {
+    const receipt = applyRelayMove(box.board, { ...forged, id: `forged-${sender.kind}` }, {
+      sequence: appliedSequence(box.board) + 1, at: box.clock.now().toISOString(), kind: 'move', sender });
+    assert.equal(receipt.error?.code, 'RELAY_PERSON_ONLY');
+    assert.equal(sentinels(box.board)[0].status, 'pending');
+  }
+  const key = 'CODEX_THREAD_ID'; const previous = process.env[key]; process.env[key] = 'fixture-agent';
+  try {
+    const attempt = await box.cli(['sentinel', 'approve', row.name]);
+    assert.equal(attempt.code, 1); assert.equal(attempt.document.error.code, 'B26_PERSON_CHANNEL');
+  } finally { if (previous === undefined) delete process.env[key]; else process.env[key] = previous; }
+});
+
+test('a changed command, directory or schedule loses approval and stale receipts cannot restore it [A6,H16]', async t => {
+  const box = fixture(t);
+  const definition = { name: 'daily-check', check: 'true', every: 'daily', owner: 'coordinator' };
+  const initial = store.proposeSentinel(box.board, { agentId: box.agent, row: definition });
+  store.decideSentinel(box.board, { agentId: store.PERSON, channel: 'view', name: initial.name, digest: initial.digest, decision: 'approve' });
+  for (const change of [{ check: 'false' }, { directory: 'other' }, { every: 'hourly' }, { owner: 'core' }, { timeoutMs: 500 }]) {
+    const changed = store.proposeSentinel(box.board, { agentId: box.agent, row: { ...definition, ...change } });
+    assert.notEqual(changed.digest, initial.digest); assert.equal(changed.status, 'pending');
+    const before = exportBoard(box.board);
+    assert.throws(() => store.decideSentinel(box.board, { agentId: store.PERSON, channel: 'view', name: initial.name, digest: initial.digest, decision: 'approve' }), error => error.code === 'STALE_SENTINEL');
+    assert.deepEqual(exportBoard(box.board), before);
+    assert.equal(store.beginSentinelRun(box.board, { agentId: box.agent, name: changed.name, digest: changed.digest, run: 'not-approved' }), null);
+  }
+  const current = sentinels(box.board)[0];
+  store.decideSentinel(box.board, { agentId: store.PERSON, channel: 'view', name: current.name, digest: current.digest, decision: 'decline', reason: 'Not this check' });
+  assert.equal((await box.run()).length, 0);
+  assert.equal(sentinels(box.board)[0].status, 'declined');
+});
+
+test('simultaneous observers run one child and an identical approval cannot steal its lease [A6,H16]', async t => {
+  const box = fixture(t);
+  const check = checker(box, "import {appendFileSync} from 'node:fs'; appendFileSync('count','run\\n');");
+  const row = store.proposeSentinel(box.board, { agentId: box.agent, row: { name: 'one-child', check, every: '10m', owner: 'core' } });
+  store.decideSentinel(box.board, { agentId: store.PERSON, channel: 'view', name: row.name, digest: row.digest, decision: 'approve' });
+  await Promise.all([box.run(), box.run()]);
+  assert.equal(readFileSync(join(box.root, 'count'), 'utf8'), 'run\n');
+  box.clock.time += 600_001;
+  const started = store.beginSentinelRun(box.board, { agentId: box.agent, name: row.name, digest: row.digest, run: 'claimed-run' });
+  assert.ok(started);
+  store.decideSentinel(box.board, { agentId: store.PERSON, channel: 'view', name: row.name, digest: row.digest, decision: 'approve' });
+  assert.equal(store.beginSentinelRun(box.board, { agentId: 'coordinator', name: row.name, digest: row.digest, run: 'must-not-run' }), null);
+});
+
+test('watch timeout drains its owned child group and retains only bounded final output [A6]', async t => {
+  const box = fixture(t);
+  const check = checker(box, "import {spawn} from 'node:child_process'; import {writeFileSync} from 'node:fs'; const child=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'inherit'});writeFileSync('child-pid',String(child.pid));console.log('x'.repeat(50000));console.log('final receipt');setInterval(()=>{},1000);");
+  const row = sentinelDefinition({ name: 'bounded', check, every: '10m', owner: 'coordinator', timeoutMs: 3_000 }); // budget: actual checker hang ceiling, with startup room under shared CI load.
+  const result = await executeSentinel(box.root, row);
+  assert.equal(result.green, false); assert.equal(result.timedOut, true);
+  assert.ok(result.output.length <= 16_384); assert.match(result.output, /final receipt/u);
+  const pid = Number(readFileSync(join(box.root, 'child-pid'), 'utf8'));
+  const status = runFixtureChild('/bin/ps', ['-p', String(pid), '-o', 'stat='], { encoding: 'utf8' });
+  assert.ok(status.status !== 0 || /^\s*Z/u.test(status.stdout), 'the owned descendant is gone or reaped to a non-running zombie');
+});
+
+test('a project directory symlink cannot change an approved watch into outside execution [A6]', async t => {
+  const box = fixture(t); const outside = join(box.directory, 'outside'); mkdirSync(outside);
+  symlinkSync(outside, join(box.root, 'escape'), 'dir');
+  const row = sentinelDefinition({ name: 'inside', check: 'echo must-not-run', every: 'daily', owner: 'coordinator', directory: 'escape' });
+  await assert.rejects(executeSentinel(box.root, row), error => error.code === 'BAD_SENTINEL');
+  assert.throws(() => sentinelDefinition({ ...row, directory: '../outside' }), error => error.code === 'BAD_SENTINEL');
+});
+
+test('watch receipts replay deterministically, export without execution and keep older engines unchanged [A6,H16]', async t => {
+  const box = fixture(t); const replica = store.openBoard(':memory:', box.clock); t.after(() => store.closeBoard(replica));
+  importBoard(replica, exportBoard(box.board));
+  const args = [{ agentId: box.agent, row: { name: 'replayed', check: 'false', every: '10m', owner: 'core' } }];
+  const move = prepareEngineMove(box.board, 'proposeSentinel', args);
+  const at = box.clock.now().toISOString();
+  const first = applyEngineMove(box.board, move, { sequence: 1, at });
+  const second = applyEngineMove(replica, move, { sequence: 1, at });
+  assert.deepEqual(second, first); assert.deepEqual(exportBoard(replica), exportBoard(box.board));
+  const before = exportBoard(replica);
+  assert.throws(() => applyEngineMove(replica, { ...move, engine: BOARD_SENTINEL_ENGINE - 1, id: 'old-engine' }, { sequence: 2, at }), error => error.code === 'RELAY_MOVE');
+  assert.deepEqual(exportBoard(replica), before);
+  const legacy = { event_kind: 'sentinel-failure', event_by: 'sentinel', item_id: null,
+    event_detail: JSON.stringify({ engine: BOARD_SENTINEL_ENGINE - 1, cause: 'sentinel:replayed' }) };
+  assert.deepEqual(eventCauses(legacy), []);
+  assert.equal(rigorReport([legacy, legacy], { person: store.PERSON }).causes.length, 0);
+  assert.notEqual(sentinelDigest({ ...args[0].row, every: 'daily' }), first.result.digest);
+});
+
+/** Read a real locale-stable child census without confusing failure with an empty process set. */
+function childCensus() {
+  const read = runFixtureChild('/bin/ps', ['-axo', 'pid=,ppid=,pgid=,lstart=,stat=,comm='], { encoding: 'utf8', env: { ...process.env, LC_ALL: 'C' } });
+  assert.equal(read.status, 0); const rows = parseProcessCensus(read.stdout); assert.ok(rows); return rows;
+}
+
+/** Compare the captured PID, group, start and executable before touching this fixture's child. */
+function sameChild(left, right) {
+  return left && right && left.pid === right.pid && left.pgid === right.pgid && left.started === right.started && left.processSha256 === right.processSha256;
+}
+
+test('a successful watch drains an unreferenced descendant before returning its receipt [A6]', async t => {
+  if (process.platform === 'win32') return t.skip('POSIX process-group drain');
+  const box = fixture(t);
+  const check = checker(box, "import {spawn} from 'node:child_process';import {writeFileSync} from 'node:fs';const c=spawn(process.execPath,['-e',\"setInterval(()=>{},1000)\"],{stdio:'ignore'});writeFileSync('background-pid',String(c.pid));c.unref();");
+  let owned;
+  t.after(async () => {
+    if (!owned) return;
+    for (const signal of ['SIGTERM', 'SIGKILL']) {
+      const current = childCensus().get(owned.pid);
+      if (!current || current.state.startsWith('Z')) return;
+      assert.ok(sameChild(owned, current), 'fixture cleanup requires the exact captured child identity');
+      try { process.kill(owned.pid, signal); } catch(error) { if(error.code !== 'ESRCH') throw error; }
+      const deadline = Date.now()+2_000;
+      while(Date.now()<deadline) { const child=childCensus().get(owned.pid); if(!child || child.state.startsWith('Z')) return; await new Promise(resolve=>setTimeout(resolve,25)); }
+    }
+    assert.fail('the positively owned fixture child did not drain');
+  });
+  const result = await executeSentinel(box.root, sentinelDefinition({name:'background',check,every:'hourly',owner:'coordinator'}));
+  const pid = Number(readFileSync(join(box.root, 'background-pid'), 'utf8'));
+  owned = childCensus().get(pid);
+  assert.equal(result.green, true);
+  assert.ok(!owned || owned.state.startsWith('Z'), 'a successful receipt must not precede its owned descendant shutdown');
+});
+
+test('watch receipts reject extra or contradictory fields without consuming the run lease [A6,H16]', t => {
+  const box=fixture(t);
+  const row=store.proposeSentinel(box.board,{agentId:box.agent,row:{name:'receipt',check:'true',every:'hourly',owner:'core'}});
+  store.decideSentinel(box.board,{agentId:store.PERSON,channel:'view',name:row.name,digest:row.digest,decision:'approve'});
+  store.beginSentinelRun(box.board,{agentId:box.agent,name:row.name,digest:row.digest,run:'receipt-run'});
+  const args={agentId:box.agent,name:row.name,digest:row.digest,run:'receipt-run'};
+  const good={green:true,code:0,timedOut:false,signal:null,aborted:false,durationMs:1,output:'done'};
+  for(const result of [{...good,extra:'not a receipt field'},{...good,green:false},{...good,signal:'bad signal'}, {...good,aborted:'false'}, {...good,code:-1}]) {
+    const before=exportBoard(box.board);
+    assert.throws(()=>store.finishSentinelRun(box.board,{...args,result}),error=>error.code==='BAD_SENTINEL');
+    assert.deepEqual(exportBoard(box.board),before,'invalid receipts neither write events nor consume the lease');
+  }
+  store.finishSentinelRun(box.board,{...args,result:good});
+  assert.equal(sentinels(box.board)[0].lastRun.green,true);
+});
+
+
+test('cancellation after a watch lease but before launch records no false failure [A6,H16]', async t => {
+  const box=fixture(t), controller=new AbortController();
+  const row=store.proposeSentinel(box.board,{agentId:box.agent,row:{name:'cancelled',check:'true',every:'hourly',owner:'core'}});
+  store.decideSentinel(box.board,{agentId:store.PERSON,channel:'view',name:row.name,digest:row.digest,decision:'approve'});
+  await runDueSentinels({root:box.root,board:box.board,agentId:'coordinator',ordered:box.ordered,signal:controller.signal,
+    execute:async (root,definition,options)=>{controller.abort();return executeSentinel(root,definition,options);}});
+  assert.equal(sentinels(box.board)[0].lastRun.aborted,true,'cancellation keeps its actual outcome');
+  assert.equal(store.events(box.board).filter(event=>event.event_kind==='sentinel-failure').length,0,'shutdown does not invent a Rigor failure');
+  assert.equal(store.allShouts(box.board).filter(shout=>shout.shout_from==='sentinel').length,0,'shutdown creates no failure or recovery finding');
+});
+
+test('a successful watch drains a descendant that ignores TERM before publishing its receipt [A6]', async t => {
+  if (process.platform === 'win32') return t.skip('POSIX process-group drain');
+  const box = fixture(t);
+  const childFile = join(box.root, 'stubborn-child.mjs');
+  writeFileSync(childFile, "import {writeFileSync} from 'node:fs'; process.on('SIGTERM',()=>{}); setInterval(()=>{},1000); writeFileSync('stubborn-pid',String(process.pid)); process.send('ready'); process.disconnect();");
+  const check = checker(box, `import {spawn} from 'node:child_process'; import {once} from 'node:events'; const child=spawn(process.execPath,[${JSON.stringify(childFile)}],{stdio:['ignore','ignore','ignore','ipc']}); await once(child,'message'); child.unref();`, 'stubborn-parent.mjs');
+  let owned;
+  t.after(async () => {
+    if (!owned) return;
+    for (const signal of ['SIGTERM', 'SIGKILL']) {
+      const current = childCensus().get(owned.pid);
+      if (!current || current.state.startsWith('Z')) return;
+      assert.ok(sameChild(owned, current), 'cleanup requires the captured PID, start, group and executable');
+      try { process.kill(owned.pid, signal); } catch (error) { if (error.code !== 'ESRCH') throw error; }
+      const deadline = Date.now() + 2_000; // budget: exact owned-child shutdown grace, not a speed assertion.
+      while (Date.now() < deadline) {
+        const child = childCensus().get(owned.pid);
+        if (!child || child.state.startsWith('Z')) return;
+        await new Promise(resolve => setTimeout(resolve, 25));
+      }
+    }
+    assert.fail('the positively owned stubborn fixture child did not drain');
+  });
+  const running = executeSentinel(box.root, sentinelDefinition({ name: 'stubborn', check, every: 'hourly', owner: 'coordinator', timeoutMs: 10_000 })); // budget: fixture command hang ceiling, no throughput claim.
+  void running.catch(() => {});
+  const pidFile = join(box.root, 'stubborn-pid');
+  const readyDeadline = Date.now() + 10_000; // budget: wait for the fixture's actual child-start receipt.
+  while (!existsSync(pidFile) && Date.now() < readyDeadline) await new Promise(resolve => setTimeout(resolve, 25));
+  assert.ok(existsSync(pidFile), 'the descendant installs its TERM handler before its parent exits');
+  const pid = Number(readFileSync(pidFile, 'utf8'));
+  owned = childCensus().get(pid);
+  const result = await running;
+  assert.equal(result.green, true, 'the approved parent succeeded');
+  const remaining = childCensus().get(pid);
+  assert.ok(!remaining || remaining.state.startsWith('Z'), 'no receipt precedes the stubborn descendant shutdown');
+});
+
+test('the background observer runs an approved board watch through its real resume child [A6,D3]', async t => {
+  const box = fixture(t);
+  const check = checker(box, "import {appendFileSync} from 'node:fs'; appendFileSync('background-runs','run\\n'); console.log('background receipt'); process.exit(1);");
+  const row = store.proposeSentinel(box.board, { agentId: box.agent, row: { name: 'background', check, every: '10m', owner: box.agent } });
+  let tick;
+  let cancelled = false;
+  const errors = [];
+  const timer = { unref() {} };
+  const observer = startServeSentinel({ projectRoot: box.root,
+    every: (callback, interval) => { assert.equal(interval, 600_000, 'the production cadence is unchanged'); tick = callback; return timer; },
+    cancel: actual => { assert.equal(actual, timer); cancelled = true; },
+    onError: error => errors.push(error),
+  });
+  t.after(() => observer.close());
+  await tick();
+  const runs = join(box.root, 'background-runs');
+  assert.equal(existsSync(runs), false, 'the real child cannot execute a pending proposal');
+  store.decideSentinel(box.board, { agentId: store.PERSON, channel: 'view', name: row.name, digest: row.digest, decision: 'approve' });
+  const configFile = join(box.root, 'pullboard.json');
+  const config = readFileSync(configFile, 'utf8');
+  writeFileSync(configFile, JSON.stringify({ ...JSON.parse(config), health: { sentinel: false } }));
+  await tick();
+  assert.equal(existsSync(runs), false, 'the board off switch suppresses an approved watch');
+  writeFileSync(configFile, config);
+  const settingsFile = machineSettingsFile();
+  const settings = readFileSync(settingsFile, 'utf8');
+  writeFileSync(settingsFile, JSON.stringify({ ...JSON.parse(settings), health: { sentinel: false } }));
+  await tick();
+  assert.equal(existsSync(runs), false, 'the machine off switch suppresses an approved watch');
+  writeFileSync(settingsFile, settings);
+  await tick();
+  assert.deepEqual(errors, []);
+  assert.equal(readFileSync(runs, 'utf8'), 'run\n', 'the default background callback launches the real resume child');
+  const notices = store.allShouts(box.board).filter(shout => shout.shout_text.startsWith('Sentinel failed: background'));
+  assert.equal(notices.length, 1);
+  assert.equal(notices[0].shout_to, box.agent);
+  assert.match(notices[0].shout_text, /background receipt/u);
+  await tick();
+  assert.equal(readFileSync(runs, 'utf8'), 'run\n', 'the next callback honors the recorded due time');
+  await observer.close();
+  assert.equal(cancelled, true);
+});

@@ -389,7 +389,7 @@ test('a repeated failure cause is noticed [D1,V1]', () => {
   assert.match(lines[0], /^doctrine:C3 {2}reads as work {2}never again \(the person\) {2}items #\d+$/u);
   assert.equal(lines[1], `${catalog}  reads as both  2 failures  items #${first}, #${second}`);
   assert.equal(lines[2], `refusal:UNDECLARED_REFUSAL  reads as work  2 failures  items #${third} (2 commits)`);
-  assert.equal(lines[3], '1 rejects and reopens carry no cause key; name one with --cause <key> (test:<file>::<title>, refusal:<CODE>, row:<id>, doctrine:<id>)',
+  assert.equal(lines[3], '1 rejects and reopens carry no cause key; name one with --cause <key> (test:<file>::<title>, refusal:<CODE>, row:<id>, doctrine:<id>, sentinel:<name>)',
     'rigor says how many rejects and reopens are uncaused');
   assert.equal(lines.length, 4);
 });
