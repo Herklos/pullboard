@@ -88,6 +88,34 @@ function reportCleanupTimeout() {
   process.stderr.write(`PULLBOARD_RUNNER_CLEANUP_TIMEOUT ${workerId}\n`);
 }
 
+/** Retry a drained holder's real deletion instead of abandoning its row after a transient write failure. */
+async function releaseDrainedLease(lease) {
+  let reported = false;
+  for (;;) {
+    try { lease.release(); return; }
+    catch {
+      reportCleanupTimeout();
+      if (!reported) {
+        // Parent death can close the transport before stderr arrives; retain this real failed attempt in the private job.
+        if (cleanupDirectory) {
+          try {
+            const pending = join(cleanupDirectory, 'release-pending.json');
+            const temporary = pending + '.tmp';
+            writeFileSync(temporary,
+              JSON.stringify({ id: workerId, stage: 'lease release', pending: true, observedAt: new Date().toISOString() }) + '\n', { mode: 0o600 });
+            renameSync(temporary, pending);
+          }
+          catch { /* The live retry and named cleanup timeout remain authoritative if diagnostic storage fails. */ }
+        }
+        process.stderr.write(`PULLBOARD_RUNNER_RELEASE_PENDING ${workerId}\n`);
+        reported = true;
+      }
+      // The lease and its database stay open until deletion commits; the normal cleanup budget reports a persistent failure.
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
+  }
+}
+
 /** Parse and strictly validate the controller's one-shot work specification. */
 async function readSpec() {
   let buffered = Buffer.alloc(0);
@@ -1242,7 +1270,7 @@ async function main() {
     }
     if (lease) {
       cleanupStage = 'lease release';
-      try { lease.release(); } catch { /* Retaining a lease on cleanup error is safer than speculative deletion. */ }
+      await releaseDrainedLease(lease);
     }
     cleanupStage = 'job files';
     if (runDirectory && !cleanupTimedOut) { try { rmSync(runDirectory, { recursive: true, force: true }); } catch {} }

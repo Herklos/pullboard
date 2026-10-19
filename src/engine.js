@@ -26,6 +26,7 @@ import {
   VERIFIER_STANDING_ENGINE,
   VERDICT_REVIEW_ENGINE,
   MILESTONE_RANK_ENGINE,
+  ROW_DRAFT_ENGINE,
 } from './machine.js';
 import {
   MILESTONE_SHIP_ENGINE,
@@ -54,13 +55,13 @@ export const ENGINE_OPERATIONS = Object.freeze([
   'claim', 'release', 'submit', 'reserveReview', 'reserveNextReview', 'verify', 'merged',
   'withdraw', 'refreeze', 'reopen', 'shout', 'passDecision', 'answerDecision', 'holdLane', 'releaseLane', 'holdItem', 'releaseItemHold',
   'addMilestone', 'editMilestoneItems', 'orderMilestoneItems', 'moveMilestone', 'editMilestone', 'removeMilestone', 'shipMilestone',
-  'recordRowDecisions', 'applyRowDecisions', 'appendFact',
+  'recordRowDecisions', 'applyRowDecisions', 'draftSpecRow', 'appendFact',
   'recordLandingBatch', 'recordLandingWaiver', 'recordLandingFlake', 'finishLandingBatch', 'acceptCheck',
   'recordHealthFindings',
 ]);
 
 /** Engine version at which each ordered operation first has stable replay semantics. */
-const OPERATION_ENGINE = Object.freeze({ orderMilestoneItems: MILESTONE_RANK_ENGINE, reopen: 8, recordLandingBatch: 8, recordLandingWaiver: 8, recordLandingFlake: 8, finishLandingBatch: 8, acceptCheck: CHECK_ACCEPT_ENGINE,
+const OPERATION_ENGINE = Object.freeze({ draftSpecRow: ROW_DRAFT_ENGINE, orderMilestoneItems: MILESTONE_RANK_ENGINE, reopen: 8, recordLandingBatch: 8, recordLandingWaiver: 8, recordLandingFlake: 8, finishLandingBatch: 8, acceptCheck: CHECK_ACCEPT_ENGINE,
   shipMilestone: MILESTONE_SHIP_ENGINE });
 
 /** Dependency edits, causes, sealed reviews, submission proofs, trunk conflicts, health observations and milestone targets retain distinct recorded engine meanings. */

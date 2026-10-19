@@ -103,7 +103,14 @@ import {
   withGateSlot,
 } from './gate.js';
 import { draftRow } from './spec-draft.js';
+import {
+  clashingRowDrafts,
+  pendingRowDrafts,
+  trunkRowIds,
+  withRowDrafts,
+} from './row-drafts.js';
 import { gateWaitReporter } from './gate-wait.js';
+import * as gateConfig from './gate-config.js';
 import {
   checkNeedsBrowser,
   explicitCheckFiles,
@@ -330,7 +337,7 @@ import {
   launchBackgroundView,
   reportView,
 } from './background-view.js';
-import { rigorDraft } from './rigor-draft.js';
+import { rigorDraftCommand } from './rigor-draft.js';
 import { serveApi } from './api.js';
 import { watchCommand } from './watch.js';
 import { serveMcp } from './mcp.js';
@@ -934,6 +941,17 @@ function withBoard(ctx, work) {
   if (result && typeof result.then === 'function') return result.finally(finish);
   finish();
   return result;
+}
+
+/**
+ * Reserve a new row's id on the board in one write transaction before any file names it, so writers
+ * that plan the same id at the same moment get distinct ids (#878). written: the caller writes the row
+ * into its own file now; otherwise it is a lane draft that spec apply writes. With no board yet there is
+ * no other writer, and the planned id stands.
+ */
+async function reserveRow(ctx, row, written) {
+  if (!existsSync(ctx.file)) return row;
+  return withBoard(ctx, async (board) => ordered(ctx, board, 'draftSpecRow', [{ agentId: store.agentAt(board, ctx.info.root)?.agent_id ?? whoAmI(ctx, board).id, row, written }]));
 }
 
 /** Dispatch a board mutation locally, or seal it before any linked replica applies it. */
@@ -1630,8 +1648,6 @@ function boardSetup(ctx, card, identity) {
   const quote = value => "'" + String(value).replaceAll("'", "'\\''") + "'";
   /** Quote one shell word only when it needs it, so a plain lane command reads as typed. */
   const word = value => /^[A-Za-z0-9._/-]+$/u.test(String(value)) ? String(value) : quote(value);
-  /** Preserve all existing configuration when recording one setup answer. */
-  const configure = patch => `node -e ${quote(`const fs=require('node:fs');const p='pullboard.json';const c=JSON.parse(fs.readFileSync(p,'utf8'));${patch};fs.writeFileSync(p,JSON.stringify(c,null,2)+${JSON.stringify('\n')})`)}`;
   const steps = [
     requirementStep({ rows, drafted, toApply, completed: completed && !open.some(row => row.staleDecision), hasItems: card.all.length > 0 }),
     { number: 2, done: lanes.length > 0, question: `Ask the person: how should we divide the work? Suggested folders: ${folders.join(', ') || 'app/ (create it for the app)'}.`,
@@ -1640,7 +1656,7 @@ function boardSetup(ctx, card, identity) {
       question: detectedGate
         ? `Ask the person: which command proves the build works? Suggested: ${detectedGate}.`
         : 'Ask the person: if this board has no build, use `pullboard spec check` to check its spec and practice files; a second agent review checks the actual work. Or choose a custom gate command.',
-      command: configure(`c.gate=${JSON.stringify(detectedGate || 'pullboard spec check')}`) },
+      command: gateConfig.settingCommand(ctx.info.root, detectedGate || 'pullboard spec check') },
     { number: 4, done: card.all.length > 0, question: 'Ask the person: what is the first small piece we should build?',
       command: `pullboard add ${quote(lane)} 'First small piece' --specs ${quote(approved[0]?.id ?? 'G1')} --criterion 'Describe what the person will be able to do'` },
     { number: 5, done: card.viewOpened,
@@ -2624,7 +2640,7 @@ function readCommands(io, { first, second, rest, values }) {
       return 0;
     },
     rigor: () => {
-      if (first === 'draft') return rigorDraftHere(io, { second, rest, values });
+      if (first === 'draft') { const ctx = context(io); return rigorDraftCommand(io, { second, rest, values }, { root: ctx.info.root, config: ctx.config, read: () => withBoard(ctx, (board) => ({ events: store.events(board), actor: whoAmI(ctx, board).id })), reserve: (row) => reserveRow(ctx, row, true) }); }
       if (first || second || rest.length) throw new Refused('USAGE', 'pullboard rigor takes no arguments; to draft a rule: pullboard rigor draft <key> "<rule>" --check "<command>" --red <commit> --green <commit>');
       const ctx = context(io);
       const report = withBoard(ctx, (board) => rigorReport(store.events(board), { person: store.PERSON }));
@@ -2641,28 +2657,6 @@ function readCommands(io, { first, second, rest, values }) {
       return 0;
     },
   };
-}
-
-/**
- * Draft a rule from a repeated cause (#714): prove its check red then green on real commits, then
- * write the pending row or rows through the spec draft writer. Nothing is approved or applied; the
- * person approves the rows in pullboard view or with pullboard spec approve [D1,D3,S1].
- *
- * @param {any} io
- * @param {{ second?: string, rest: string[], values: any }} args
- * @returns {Promise<number>}
- */
-async function rigorDraftHere(io, { second, rest, values }) {
-  if (rest.length > 1) throw new Refused('USAGE', 'pullboard rigor draft <key> "<rule>" --check "<command>" --red <commit> --green <commit> [--section <letter>]');
-  const ctx = context(io);
-  const { events, actor } = withBoard(ctx, (board) => ({ events: store.events(board), actor: whoAmI(ctx, board).id }));
-  const result = await rigorDraft({ root: ctx.info.root, config: ctx.config, events, person: store.PERSON, agent: actor },
-    { key: second, text: rest[0], check: values.check, red: values.red, green: values.green, section: values.section });
-  io.result?.(result);
-  io.say(`proved ${result.key}: red at ${result.proof.red.commit.slice(0, 12)} (${result.proof.red.problems} problem lines, exit ${result.proof.red.exit}), green at ${result.proof.green.commit.slice(0, 12)} (exit ${result.proof.green.exit})`);
-  for (const draft of result.drafts) io.say(`${draft.file}: ${draft.line}`);
-  io.say(`next: the person approves ${result.drafts.map((draft) => draft.id).join(' or ')} in pullboard view or with pullboard spec approve; commit ${[...new Set(result.drafts.map((draft) => draft.file))].join(' and ')}`);
-  return 0;
 }
 
 /**
@@ -2858,7 +2852,7 @@ async function addBlueprint(ctx, board, me, blueprint, { report = true, result =
   // only: nothing runs and nothing is fetched (#725).
   const plan = planBlueprint(landBlueprint(blueprint, repoAnswers(ctx.info.root)), { source, spec, doctrine: ctx.doctrine,
     existingItems: store.listItems(board, { all: true }).map((item) => ({ id: item.item_id, title: item.item_title, specIds: item.item_spec_ids ? item.item_spec_ids.split(',') : [] })),
-    gate: String(JSON.parse(configSource).gate ?? ''), drafted });
+    gate: String(JSON.parse(configSource).gate ?? ''), drafted, reserved: store.rowDrafts(board).map((draft) => draft.id) });
   for (const row of plan.rows) drafted.set(row.text, row.id);
   // Every starter is checked before anything is written, so a refusal leaves the board as it was.
   // Starters go to a build lane, never the coordinator's; a proposed lane is named, not written (#732).
@@ -2877,6 +2871,8 @@ async function addBlueprint(ctx, board, me, blueprint, { report = true, result =
       'run the same pullboard blueprint add from the main checkout, where the coordinator works');
   }
   for (const { item } of starters) store.validateItemAddition(board, item);
+  // Each new row's id is reserved on the board before SPEC.md names it; if another writer took one first, this add runs again for the next ids (#878).
+  for (const row of plan.rows) if ((await ordered(ctx, board, 'draftSpecRow', [{ agentId: me.id, row: { id: row.id, text: row.text, target: 'spec' }, written: true }])).id !== row.id) throw new Refused('ROW_ID_TAKEN', `${row.id} was just reserved by another writer; run the same pullboard blueprint add again for the next free id`);
   const files = [];
   if (plan.specRows !== source) files.push({ file: ctx.config.spec, before: source, after: plan.specRows });
   if (plan.gate) {
@@ -3978,14 +3974,19 @@ async function specCommand(io, { first, second, rest, values }) {
       withBoard(ctx, (board) => {
         if (!ctx.info.isMain || whoAmI(ctx, board).id !== COORDINATOR) throw new Refused('COORDINATOR_ONLY', 'only the coordinator proposes standing rulings; ask your coordinator to run spec draft --doctrine --source');
       });
-      const result = proposeDoctrine(ctx, values, second);
+      const planned = proposeDoctrine(ctx, values, second, { reserved: (hookRead(ctx, (board) => store.rowDrafts(board)) ?? []).map((draft) => draft.id), write: false });
+      const result = proposeDoctrine(ctx, values, second, { id: (await reserveRow(ctx, { ...planned.row, target: 'doctrine' }, true)).id });
       io.result?.(result);
       io.say(result.id);
       return 0;
     }
     if (values.source !== undefined) throw new Refused('FLAG_NOT_ALLOWED', 'spec draft --source belongs to --doctrine; use both when proposing a ruling');
     const tier = values.aim ? 'aim' : 'must';
-    const { id, row } = draftRow(ctx.info.root, ctx.config, { target: 'spec', text: second.trim(), gate: values.gate?.trim() ?? 'review', tier, section: values.section });
+    const plan = draftRow(ctx.info.root, ctx.config, { target: 'spec', text: second.trim(), gate: values.gate?.trim() ?? 'review', tier, section: values.section, write: false,
+      taken: [...(hookRead(ctx, (board) => store.rowDrafts(board)) ?? []).map((draft) => draft.id), ...(ctx.info.isMain ? [] : trunkRowIds(ctx.info.root, primaryCheckoutRoot(ctx.info), ctx.config))] });
+    // A lane cannot write SPEC.md, so its reservation is the draft, cited at once and written by spec apply; the main checkout writes its row now (#878).
+    const entry = await reserveRow(ctx, plan.row, ctx.info.isMain);
+    const { id, row } = ctx.info.isMain ? draftRow(ctx.info.root, ctx.config, { target: 'spec', text: plan.row.text, gate: plan.row.gate, tier, section: values.section, id: entry.id }) : { id: entry.id, row: entry };
     io.result?.({ id, row });
     io.say(id);
     return 0;
@@ -4037,6 +4038,10 @@ async function specCommand(io, { first, second, rest, values }) {
     return withBoard(ctx, async (board) => {
       const me = whoAmI(ctx, board);
       if (!ctx.info.isMain || me.id !== COORDINATOR) throw new Refused('COORDINATOR_ONLY', 'only the coordinator applies row decisions; ask your coordinator to run pullboard spec apply');
+      // A lane's board drafts (#878) reach SPEC.md as draft rows at their own ids; the person approves them there as before.
+      const drafted = pendingRowDrafts(loadSpec(ctx.info.root, ctx.config), store.rowDrafts(board)).map((draft) => draftRow(ctx.info.root, ctx.config, { target: 'spec', text: draft.text, gate: draft.gate, tier: draft.tier, section: /^(.*?)\d+$/u.exec(draft.id)[1], id: draft.id }));
+      drafted.forEach((row) => io.say(`${row.file}: ${row.id} drafted from a lane, for the person to approve`));
+      clashingRowDrafts(loadSpec(ctx.info.root, ctx.config), store.rowDrafts(board)).forEach((draft) => io.say(`${ctx.config.spec}: ${draft.id} holds other text, so the draft by ${draft.by} was not written; shout ${draft.by} to run pullboard spec draft again and cite the new id`));
       const plan = planRowApply(ctx.info.root, ctx.config, store.rowDecisions(board));
       writeRowApply(ctx.info.root, plan);
       let applied;
@@ -4044,7 +4049,7 @@ async function specCommand(io, { first, second, rest, values }) {
       catch (error) { restoreRowApply(ctx.info.root, plan); throw error; }
       io.result?.({ applied, files: plan.files.map((file) => file.file) });
       applied.forEach((record) => io.say(`${record.file}: ${record.id} ${record.decision === 'approve' ? 'approved' : 'wont'}${record.reason ? `: ${record.reason}` : ''}`));
-      if (!applied.length) io.say('no pending row decisions');
+      if (!applied.length && !drafted.length) io.say('no pending row decisions');
       else io.say('stage and commit the changed row files and any .pullboard/signoffs.jsonl receipts');
       return 0;
     });
@@ -4103,7 +4108,7 @@ async function specCommand(io, { first, second, rest, values }) {
       findings.forEach((finding) => messages.push(`${name}:${finding.line} ${finding.id ?? ''} ${finding.level}: ${finding.message}`.replace('  ', ' ')));
       const history = parsed === practice ? doctrineHistory(ctx.info.root, name) : committedIds(ctx.info.root, name);
       const cited = name === ctx.config.spec ? citations(ctx, history) : new Map();
-      const lost = permanenceProblems(parsed === practice ? practice.repo : parsed, { committed: history.ids, cited });
+      const lost = permanenceProblems(parsed === practice ? practice.repo : name === ctx.config.spec ? withRowDrafts(parsed, hookRead(ctx, (board) => store.rowDrafts(board))) : parsed, { committed: history.ids, cited });
       if (name === ctx.config.spec) {
         const mainRows = new Set((previousSources.get(name) ?? []).map(row => row.id));
         for (const problem of lost) {
@@ -4279,7 +4284,7 @@ async function hookCommand(io, { first, second }) {
     problems = preCommitProblems({ root: info.root, isMain: info.isMain || landing, config: ctx.config, agent, boardFile: ctx.file, preMergeHook: first === 'pre-merge-commit', onNotice: (message) => io.err(`pullboard pre-commit: warning: ${message}`) });
   } else if (first === 'commit-msg') {
     const message = readFileSync(second ?? '', 'utf8');
-    const spec = loadSpec(info.root, ctx.config);
+    const spec = withRowDrafts(loadSpec(info.root, ctx.config), hookRead(ctx, (board) => store.rowDrafts(board)));
     commitCitationWarnings(message, { spec, doctrine: ctx.doctrine })
       .forEach((warning) => io.say(`pullboard commit-msg: warning: ${warning}`));
     problems = commitMsgProblems(message, { rules: ctx.config.commits, spec, doctrine: ctx.doctrine });
@@ -4474,6 +4479,7 @@ async function runCommand(argv, io) {
     }
     if (command === 'blueprint' && first === 'starters') return startersCommand(io, { second, rest, context, withBoard });
     if (command === 'gate') {
+      if (first === 'set') return gateConfig.setHere(io, second, rest, values);
       if (first !== undefined || second !== undefined || rest.length > 0) {
         const words = [first, second, ...rest].filter((word) => word !== undefined);
         const next = 'use pullboard resources for status, or pullboard gate with no extra words to run the gate';

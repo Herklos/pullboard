@@ -115,7 +115,7 @@ test('init detects language gates and gives an example in the same ecosystem [I1
   writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
   const rerun = emptyConfigured.run('init');
   assert.equal(rerun.status, 0, rerun.stderr);
-  assert.match(rerun.stdout, /no gate yet: set "gate" in pullboard\.json to the command that proves the build/u);
+  assert.match(rerun.stdout, /no gate yet: record the command that proves the build with pullboard gate set 'npm test'/u);
   assert.doesNotMatch(rerun.stdout, /if this board has no build/u);
 });
 

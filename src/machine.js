@@ -17,11 +17,15 @@ export const WITHDRAW_MILESTONE_ENGINE = 51;
 /** First engine that automatically escalates an item's second rejection at its current route [B15]. */
 export const AUTO_ESCALATE_ENGINE = 50;
 
+/** The first engine that records a spec row a lane agent drafts on the board, not in SPEC.md (#878). */
+export const ROW_DRAFT_ENGINE = 55;
+
 /** First engine replacing an automatic ceiling escalation with a paired notice [B15,H16]. */
 export const STRONG_REJECTION_NOTICE_ENGINE = 54;
 
 /** Executable move semantics, carried by every sealed move and retained during replay [H16]. */
 export const ENGINE_VERSION = Math.max(
+  ROW_DRAFT_ENGINE,
   AUTO_ESCALATE_ENGINE,
   RIGOR_NOTICE_ENGINE,
   WITHDRAW_MILESTONE_ENGINE,
@@ -149,7 +153,7 @@ export const GUARDS = [
   { id: 'treeClean', refuse: 'DIRTY', rule: 'the worktree has no uncommitted changes', next: 'commit your changes, then submit', source: 'cli' },
   { id: 'nothingUntracked', refuse: 'UNTRACKED', rule: 'the worktree has no untracked files', next: 'commit or ignore them, then submit', source: 'cli' },
   { id: 'hasCommit', refuse: 'NO_COMMIT', rule: 'there is a commit to submit', next: 'commit your work, then submit', source: 'cli' },
-  { id: 'gateConfigured', refuse: 'NO_GATE', rule: 'the repo names a gate command', next: 'set "gate" in pullboard.json to "pullboard spec check", then commit it', source: 'cli' },
+  { id: 'gateConfigured', refuse: 'NO_GATE', rule: 'the repo names a gate command', next: 'in the main checkout, run pullboard gate set "<project test command>", then commit pullboard.json', source: 'cli' },
   { id: 'withinLane', refuse: 'OUTSIDE_LANE', alsoRefuses: [{ code: 'NO_POLICY', next: 'restore the claim base or ask the coordinator to refreeze' }, { code: 'BAD_CONFIG', next: 'restore the committed coordinator configuration' }, { code: 'GIT_GRAFTS', next: 'ask the coordinator to remove the Git graft file before retrying' }], rule: 'the full claimed diff respects committed coordinator ownership', next: 'restore foreign paths or shout their owner', source: 'cli' },
   { id: 'trunkMergeClean', refuse: 'MERGE_CONFLICT', alsoRefuses: [{ code: 'MERGE_CHECK_FAILED', next: 'use Git 2.38 or newer, restore its objects and retry' }, { code: 'NO_POLICY', next: 'restore the primary repository metadata' }, { code: 'NO_TRUNK', next: 'check out the trunk branch in the main checkout once and run pullboard inbox' }], rule: 'the candidate merges cleanly into the current primary branch without changing an index or worktree', next: 'merge the trunk into your branch, resolve conflicts, commit and resubmit', source: 'cli' },
   { id: 'noUnverifiedStack', refuse: 'STACKED_ON_UNVERIFIED', rule: "the candidate range contains no other item's unverified submitted commit", next: 'wait for that item to be accepted, or rebuild without its commits', source: 'cli' },

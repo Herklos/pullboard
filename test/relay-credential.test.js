@@ -35,6 +35,7 @@ test('every current operation selects its native actor credential without a seco
     if (operation === 'addMilestone') args = [{ agentId: actor, name: 'Credential fixture', items: [] }];
     if (['holdLane', 'releaseLane'].includes(operation)) args = [box.lane, options];
     if (operation === 'applyRowDecisions') args = [{ agentId: actor, events: [] }];
+    if (operation === 'draftSpecRow') args = [{ agentId: actor, row: { id: 'G9', text: 'A credential fixture row.', gate: 'review', tier: 'must', section: 'G · Goals' } }];
     if (operation === 'recordRowDecisions') { args = [{ agentId: 'person', channel: 'terminal', decisions: [] }]; kind = 'person'; }
     return { operation, args, kind, ...(kind === 'person' ? { sent: false } : {}) };
   });

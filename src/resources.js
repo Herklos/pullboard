@@ -766,15 +766,13 @@ export async function takeResource(options) {
           heartbeat.unref();
         };
         startHeartbeat();
-        /** Release this holder and close its SQLite handle unless ownership was transferred. */
+        /** Commit this holder's deletion before closing; a failed update remains live and retryable. */
         const release = () => {
           if (released || transferred) return;
+          update(db, () => db.prepare('DELETE FROM holder WHERE token = ?').run(token));
           released = true;
           clearInterval(heartbeat);
-          try {
-            update(db, () => db.prepare('DELETE FROM holder WHERE token = ?').run(token));
-          }
-          finally { db.close(); }
+          db.close();
         };
         /** Refresh this lease, or refuse if another process already evicted it. */
         const renew = () => {

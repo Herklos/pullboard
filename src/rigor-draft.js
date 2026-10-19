@@ -5,6 +5,7 @@
  * proof is the check run on real commits: red on the bad one, green on the fix. Nothing here
  * approves or applies a row.
  */
+import { PERSON } from './board.js';
 import { Refused } from './refused.js';
 import {
   causeProblem,
@@ -19,11 +20,14 @@ import { rigorSource } from './rigor-source.js';
  * has not repeated (pullboard rigor does not list it), the rule text is not one line, or the proof
  * does not hold. Returns the drafts with their evidence and proof.
  *
- * @param {{ root: string, config: any, events: any[], person: string }} board
+ * @param {{ root: string, config: any, events: any[], person: string, reserve?: (row: any) => Promise<{ id: string }> }} board
+ *   reserve: reserves a planned row's id on the board and returns the id to write (#878). It runs after the
+ *   proof, right before each write, so a lane draft made while a slow proof runs, or at the same moment,
+ *   keeps its own id.
  * @param {{ key: string, text: string, check?: string, red?: string, green?: string, section?: string }} request
  * @returns {Promise<{ key: string, reads: string, evidence: { items: { id: number, commits: string[] }[], occurrences: number, neverAgain: boolean }, proof: object, drafts: object[] }>}
  */
-export async function rigorDraft({ root, config, events, person, agent }, { key, text, check, red, green, section }) {
+export async function rigorDraft({ root, config, events, person, agent, reserve = async (row) => row }, { key, text, check, red, green, section }) {
   const malformed = causeProblem(key ?? '');
   if (malformed) throw malformed;
   const cause = rigorReport(events, { person }).causes.find((entry) => entry.key === key);
@@ -35,9 +39,37 @@ export async function rigorDraft({ root, config, events, person, agent }, { key,
   const why = `Why: rigor ${key.replaceAll('|', '/')} ${cause.neverAgain ? 'was marked never again by the person' : `failed on ${items}`}; red at ${proof.red.commit}, green at ${proof.green.commit}.`;
   const rowText = `${text.trim()} ${why}`;
   const source = rigorSource(cause, proof);
+  /** Plan a row, reserve its id on the board, then write it at the reserved id. */
+  const write = async (request) => {
+    const planned = draftRow(root, config, { ...request, write: false });
+    return draftRow(root, config, { ...request, id: (await reserve({ ...planned.row, target: request.target })).id });
+  };
   const drafts = [];
-  if (cause.reads !== 'product') drafts.push(draftRow(root, config, { target: 'doctrine', text: rowText, gate: `check ${proof.countCheck}`, fields: ['count: 0', `source: ${source}`], section }));
-  if (cause.reads !== 'work') drafts.push(draftRow(root, config, { target: 'spec', text: rowText, gate: proof.check, fields: [`source: ${source}`], section }));
+  if (cause.reads !== 'product') drafts.push(await write({ target: 'doctrine', text: rowText, gate: `check ${proof.countCheck}`, fields: ['count: 0', `source: ${source}`], section }));
+  if (cause.reads !== 'work') drafts.push(await write({ target: 'spec', text: rowText, gate: proof.check, fields: [`source: ${source}`], section }));
   return { key, reads: cause.reads, evidence: { items: cause.items, occurrences: cause.occurrences, neverAgain: cause.neverAgain },
     proof: { check: proof.check, red: proof.red, green: proof.green }, drafts };
+}
+
+/**
+ * pullboard rigor draft (#714): prove the check red then green on real commits, then write the pending
+ * row or rows through the spec draft writer. Nothing is approved or applied; the person approves the
+ * rows in pullboard view or with pullboard spec approve [D1,D3,S1].
+ *
+ * @param {any} io
+ * @param {{ second?: string, rest: string[], values: any }} args
+ * @param {{ root: string, config: any, read: () => { events: any[], actor: string }, reserve: (row: any) => Promise<{ id: string }> }} deps
+ *   read: the board's events and the asking agent; reserve: the CLI's board reservation.
+ * @returns {Promise<number>}
+ */
+export async function rigorDraftCommand(io, { second, rest, values }, { root, config, read, reserve }) {
+  if (rest.length > 1) throw new Refused('USAGE', 'pullboard rigor draft <key> "<rule>" --check "<command>" --red <commit> --green <commit> [--section <letter>]');
+  const { events, actor } = read();
+  const result = await rigorDraft({ root, config, events, person: PERSON, agent: actor, reserve },
+    { key: second, text: rest[0], check: values.check, red: values.red, green: values.green, section: values.section });
+  io.result?.(result);
+  io.say(`proved ${result.key}: red at ${result.proof.red.commit.slice(0, 12)} (${result.proof.red.problems} problem lines, exit ${result.proof.red.exit}), green at ${result.proof.green.commit.slice(0, 12)} (exit ${result.proof.green.exit})`);
+  for (const draft of result.drafts) io.say(`${draft.file}: ${draft.line}`);
+  io.say(`next: the person approves ${result.drafts.map((draft) => draft.id).join(' or ')} in pullboard view or with pullboard spec approve; commit ${[...new Set(result.drafts.map((draft) => draft.file))].join(' and ')}`);
+  return 0;
 }

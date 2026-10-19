@@ -54,6 +54,7 @@ import {
   outOfLane,
 } from './lanes.js';
 import { Refused } from './refused.js';
+import { missingGate } from './gate-config.js';
 
 /** Report changing machine queue state while an unattended item waits for a gate slot. */
 function gateWaitReporter(io) {
@@ -444,7 +445,7 @@ export async function runItems(io, values, deps) {
   const minutes = boundedInt(values.minutes ?? '15', 1, 240, '--minutes');
   const limit = values.items === undefined ? Infinity : boundedInt(values.items, 1, 1000, '--items');
   const waitMinutes = values.wait === undefined ? 0 : boundedInt(values.wait, 0, 240, '--wait');
-  if (!ctx.config.gate.trim()) throw new Refused('NO_GATE', 'the runner submits through the gate; set "gate" in pullboard.json first');
+  if (!ctx.config.gate.trim()) throw missingGate(ctx.info.root);
   if (!isClean(ctx.info.root) || untracked(ctx.info.root).length) {
     throw new Refused('DIRTY', 'the runner starts from a clean worktree; commit or remove your changes first');
   }
