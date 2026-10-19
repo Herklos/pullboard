@@ -107,7 +107,7 @@ export function relayScreenMarkup(name, signIn) {
     + '<div class="relay-or">or</div>'
     + '<div class="relay-box relay-agent">' + SPEECH + '<span>' + words.agent + '<small>“' + words.ask + '”</small></span><button type="button" data-copy="' + words.ask + '">Copy</button></div>'
     + '<p class="relay-small">' + words.small + '</p>'
-    + '<p class="relay-live" role="status"><i aria-hidden="true"></i>' + words.waiting + '</p>'
+    + '<p class="relay-live" role="status"><i aria-hidden="true"></i><span>' + words.waiting + '</span></p>'
     + '</div></section>';
 }
 
@@ -119,10 +119,16 @@ export function nothingShared({ paired, waitingBoards, failure }) {
 /**
  * Name the first screen the page shows, or none so the board shows. The state is the root's data-relay-screen,
  * which the stylesheet reads; clearing it gives back only the screen this transport set.
+ * A phone waiting for its first readable board keeps the actual failure or waiting reason here.
+ * @param {HTMLElement} root - The document's root element.
+ * @param {string|null} name - The first screen, or null when the board can show.
+ * @param {string} [message] - Existing transport guidance to display instead of the default waiting line.
  */
-export function showRelayScreen(root, name) {
+export function showRelayScreen(root, name, message = '') {
   if (name) root.dataset.relayScreen = name;
   else if (root.dataset.relayScreen === 'share') delete root.dataset.relayScreen;
+  const status = root.querySelector?.('#relay-screen .relay-live span');
+  if (status) status.textContent = message || RELAY_SCREEN_WORDS.share.waiting;
 }
 
 /** Copy a screen's sentence or command; a browser without the clipboard API copies from a selected field. */
