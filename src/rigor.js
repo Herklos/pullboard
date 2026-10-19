@@ -6,7 +6,7 @@
 import { COORDINATOR } from './config.js';
 import { Refused } from './refused.js';
 import { HEALTH_SENTINEL_ENGINE } from './health-receipts.js';
-import { BOARD_SENTINEL_ENGINE } from './sentinels.js';
+import { BOARD_SENTINEL_ENGINE } from './sentinel-engine.js';
 
 /** The kinds of cause key and their shapes, in the order help and refusals name them. */
 export const CAUSE_FORMS = Object.freeze(['test:<file>::<title>', 'refusal:<CODE>', 'row:<id>', 'doctrine:<id>', 'sentinel:<name>']);
