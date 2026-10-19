@@ -300,3 +300,40 @@ test('a hook names a Pullboard version mismatch instead of running old rules [C1
   assert.equal(result.status, 0, `the matching version runs: ${result.stderr}`);
   assert.match(result.stderr, /rules of 0\.9\.0 ran/u, 'the hook runs the version that installed it');
 });
+
+test('pre-push keeps its ref records when the version query reads stdin [C3,L3,I2]', () => {
+  const box = e2e.project('test ! -f RED');
+  writeFileSync(join(box.repo, 'RED'), 'this older commit is red\n');
+  box.git(box.repo, 'add', 'RED');
+  box.git(box.repo, 'commit', '-q', '-m', 'chore: create the red commit');
+  const red = box.git(box.repo, 'rev-parse', 'HEAD').trim();
+  box.git(box.repo, 'rm', '-q', 'RED');
+  box.git(box.repo, 'commit', '-q', '-m', 'chore: check out a green commit');
+  const green = box.git(box.repo, 'rev-parse', 'HEAD').trim();
+  assert.notEqual(red, green);
+  const remote = join(box.dir, 'private-remote.git');
+  box.git(box.dir, 'init', '--bare', '-q', remote);
+  box.git(box.repo, 'remote', 'add', 'private', remote);
+  const wrapper = join(box.dir, 'version-wrapper');
+  mkdirSync(wrapper);
+  /** Quote the controlled Node executable and the real fixture CLI. */
+  const quote = value => `'${value.replaceAll("'", "'\\''")}'`;
+  writeFileSync(join(wrapper, 'pullboard'), '#!/bin/sh\nif [ "$1" = --version ]; then cat > "$HOOK_VERSION_STDIN"; fi\nexec '
+    + quote(process.execPath) + ' ' + quote(e2e.BIN) + ' "$@"\n');
+  chmodSync(join(wrapper, 'pullboard'), 0o755);
+  box.env.PATH = `${wrapper}:${box.env.PATH}`;
+  box.env.HOOK_VERSION_STDIN = join(box.dir, 'version-input');
+
+  const pushed = box.tryGit(box.repo, 'push', 'private', `${red}:refs/heads/main`);
+  assert.notEqual(pushed.status, 0, `the gate on ${green} must not admit ${red}: ${pushed.stdout}${pushed.stderr}`);
+  assert.match(pushed.stderr, /is not checked out/u, pushed.stderr);
+  assert.notEqual(box.tryGit(remote, 'rev-parse', '--verify', 'refs/heads/main').status, 0,
+    'the rejected push leaves the private remote unchanged');
+  assert.equal(readFileSync(box.env.HOOK_VERSION_STDIN, 'utf8'), '', 'the version query receives EOF');
+
+  const matching = box.tryGit(box.repo, 'push', 'private', `${green}:refs/heads/main`);
+  assert.equal(matching.status, 0, matching.failure || matching.stderr || matching.stdout);
+  assert.equal(box.git(remote, 'rev-parse', 'refs/heads/main').trim(), green,
+    'the real hook still admits the checked and gated commit');
+  assert.equal(readFileSync(box.env.HOOK_VERSION_STDIN, 'utf8'), '', 'the successful push also preserves its refs');
+});
