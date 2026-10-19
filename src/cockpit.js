@@ -1750,6 +1750,7 @@ async function refresh(fresh = null) {
   if (!snapshot) follow();
   $('live').textContent = snapshot ? 'read-only snapshot' : liveLine();
   sharingReady ??= sharingInvitation();
+  transport?.didRender?.(); // The board drew: a transport holding a phone's shell may clear it; today's has no such call (#900).
 }
 
 // The local view follows the shown boards' events instead of a timer (#545): it reads the board once, waits on its
@@ -3953,7 +3954,7 @@ async function loadTransport() {
     if (typeof module.createTransport !== 'function') throw new Error('The browser transport must export createTransport({ onUpdate }).');
     const configured = await module.createTransport({
       onUpdate: () => transport ? refresh().catch((error) => { $('live').textContent = 'offline: ' + error.message; }) : Promise.resolve(),
-      onOpenBoard: openApprovedBoard,
+      onOpenBoard: openApprovedBoard, waitForRender: true, // A phone's transport keeps its shell until didRender (#899).
     });
     if (!configured || typeof configured.request !== 'function') throw new Error('The browser transport must provide request(path, body).');
     transportModule = configuredTransportModule;

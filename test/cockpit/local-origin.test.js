@@ -991,3 +991,63 @@ test('a phone never waits without a deadline at startup [N26,H5]', { timeout: 90
     finally { rmSync(profile, { recursive: true, force: true }); }
   }
 });
+
+test('the page tells its transport when the board drew, and today\'s transport needs nothing [N26,H5]', { timeout: 60_000 }, async () => { // budget: hang ceiling for two hosted loads in Chrome and one relay poll.
+  const executable = chromeExecutable();
+  assert.ok(executable, 'the render handshake check needs real Chrome');
+  const profile = mkdtempSync(join(tmpdir(), 'pullboard-render-handshake-'));
+  const relay = createRelayBrowserHandler({ authenticate: async () => ({ kind: 'session' }) });
+  // A transport that offers didRender (#899's), or today's, which has neither it nor the option; both list no boards.
+  const stand = { handshake: true };
+  const client = () => 'export function rememberPairing() { return null; }\nexport async function createTransport(options) {\n'
+    + '  window.__transportOptions = { waitForRender: options.waitForRender }; window.__drawn = 0; window.__reads = 0;\n'
+    + '  return { async request(path) { if (path === "/api/v1/boards") { window.__reads += 1; return { version: 1, boards: [], warnings: [] }; } throw new Error("no paired board"); }'
+    + (stand.handshake ? ', didRender() { window.__drawn += 1; }' : '') + ' };\n}\n';
+  let chrome, listener;
+  const failures = [];
+  try {
+    chrome = await openSnapshotChrome(executable, 'about:blank', profile);
+    listener = ({ data }) => {
+      const message = JSON.parse(String(data));
+      if (message.method !== 'Fetch.requestPaused') return;
+      const { requestId, request: asked } = message.params;
+      const address = new URL(asked.url);
+      const fulfil = (type, body, headers = []) => chrome.send('Fetch.fulfillRequest', { requestId, responseCode: 200, responseHeaders: [{ name: 'Content-Type', value: type }, { name: 'Cache-Control', value: 'no-store' }, ...headers], body: Buffer.from(body).toString('base64') });
+      (async () => {
+        if (address.origin === LOCAL) return chrome.send('Fetch.failRequest', { requestId, errorReason: 'ConnectionRefused' });
+        if (address.pathname === '/relay/client.js') return fulfil('text/javascript', client());
+        let head = {}, body = '';
+        const handled = await relay({ method: 'GET', url: address.pathname, headers: {} }, { writeHead: (status, headers) => { head = headers; }, end: (content) => { body = content ?? ''; } });
+        if (!handled) return chrome.send('Fetch.failRequest', { requestId, errorReason: 'Failed' });
+        return fulfil(head['content-type'], body, Object.entries(head).filter(([name]) => !['content-type', 'cache-control'].includes(name)).map(([name, value]) => ({ name, value: String(value) })));
+      })().catch((error) => failures.push(error.message));
+    };
+    chrome.socket.addEventListener('message', listener);
+    await chrome.send('Fetch.enable', { patterns: [{ urlPattern: HOSTED + '/*', requestStage: 'Request' }, { urlPattern: LOCAL + '/*', requestStage: 'Request' }] });
+    const drawn = "JSON.stringify({ options: window.__transportOptions ?? null, drawn: window.__drawn ?? null, live: document.getElementById('live').textContent, read: Array.isArray(data?.projects) })";
+
+    // A transport with the handshake is asked to wait for the render, hears once the first board read drew, and again
+    // after each later refresh (the relay page polls every 3 seconds).
+    await chrome.send('Page.navigate', { url: HOSTED + '/' });
+    await chrome.waitFor('window.__drawn >= 1', 15_000); // budget: hang ceiling for the first relay read and render on a loaded machine.
+    const first = JSON.parse(await chrome.stable(drawn));
+    assert.deepEqual(first.options, { waitForRender: true }, 'the page asks the transport to hold until it draws');
+    assert.equal(first.read, true, 'the board list was read and drawn');
+    await chrome.waitFor('window.__drawn >= 2', 15_000); // budget: hang ceiling for one 3-second relay poll on a loaded machine.
+
+    // Today's transport has neither: the page reads and draws the same, with no error.
+    stand.handshake = false;
+    const before = chrome.exceptions.length;
+    await chrome.send('Page.navigate', { url: HOSTED + '/' });
+    await chrome.waitFor("window.__transportOptions && Array.isArray(data?.projects) && !document.getElementById('live').textContent.startsWith('cannot reach')", 15_000); // budget: hang ceiling for the first relay read and render on a loaded machine.
+    await chrome.waitFor('window.__reads >= 2', 15_000); // budget: hang ceiling for one 3-second relay poll on a loaded machine, so a refresh ran too.
+    const today = JSON.parse(await chrome.stable(drawn));
+    assert.equal(today.drawn, 0, 'today\'s transport has no didRender, and nothing calls one');
+    assert.doesNotMatch(today.live, /cannot reach|offline/, 'the page did not fail on a transport without the handshake');
+    assert.deepEqual(chrome.exceptions.slice(before), [], 'no page exception with today\'s transport');
+    assert.deepEqual(failures, []);
+  } finally {
+    try { if (chrome) { if (listener) chrome.socket.removeEventListener('message', listener); await closeSnapshotChrome(chrome); } }
+    finally { rmSync(profile, { recursive: true, force: true }); }
+  }
+});
