@@ -48,8 +48,10 @@ export function draftSpecRow(board, { agentId, row, written = false }) {
   }
   return atomic(board, () => {
     const current = rowDrafts(board);
-    // The same proposal again, as a resumed blueprint add, keeps the id it reserved.
-    const same = current.find((draft) => draft.id === row.id && draft.text === row.text);
+    // The same writer asking again for the same definition, as a resumed blueprint add does, keeps the id
+    // it reserved; a different gate, tier, section, target or writer is another proposal and gets its own id.
+    const same = current.find((draft) => draft.id === row.id && draft.by === agentId && draft.written === Boolean(written)
+      && ['text', 'gate', 'tier', 'section'].every((key) => (draft[key] ?? '') === (row[key] ?? '')) && draft.target === (row.target ?? 'spec'));
     if (same) return same;
     const [, prefix, number] = /^(.*?)(\d+)$/u.exec(row.id);
     let next = Number(number);

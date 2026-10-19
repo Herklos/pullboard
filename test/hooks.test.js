@@ -345,6 +345,26 @@ test('a lane draft and a main-checkout draft started at the same moment keep dis
   const spec = readFileSync(join(box.repo, 'SPEC.md'), 'utf8');
   for (const { id, text } of proposals) assert.ok(spec.includes(`- ${id} [draft, must] ${text} | gate: review`), `${id} keeps its own text as a draft after apply`);
   assert.notEqual(box.run(box.web, 'spec', 'approve', proposals[0].id).code, 0, 'a lane cannot approve its own draft; the person does');
+
+  // The same headline with a different gate and tier is another proposal: each writer keeps its own definition.
+  const headline = 'A row both writers name alike';
+  const [lane, main] = await Promise.all([
+    runFixtureChildAsync(process.execPath, [cli, 'spec', 'draft', headline, '--gate', 'true', '--aim', '--json'], { cwd: box.web, env: box.env }),
+    runFixtureChildAsync(process.execPath, [cli, 'spec', 'draft', headline, '--gate', 'false', '--json'], { cwd: box.repo, env: box.env }),
+  ]);
+  assert.equal(lane.status, 0, lane.context);
+  assert.equal(main.status, 0, main.context);
+  const laneRow = JSON.parse(lane.stdout);
+  const mainRow = JSON.parse(main.stdout);
+  assert.notEqual(laneRow.id, mainRow.id, 'two definitions with one headline get two ids');
+  assert.deepEqual([laneRow.row.gate, laneRow.row.tier], ['true', 'aim'], 'the lane gets back its own definition');
+  assert.deepEqual([mainRow.row.gate, mainRow.row.tier], ['false', 'must'], 'the main checkout gets back its own definition');
+  assert.equal(box.tryGit(box.web, 'status', '--porcelain').stdout, '');
+  assert.equal(box.run(box.repo, 'spec', 'apply').code, 0);
+  const both = readFileSync(join(box.repo, 'SPEC.md'), 'utf8');
+  assert.ok(both.includes(`- ${laneRow.id} [draft, aim] ${headline} | gate: true`), 'the lane row is applied as it was asked');
+  assert.ok(both.includes(`- ${mainRow.id} [draft, must] ${headline} | gate: false`), 'the main row stays as it was written');
+  assert.notEqual(box.run(box.web, 'spec', 'approve', laneRow.id).code, 0, 'the person alone approves');
 });
 
 test('a hook names a Pullboard version mismatch instead of running old rules [C1,I2]', (t) => {
