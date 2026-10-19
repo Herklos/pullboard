@@ -424,3 +424,28 @@ test('pre-push keeps its ref records when the version query reads stdin [C3,L3,I
     'the real hook still admits the checked and gated commit');
   assert.equal(readFileSync(box.env.HOOK_VERSION_STDIN, 'utf8'), '', 'the successful push also preserves its refs');
 });
+
+for (const channel of ['stderr', 'stdout', 'matching-output']) {
+  test(`a failed ${channel} hook version probe shows its refusal before rules run [C1,C3,P3,P4]`, (t) => {
+    const box = stagedRepo(t);
+    const bin = join(box.root, '.probe-bin');
+    mkdirSync(bin);
+    const executable = join(bin, 'pullboard');
+    const refusal = 'probe refused: install Node 22.13 or newer, then retry';
+    const output = channel === 'stdout'
+      ? `printf '%s\\n' '${refusal}'`
+      : `${channel === 'matching-output' ? "printf '%s\\n' '0.9.0'; " : ''}printf '%s\\n' '${refusal}' >&2`;
+    writeFileSync(executable, `#!/bin/sh\nif [ "$1" = --version ]; then ${output}; exit 7; fi\nprintf '%s\\n' 'RULE_RAN' >&2\nexit 0\n`);
+    chmodSync(executable, 0o755);
+    const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
+    for (const hook of ['pre-commit', 'pre-merge-commit', 'commit-msg', 'pre-push']) {
+      const file = join(box.root, `try-${hook}`);
+      writeFileSync(file, hookScript(hook, '0.9.0'));
+      const result = spawnSync('/bin/sh', [file, join(box.root, 'MESSAGE')], { cwd: box.root, env, input: 'private ref records\n', encoding: 'utf8', timeout: 6000 });
+      assert.notEqual(result.status, 0, `${hook} must refuse a failed probe even if it prints the matching version`);
+      assert.ok(result.stderr.includes(refusal), `${hook} must show the probe's own refusal: ${result.stderr}`);
+      assert.doesNotMatch(result.stderr, /these hooks were installed|Run: npm i|Run: pullboard init|RULE_RAN/u, `${hook} must not invent version advice or run rules`);
+      assert.equal(result.stdout, '', `${hook} reports the refusal on stderr`);
+    }
+  });
+}
