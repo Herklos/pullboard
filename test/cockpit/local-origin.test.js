@@ -921,3 +921,73 @@ test('the local view hands its secret only to the hosted page [N26,A2]', { timeo
     await view.stop();
   }
 });
+
+test('a phone never waits without a deadline at startup [N26,H5]', { timeout: 90_000 }, async () => { // budget: hang ceiling for two hosted loads in Chrome, one waiting out the 15-second transport deadline.
+  const executable = chromeExecutable();
+  assert.ok(executable, 'the phone startup check needs real Chrome');
+  const profile = mkdtempSync(join(tmpdir(), 'pullboard-phone-startup-'));
+  const relay = createRelayBrowserHandler({ authenticate: async () => ({ kind: 'session' }) });
+  // The relay client fails at once (fail) or never answers (stall); this computer's view is counted and refused.
+  const stand = { client: 'fail', local: 0, held: [] };
+  let chrome, listener;
+  const failures = [];
+  try {
+    chrome = await openSnapshotChrome(executable, 'about:blank', profile);
+    listener = ({ data }) => {
+      const message = JSON.parse(String(data));
+      if (message.method !== 'Fetch.requestPaused') return;
+      const { requestId, request: asked } = message.params;
+      const address = new URL(asked.url);
+      (async () => {
+        if (address.origin === LOCAL) { stand.local += 1; return chrome.send('Fetch.failRequest', { requestId, errorReason: 'ConnectionRefused' }); }
+        if (address.pathname === '/relay/client.js') {
+          if (stand.client === 'stall') { stand.held.push(requestId); return; }
+          return chrome.send('Fetch.fulfillRequest', { requestId, responseCode: 500, responseHeaders: [{ name: 'Content-Type', value: 'text/plain' }], body: '' });
+        }
+        let head = {}, body = '';
+        const handled = await relay({ method: 'GET', url: address.pathname, headers: {} }, { writeHead: (status, headers) => { head = headers; }, end: (content) => { body = content ?? ''; } });
+        if (!handled) return chrome.send('Fetch.failRequest', { requestId, errorReason: 'Failed' });
+        return chrome.send('Fetch.fulfillRequest', { requestId, responseCode: 200, responseHeaders: Object.entries(head).map(([name, value]) => ({ name, value: String(value) })), body: Buffer.from(body).toString('base64') });
+      })().catch((error) => failures.push(error.message));
+    };
+    chrome.socket.addEventListener('message', listener);
+    await chrome.send('Fetch.enable', { patterns: [{ urlPattern: HOSTED + '/*', requestStage: 'Request' }, { urlPattern: LOCAL + '/*', requestStage: 'Request' }] });
+    // A phone, as the relay's page tells it (a coarse pointer and no hover), whose local-network permission asks are counted.
+    await chrome.send('Page.addScriptToEvaluateOnNewDocument', { source: `(() => {
+      if (location.origin !== ${JSON.stringify(HOSTED)}) return;
+      const media = window.matchMedia.bind(window);
+      window.matchMedia = (query) => /pointer: coarse|hover: none/.test(query) ? { matches: true, media: query, addEventListener() {}, removeEventListener() {} } : media(query);
+      window.__permissionQueries = 0;
+      const query = navigator.permissions.query.bind(navigator.permissions);
+      navigator.permissions.query = (asked) => { window.__permissionQueries += 1; return query(asked); };
+    })()` });
+    const shell = `JSON.stringify({ device: document.documentElement.dataset.relayDevice, screen: document.documentElement.dataset.relayScreen,
+      line: document.querySelector('#relay-screen .relay-live span')?.textContent ?? null,
+      shown: (document.getElementById('relay-screen')?.getClientRects().length ?? 0) > 0, queries: window.__permissionQueries })`;
+
+    // A relay client that fails to load says so in the phone shell, and the page never looked for this computer.
+    await chrome.send('Page.navigate', { url: HOSTED + '/' });
+    await chrome.waitFor("document.querySelector('#relay-screen .relay-live span')?.textContent.includes('Check your connection')", 10_000); // budget: a failed import shows its guidance at once; ceiling for a loaded machine.
+    const failed = JSON.parse(await chrome.stable(shell));
+    assert.equal(failed.device, 'phone', 'the relay page took this browser for a phone');
+    assert.equal(failed.shown, true, 'the phone shell stays on screen');
+    assert.match(failed.line, /Failed to fetch dynamically imported module/, 'the shell names the failed load');
+    assert.equal(failed.queries, 0, 'a phone never asks for local-network permission');
+    assert.equal(stand.local, 0, 'a phone never requests this computer\'s view');
+
+    // A relay client that never answers is bounded: the phone shell says so once its 15-second deadline passes, and
+    // only that deadline writes this line, so it is the deadline that ended the wait.
+    stand.client = 'stall';
+    await chrome.send('Page.navigate', { url: HOSTED + '/' });
+    await chrome.waitFor("document.querySelector('#relay-screen .relay-live span')?.textContent.includes('did not load within 15 seconds')", 30_000); // budget: the page's 15-second import deadline plus a load ceiling.
+    const stalled = JSON.parse(await chrome.stable(shell));
+    assert.equal(stalled.shown, true, 'the phone shell stays on screen while the client never answers');
+    assert.equal(stalled.queries, 0);
+    assert.equal(stand.local, 0);
+    assert.ok(stand.held.length > 0, 'the stalled client request really was held');
+    assert.deepEqual(failures, []);
+  } finally {
+    try { if (chrome) { if (listener) chrome.socket.removeEventListener('message', listener); await closeSnapshotChrome(chrome); } }
+    finally { rmSync(profile, { recursive: true, force: true }); }
+  }
+});
