@@ -14,6 +14,7 @@ import {
   MILESTONE_SHIP_ENGINE,
   WITHDRAW_MILESTONE_ENGINE,
 } from '../src/milestones.js';
+import { BOARD_SENTINEL_ENGINE } from '../src/sentinels.js';
 import { RIGOR_NOTICE_ENGINE } from '../src/rigor-source.js';
 import { HEALTH_SENTINEL_ENGINE } from '../src/health-receipts.js';
 import { CONFLICT_ENGINE } from '../src/trunk-conflict.js';
@@ -36,6 +37,8 @@ test('model declarations and event snapshots retain all supported engine semanti
   assert.ok(ENGINE_VERSION >= VERIFIER_STANDING_ENGINE, 'the current writer retains verifier standing');
   assert.ok(ENGINE_VERSION >= RIGOR_NOTICE_ENGINE, 'the next writer preserves every historical model snapshot through main engine 33');
   assert.ok(ENGINE_VERSION >= HEALTH_SENTINEL_ENGINE, 'the current writer retains the sentinel minimum and historical behavior');
+  assert.equal(BOARD_SENTINEL_ENGINE, 56, 'board watches retain their allocated feature engine');
+  assert.ok(ENGINE_VERSION >= BOARD_SENTINEL_ENGINE, 'the current writer retains board-watch semantics');
   for (const version of Array.from({ length: ENGINE_VERSION }, (_, index) => index + 1)) {
     const board = store.openBoard(':memory:');
     t.after(() => store.closeBoard(board));

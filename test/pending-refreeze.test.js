@@ -18,6 +18,7 @@ import {
   MILESTONE_SHIP_ENGINE,
   WITHDRAW_MILESTONE_ENGINE,
 } from '../src/milestones.js';
+import { BOARD_SENTINEL_ENGINE } from '../src/sentinels.js';
 import { RIGOR_NOTICE_ENGINE } from '../src/rigor-source.js';
 import { HEALTH_SENTINEL_ENGINE } from '../src/health-receipts.js';
 import { CONFLICT_ENGINE } from '../src/trunk-conflict.js';
@@ -286,6 +287,8 @@ test('dependency edits replay the same on every engine [B3,V2,H16]', async (t) =
   assert.ok(ENGINE_VERSION >= VERIFIER_STANDING_ENGINE, 'the current writer retains verifier standing');
   assert.ok(ENGINE_VERSION >= RIGOR_NOTICE_ENGINE, 'the next writer retains all recorded dependency-edit behavior');
   assert.ok(ENGINE_VERSION >= HEALTH_SENTINEL_ENGINE, 'the current writer retains the sentinel minimum and historical behavior');
+  assert.equal(BOARD_SENTINEL_ENGINE, 56, 'board watches retain their allocated feature engine');
+  assert.ok(ENGINE_VERSION >= BOARD_SENTINEL_ENGINE, 'the current writer retains board-watch semantics');
   const directory = mkdtempSync(join(tmpdir(), 'pullboard-dependency-engines-'));
   const cleanup = [];
   t.after(() => {
