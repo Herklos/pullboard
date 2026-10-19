@@ -80,6 +80,15 @@ async function writeIndex(children, context) {
   return writePage(0, new TextEncoder().encode(JSON.stringify(references)), references, length, context);
 }
 
+/** Seal a bounded typed directory whose encrypted references also bind the relay's opaque reachability edges. */
+export async function writeSealedDescriptor(value, rawLinks, context) {
+  if (!Array.isArray(rawLinks) || rawLinks.length > PAGE_FANOUT) throw invalid();
+  const links = rawLinks.map(pageReference);
+  let body;
+  try { body = new TextEncoder().encode(JSON.stringify({ value, links })); } catch { throw invalid(); }
+  return writePage(2, body, links, body.byteLength, context);
+}
+
 /**
  * Seal JSON as a stream of bounded objects and bounded-fanout indexes, with no aggregate transport size cap.
  * The supplied value is already materialized by its caller; this does not promise constant memory for building that value.
@@ -119,8 +128,8 @@ export async function writeSealedValue(value, context) {
 }
 
 /** Authenticate, bound inflation and parse a single object before interpreting its references. */
-async function readPage(reference, context) {
-  const received = await context.get(reference.id);
+async function readPage(reference, context, parents = []) {
+  const received = await context.get(reference.id, parents);
   if (!(received instanceof Uint8Array) || received.byteLength > PAGE_CIPHER_BYTES || await pageDigest(received) !== reference.id) throw invalid();
   const compressed = await unseal(context.key, received, { boardId: context.boardId, kind: 'snapshot', sequence: reference.sequence });
   const plain = await transformed(compressed, false, PAGE_BYTES + PREFIX.byteLength + 1);
@@ -130,6 +139,13 @@ async function readPage(reference, context) {
   if (kind === 1) {
     if (body.byteLength !== reference.bytes) throw invalid();
     return { body };
+  }
+  if (kind === 2) {
+    if (body.byteLength !== reference.bytes) throw invalid();
+    let descriptor;
+    try { descriptor = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(body)); } catch { throw invalid(); }
+    if (!descriptor || !Object.hasOwn(descriptor, 'value') || !Array.isArray(descriptor.links) || descriptor.links.length > PAGE_FANOUT) throw invalid();
+    return { descriptor: { value: descriptor.value, links: descriptor.links.map(pageReference) } };
   }
   if (kind !== 0) throw invalid();
   let children;
@@ -150,16 +166,24 @@ export async function* readSealedBytes(rawReference, context, { maxBytes = Numbe
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 0 || root.bytes > maxBytes || typeof context?.get !== 'function') throw invalid();
   const ancestors = new Set();
   /** Walk in authenticated byte order, without requesting later siblings before they are consumed. */
-  async function* walk(reference, depth) {
+  async function* walk(reference, depth, parents) {
     if (depth >= MAX_DEPTH || ancestors.has(reference.id)) throw invalid();
     ancestors.add(reference.id);
     try {
-      const page = await readPage(reference, context);
+      const page = await readPage(reference, context, parents);
       if (page.body) yield page.body;
-      else for (const child of page.children) yield* walk(child, depth + 1);
+      else if (page.children) for (const child of page.children) yield* walk(child, depth + 1, [...parents, reference.id]);
+      else throw invalid();
     } finally { ancestors.delete(reference.id); }
   }
-  yield* walk(root, 0);
+  yield* walk(root, 0, context.parents ?? []);
+}
+
+/** Read a selected authenticated directory without traversing any of its unrelated children. */
+export async function readSealedDescriptor(reference, context) {
+  const page = await readPage(pageReference(reference), context, context.parents ?? []);
+  if (!page.descriptor) throw invalid();
+  return page.descriptor;
 }
 
 /** Read one selected JSON value; unrelated history values are neither fetched nor decrypted here. */

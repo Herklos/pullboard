@@ -9,9 +9,11 @@ import {
   PAGE_CIPHER_BYTES,
   PAGE_FANOUT,
   pageDigest,
+  readSealedDescriptor,
   readSealedBytes,
   readSealedValue,
   writeSealedValue,
+  writeSealedDescriptor,
 } from '../src/sealed-pages.js';
 
 /** Retain only synthetic encrypted objects, with a distinct private reuse cache and observable reads. */
@@ -19,6 +21,7 @@ async function storage() {
   const objects = new Map();
   const fingerprints = new Map();
   const requested = [];
+  const paths = [];
   const key = await generateBoardKey();
   const context = {
     key, boardId: 'a'.repeat(32), sequence: 7,
@@ -30,8 +33,9 @@ async function storage() {
       objects.set(object.id, { ...object, bytes: Uint8Array.from(object.bytes) });
     },
     /** Count reads without returning device cache metadata. */
-    get(id) {
+    get(id, parents = []) {
       requested.push(id);
+      paths.push([...parents, id]);
       const found = objects.get(id);
       if (!found) throw new Error('Synthetic encrypted object is absent.');
       return found.bytes;
@@ -41,7 +45,7 @@ async function storage() {
     /** The fingerprint is deliberately absent from every uploaded object. */
     remember(fingerprint, reference) { fingerprints.set(fingerprint, reference); },
   };
-  return { objects, requested, context };
+  return { objects, requested, paths, context };
 }
 
 test('sealed JSON exceeds one full index while every uploaded object stays bounded [H15,H17]', async () => {
@@ -101,4 +105,20 @@ test('an authenticated gzip bomb refuses before a complete oversized page is all
   const id = await pageDigest(bytes);
   box.objects.set(id, { bytes });
   await assert.rejects(readSealedValue({ id, sequence: 7, bytes: PAGE_BYTES + 1 }, box.context), { code: 'SNAPSHOT_PAGE_FORMAT' });
+});
+
+test('a sealed directory exposes only its selected child and carries its pinned-root path [H15,H17]', async () => {
+  const box = await storage();
+  const selected = await writeSealedValue({ marker: 'SELECTED_ENCRYPTED_HISTORY_VALUE' }, box.context);
+  const unrelated = await writeSealedValue({ marker: 'UNRELATED_ENCRYPTED_HISTORY_VALUE' }, box.context);
+  const root = await writeSealedDescriptor({ selected, unrelated }, [selected, unrelated], box.context);
+  box.requested.length = 0;
+  const directory = await readSealedDescriptor(root, box.context);
+  assert.deepEqual(directory.links, [selected, unrelated]);
+  assert.deepEqual(box.requested, [root.id], 'reading the directory does not fetch its history');
+  const value = await readSealedValue(directory.value.selected, { ...box.context, parents: [root.id] });
+  assert.equal(value.marker, 'SELECTED_ENCRYPTED_HISTORY_VALUE');
+  assert.deepEqual(box.paths.at(-1), [root.id, selected.id]);
+  assert.ok(!box.requested.includes(unrelated.id));
+  assert.deepEqual(box.objects.get(root.id).children, [selected.id, unrelated.id]);
 });
