@@ -7,14 +7,15 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { test } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
+import { pathToFileURL } from 'node:url';
 import * as store from '../src/board.js';
 import { main } from '../src/cli.js';
 import { boardHealth } from '../src/health.js';
 import { JSON_SHAPES } from '../src/json.js';
-import { runFixtureGit } from './fixture-child.js';
+import { runFixtureChild, runFixtureGit } from './fixture-child.js';
 
 const HOUR = 3_600_000;
 const NOW = Date.parse('2026-10-17T12:00:00.000Z');
@@ -276,4 +277,25 @@ test('health on a healthy board says nothing is stuck [A6]', async (t) => {
   assert.deepEqual(report.stuck, [], `a moving board has nothing stuck: ${report.stuck.map((entry) => entry.key).join(', ')}`);
   assert.equal((await cli(box.root, ['health'])).stdout, 'nothing is stuck\n');
   assert.deepEqual(boardDigest(box.file), before, 'health changes nothing on a healthy board');
+});
+
+test('item history survives garbage collection mid-read [A6]', () => {
+  // A stand-in database whose statement lives only while something references it, as node:sqlite's
+  // does on Node 22.13, with garbage collection forced while the history is read (#874).
+  const health = pathToFileURL(resolve(import.meta.dirname, '../src/health.js')).href;
+  const script = `
+    import { DatabaseSync } from 'node:sqlite';
+    import { itemHistory } from ${JSON.stringify(health)};
+    const real = new DatabaseSync(':memory:');
+    real.exec('CREATE TABLE event (event_id INTEGER PRIMARY KEY, event_at TEXT, event_by TEXT, event_kind TEXT, item_id INTEGER, event_detail TEXT)');
+    const insert = real.prepare('INSERT INTO event (event_at, event_by, event_kind, item_id, event_detail) VALUES (?, ?, ?, ?, ?)');
+    for (let i = 0; i < 20000; i += 1) insert.run('2026-10-18T00:00:00.000Z', 'agent', i % 3 ? 'claim' : 'submit', i % 50, '{}');
+    // Defined outside any scope that holds the statement, so only the code under test can keep it alive.
+    const collecting = (rows) => { let read = 0; return { [Symbol.iterator]() { return this; }, next() { read += 1; if (read % 500 === 0) globalThis.gc(); return rows.next(); } }; };
+    const db = { prepare: (sql) => { const statement = real.prepare(sql); return { iterate: () => collecting(statement.iterate()) }; } };
+    process.stdout.write(String(itemHistory(db).size));
+  `;
+  const child = runFixtureChild(process.execPath, ['--expose-gc', '--no-warnings', '--input-type=module', '-e', script], { encoding: 'utf8' });
+  assert.equal(child.status, 0, `reading item history must not lose its statement to garbage collection: ${child.stderr}`);
+  assert.equal(child.stdout, '50', 'every item with events has a history entry');
 });

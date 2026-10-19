@@ -693,7 +693,12 @@ export function hookScript(hook, version = installerVersion()) {
     '  bin="$1"; scope="$2"',
     // Shell builtins only, so a hook works on a PATH that has no tail or sed: keep the last line of --version.
     // The probe gets EOF; the delegated pre-push hook must receive Git's original ref records.
-    '  nl=$(printf \'\\n_\'); nl=${nl%_}; have=$("$bin" --version </dev/null 2>/dev/null); have=${have##*"$nl"}',
+    // A failed probe already explains its refusal on stderr; preserve stdout refusals too, without guessing a version.
+    '  have=$("$bin" --version </dev/null) || {',
+    '    [ -z "$have" ] || printf \'%s\\n\' "$have" >&2',
+    '    exit 1',
+    '  }',
+    '  nl=$(printf \'\\n_\'); nl=${nl%_}; have=${have##*"$nl"}',
     '  if [ "$have" != "$want" ]; then',
     '    newer=$(node -e \'const [a,b]=process.argv.slice(1).map(v=>String(v).split(".").map(n=>parseInt(n,10)||0));for(let i=0;i<3;i++)if(a[i]!==b[i]){process.stdout.write(a[i]>b[i]?"yes":"no");process.exit(0)}process.stdout.write("no")\' "$have" "$want" 2>/dev/null)',
     '    if [ "$newer" = yes ]; then fix="pullboard init"; else fix="npm i $scope pullboard@$want"; fi',
