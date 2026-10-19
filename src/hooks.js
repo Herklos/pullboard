@@ -659,8 +659,12 @@ export function pushesTrunk(refsText, trunk) {
   });
 }
 
-/** The Pullboard version that writes the hooks, read once from the package it ships in. */
-const INSTALLER_VERSION = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
+let cachedInstallerVersion;
+
+/** Read installer metadata only when generating a hook, so importing board helpers needs no package. */
+function installerVersion() {
+  return cachedInstallerVersion ??= JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
+}
 
 /**
  * The shell script for one hook: it runs pullboard from this checkout's install, else the main
@@ -676,7 +680,7 @@ const INSTALLER_VERSION = JSON.parse(readFileSync(new URL('../package.json', imp
  * @param {string} [version] The installing version; tests pass their own.
  * @returns {string}
  */
-export function hookScript(hook, version = INSTALLER_VERSION) {
+export function hookScript(hook, version = installerVersion()) {
   const args = hook === 'commit-msg' ? ' "$message"' : '';
   return [
     '#!/bin/sh',
