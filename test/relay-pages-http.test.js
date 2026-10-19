@@ -137,6 +137,11 @@ test('an account quota refusal preserves the readable head and is named in phone
   assert.equal((await box.read(head.document.state)).marker, 'readable before quota');
   const boards = await box.call('GET', '/api/v1/boards');
   assert.ok(boards.document.warnings.some(warning => warning.board === BOARD && warning.code === 'ACCOUNT_STORAGE_LIMIT'));
+  const legacy = Buffer.from(await seal(box.key, randomBytes(8_000), { boardId: OTHER, kind: 'snapshot', sequence: 0 })).toString('base64url');
+  const oldQuota = await box.call('PUT', '/api/v1/boards/' + OTHER + '/state', { sequence: 0, sealed: legacy });
+  assert.equal(oldQuota.status, 507);
+  assert.equal(oldQuota.document.error.code, 'ACCOUNT_STORAGE_LIMIT');
+  assert.equal(oldQuota.document.error.storage.account.id, box.signed.user.id, 'legacy clients receive the same authenticated quota identity and totals');
   assert.equal((await box.call('POST', '/api/v2/boards/' + BOARD + '/uploads', { sequence: 0, account: 'another-account' })).document.error.code, 'BAD_REQUEST');
   assert.equal((await box.call('DELETE', '/api/v1/boards/' + BOARD)).status, 200);
   await box.auth.linkBoard(box.signed.token, BOARD, 'fixture/repository');

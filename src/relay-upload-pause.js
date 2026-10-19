@@ -3,6 +3,7 @@ import { createRelayPageCache, snapshotSourceId } from './relay-page-cache.js';
 import { relayStorage } from './relay-storage.js';
 import { agentSessionDigest } from './person.js';
 import { Refused } from './refused.js';
+import { legacyPageRoute } from './relay-page-support.js';
 
 /** Classify a durable transport limit without trusting arbitrary relay text as executable advice. */
 export function uploadPauseType(pause) {
@@ -27,7 +28,7 @@ export async function uploadRetryReady(state, pause, request) {
       if (ready) state.snapshotApiVersion = 2;
       return ready;
     }
-    catch (error) { if (error.httpStatus === 404 && error.relayVersion === 1) return false; throw error; }
+    catch (error) { if (legacyPageRoute(error)) return false; throw error; }
   }
   const result = await request('/api/v2/boards/' + state.board + '/storage');
   const storage = relayStorage(result.storage);

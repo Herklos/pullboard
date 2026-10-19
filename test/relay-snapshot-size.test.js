@@ -12,6 +12,7 @@ import { presentationDigest, relaySnapshot } from '../src/relay-presentation.js'
 import { relayClientFixture } from './relay-client-fixture.js';
 import { findChromeExecutable, startChrome } from './relay-browser-fixture.js';
 import { readSealedDescriptor } from '../src/sealed-pages.js';
+import { openPagedSnapshot } from '../src/relay-page-layout.js';
 
 const RELAY_LIMIT = 10_000_000;
 const BODY_LIMIT = 14_000_000;
@@ -50,6 +51,7 @@ test('a large board syncs to the relay compressed [H5,H15,H17]', {
   skip: !findChromeExecutable() && 'Chrome is not installed',
 }, async t => {
   const box = await relayClientFixture(t);
+  box.legacySnapshotApi(); // This case explicitly preserves an older relay's whole-snapshot interface.
   await box.link();
 
   // Pair a second native CLI while the board is small; it must later restore the relay snapshot.
@@ -356,4 +358,39 @@ test('thirty thousand events open on the phone within three seconds and stream a
     const screenshot = await chrome.send('Page.captureScreenshot', { format: 'png' });
     writeFileSync(join(output, 'oldest-shout-phone.png'), Buffer.from(screenshot.data, 'base64'), { mode: 0o600 });
   }
+});
+
+
+test('large compressible history uses bounded pages even when its whole encrypted snapshot fits the old wire cap [H15,H17]', async t => {
+  const box = await relayClientFixture(t);
+  await box.link();
+  const board = store.openBoard(join(box.root, '.git/pullboard/board.sqlite'));
+  try {
+    store.atomic(board, () => {
+      for (let index = 0; index < 4_000; index++) store.shout(board, {
+        from: 'coordinator', to: 'all', lanes: [box.lane], text: 'Retained compressible history ' + index + ' ' + 'q'.repeat(1_000),
+      });
+    });
+  } finally { store.closeBoard(board); }
+  const before = relaySnapshot(box.root);
+  const raw = Buffer.from(JSON.stringify(before));
+  assert.ok(raw.byteLength > 1_000_000);
+  const compressedBytes = gzipSync(raw).byteLength;
+  assert.ok(compressedBytes < RELAY_LIMIT, 'a whole encrypted carrier fits the old wire cap despite a large phone decode');
+  t.diagnostic(JSON.stringify({ nativeBytes: raw.byteLength, compressedBytes }));
+  assert.equal((await box.cli('status')).code, 0);
+  const link = JSON.parse(readFileSync(box.linkFile, 'utf8'));
+  assert.equal(link.snapshotApiVersion, 2, 'large retained plaintext needs paging even when its encrypted carrier compresses well');
+  const response = await fetch(box.origin + '/api/v2/boards/' + link.board + '/state', {
+    headers: { authorization: 'Bearer ' + link.token, 'x-pullboard-engine': String(ENGINE_VERSION) },
+  });
+  const head = (await response.json()).state;
+  const key = decodeBoardKey(readFileSync(box.keyFile, 'utf8').trim());
+  const context = pagedReadContext(box, link, head, key);
+  const root = await readSealedDescriptor(head.root, context);
+  assert.ok(root.links[0].bytes < 1_000_000);
+  const page = await openPagedSnapshot(head.root, context, { maxEngine: ENGINE_VERSION });
+  const restored = await page.native();
+  const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+  assert.equal(hash(restored.tables), hash(before.tables), 'paged encoding retains all compressible history too');
 });

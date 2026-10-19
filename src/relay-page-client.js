@@ -1,5 +1,6 @@
 /** Native bounded snapshot upload/resume and complete restore; no private cache fingerprint crosses HTTP [H15,H17]. */
 import { Refused } from './refused.js';
+import { legacyPageRoute } from './relay-page-support.js';
 import { relayStorage } from './relay-storage.js';
 export { relayStorage, relayStorageLine } from './relay-storage.js';
 import { createRelayPageCache, snapshotSourceId } from './relay-page-cache.js';
@@ -118,7 +119,7 @@ export async function pagedSnapshotRequest(state, options, { request, key, decod
   } finally { cache.close(); }
 }
 
-/** Negotiate bounded snapshots only when needed; small legacy heads keep their existing wire interface. */
+/** New supported writes use complete paged history at every board size; legacy reads and old relays stay supported. */
 export async function relaySnapshotRequest(state, path, options = {}, io, hooks) {
   const snapshot = path === '/api/v1/boards/' + state.board + '/state' && ['GET', 'PUT'].includes(options.method ?? 'GET');
   /** Probe the configured relay once per command without downgrading a board already known to use pages. */
@@ -128,7 +129,10 @@ export async function relaySnapshotRequest(state, path, options = {}, io, hooks)
     if (!origins) { origins = new Map(); PAGE_CAPABILITIES.set(owner, origins); }
     if (!origins.has(state.url)) origins.set(state.url, (async () => {
       try { return (await hooks.raw('/api/v2', {})).apiVersion === 2; }
-      catch (error) { if (error.httpStatus === 404 && error.relayVersion === 1) return false; throw error; }
+      catch (error) {
+        if (legacyPageRoute(error)) return false;
+        throw error;
+      }
     })());
     const supported = await origins.get(state.url);
     if (!supported && state.snapshotApiVersion === 2) throw new Refused('RELAY_API_VERSION', 'This board requires relay API version 2. Upgrade the configured relay before syncing.');
@@ -152,8 +156,7 @@ export async function relaySnapshotRequest(state, path, options = {}, io, hooks)
       hooks.persist();
     }
   }
-  const oversized = options.method === 'PUT' && typeof options.body?.sealed === 'string' && options.body.sealed.length > Math.floor(hooks.legacyLimit * 4 / 3);
-  if (snapshot && (state.snapshotApiVersion === 2 || oversized) && await supportsPages()) return paged();
+  if (snapshot && (state.snapshotApiVersion === 2 || options.method === 'PUT') && await supportsPages()) return paged();
   try { return await hooks.raw(path, options); }
   catch (error) {
     const storage = relayStorage(error.storage);

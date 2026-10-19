@@ -165,8 +165,10 @@ keeps the head cursor, so the next move never reuses an earlier sequence.
 
 Upgrade the relay before linking a board larger than the legacy cap. `GET /api/v2`
 advertises `apiVersion: 2`, `snapshot: "sealed-pages"` and the per-object bounds.
-A new CLI preserves legacy reads and small legacy uploads, then negotiates API2
-for a large upload or an existing paged head. Once paged, a board cannot silently
+A new CLI preserves legacy reads and uses API2 for every new snapshot write
+when the relay supports it. Small boards use the same complete-history transport;
+a tiny compressed carrier cannot bypass the bounded phone boot. Old relays keep
+their original snapshot interface. Once paged, a board cannot silently
 downgrade. An older API1 reader receives `RELAY_API_VERSION` and
 `npm i -g pullboard@latest`; it never receives an incomplete legacy snapshot.
 This transport does not change the executable move engine or seal envelope.

@@ -27,7 +27,7 @@ async function pausedCrypto(box) {
 
 test('a size-paused baseline keeps its cipher, warns once per session and resumes with all local moves after API2 [H15,H17]', async t => {
   const box = await relayClientFixture(t);
-  box.legacySnapshotApi();
+  box.legacySnapshotApi('bad-route');
   box.rejectSnapshots({ status: 400, code: 'BAD_REQUEST', message: 'the body exceeds 14000000 bytes; send a smaller snapshot' });
   const linked = await box.link();
   assert.equal((linked.document.diagnostics ?? []).filter(line => /relay paused/u.test(line)).length, 1);
@@ -91,12 +91,22 @@ test('quota-paused checkpoints keep exact pending bytes, permit ordered moves an
   assert.equal((await box.cli('shout', 'all', 'ordered move while checkpoint quota is paused')).code, 0);
   assert.deepEqual(box.moveAcks.map(row => row.event_id), [1]);
   assert.equal(state(box).checkpoint.sealed === saved.checkpoint.sealed, true);
+  assert.equal(saved.snapshotApiVersion, 2, 'the native quota refusal occurred during a real bounded-page upload');
+  const staged = await box.script(`
+    const { createRelayPageCache, snapshotSourceId } = await import(${JSON.stringify(new URL('../src/relay-page-cache.js', import.meta.url).href)});
+    const { readFileSync } = await import('node:fs');
+    const link = JSON.parse(readFileSync(${JSON.stringify(box.linkFile)}, 'utf8'));
+    const cache = createRelayPageCache(link);
+    try { console.log(JSON.stringify({ root: cache.job(snapshotSourceId(link.checkpoint.sealed)).reference.id })); }
+    finally { cache.close(); }
+  `);
+  assert.equal(staged.code, 0);
   const priorWrites = box.transit.length;
   box.setStorageQuota(3_000_000);
   assert.equal((await box.cli('status')).code, 0);
-  const attempts = box.transit.slice(priorWrites).filter(row => row.method === 'PUT' && row.path.endsWith('/state'));
+  const attempts = box.transit.slice(priorWrites).filter(row => row.method === 'POST' && row.path.endsWith('/publish'));
   assert.ok(attempts.length >= 1);
-  assert.equal(JSON.parse(attempts[0].request).sealed === saved.checkpoint.sealed, true, 'recovery retries the retained checkpoint before sealing newer state');
+  assert.equal(JSON.parse(attempts[0].request).root.id, staged.document.root, 'recovery publishes the retained checkpoint graph before sealing newer state');
   assert.equal((await box.cli('status')).code, 0);
   assert.equal(state(box).checkpointRefusal, undefined); assert.equal(state(box).checkpoint, undefined);
   assert.equal(state(box).storage.limitBytes, 3_000_000);

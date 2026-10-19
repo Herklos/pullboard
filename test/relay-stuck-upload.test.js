@@ -1,4 +1,4 @@
-/** A refused baseline pauses safely and recovers without blocking ordered moves [H16,B26]. */
+/** Legacy API1 refusals recover without blocking moves; current API2 pause proofs live in relay-upload-pause.test.js [H16,B26]. */
 import assert from 'node:assert/strict';
 import { runFixtureChild as spawnSync } from './fixture-child.js';
 import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import { gunzipSync } from 'node:zlib';
 import { decodeBoardKey, unseal } from '../src/seal.js';
 import { ENGINE_VERSION } from '../src/machine.js';
-import { relayClientFixture } from './relay-client-fixture.js';
+import { legacyRelayClientFixture as relayClientFixture } from './relay-client-fixture.js';
 
 test('a refused upload never blocks board moves [H16,B26]', async (t) => {
   const box = await relayClientFixture(t);

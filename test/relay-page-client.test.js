@@ -183,3 +183,40 @@ test('a relay without API2 retains legacy snapshot behavior rather than guessing
   assert.deepEqual(calls, ['/api/v2', path]);
   assert.equal(state.snapshotApiVersion, undefined);
 });
+
+
+test('an API1 BAD_REQUEST capability response keeps small legacy uploads usable without a key read [H15,H17]', async () => {
+  const state = { board: 'a'.repeat(32), url: 'https://synthetic-legacy-route.example' };
+  const path = '/api/v1/boards/' + state.board + '/state';
+  const response = { version: 1, state: { sequence: 0, sealed: 'old-saved-carrier' } };
+  const hooks = { legacyLimit: 10_000_000,
+    /** An older shared router refuses unknown paths with BAD_REQUEST, not necessarily 404. */
+    async raw(target) {
+      if (target === '/api/v2') throw Object.assign(new Refused('BAD_REQUEST', 'Use API1.'), { httpStatus: 400, relayVersion: 1 });
+      assert.equal(target, path); return response;
+    },
+    /** A legacy retry of already captured bytes does not need an API2 decode or private key. */
+    key() { assert.fail('unsupported capabilities must preserve the saved legacy carrier'); },
+  };
+  assert.equal(await relaySnapshotRequest(state, path, { method: 'PUT', body: response.state }, {}, hooks), response);
+});
+
+test('new snapshots on a capable relay use complete paged history even for a small board [H15,H17]', async t => {
+  const box = await fixture(t);
+  box.document.tables.shout[0].shout_text = 'tiny retained history';
+  assert.ok(Buffer.byteLength(JSON.stringify(box.document)) < 900_000);
+  const pending = { sequence: 0, sealed: 'synthetic-small-native-carrier' };
+  const path = '/api/v1/boards/' + box.state.board + '/state';
+  const hooks = { ...box.adapter, key: () => box.key ?? box.adapter.key, legacyLimit: 10_000_000, persist() {},
+    /** Legacy reads remain supported, but a new capable writer should publish the complete page graph. */
+    async raw(target, options) {
+      if (target === '/api/v2') return { version: 1, apiVersion: 2 };
+      if (target === path) return { version: 1, state: { ...pending } };
+      return box.adapter.request(target, options);
+    },
+  };
+  const result = await relaySnapshotRequest(box.state, path, { method: 'PUT', body: pending }, {}, hooks);
+  assert.equal(box.state.snapshotApiVersion, 2, 'small boards receive the same complete-history transport, not a legacy presentation-only read');
+  assert.ok(result.state.root);
+  assert.deepEqual(JSON.parse((await pagedSnapshotRequest(box.state, {}, box.adapter)).state.sealed), box.document);
+});

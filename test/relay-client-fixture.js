@@ -334,8 +334,10 @@ globalThis.fetch = function tracedFetch(input, init) {
     calls.push({ method: req.method, path: req.url, accept: req.headers.accept ?? '', engine: req.headers['x-pullboard-engine'],
       browser: String(req.headers.cookie ?? '').includes('pb_session=') });
     if (legacySnapshotApi && req.method === 'GET' && req.url === '/api/v2') {
-      res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ version: 1, apiVersion: 1, snapshot: 'legacy' }));
+      res.writeHead(legacySnapshotApi === 'bad-route' ? 400 : 200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(legacySnapshotApi === 'bad-route'
+        ? { version: 1, error: { code: 'BAD_REQUEST', message: 'Use API1 on this legacy relay.' } }
+        : { version: 1, apiVersion: 1, snapshot: 'legacy' }));
       request.resume(); return;
     }
     if (req.method === 'POST' && req.url === '/auth/device/confirmation/status' && nextConfirmationStatusHold) {
@@ -764,4 +766,12 @@ globalThis.fetch = function tracedFetch(input, init) {
       boardsWithoutSnapshots.set(id, new Set(paths));
     },
   };
+}
+
+
+/** Preserve explicit API1 wire-contract cases while the default fixture exercises current API2 writers. */
+export async function legacyRelayClientFixture(t, options) {
+  const box = await relayClientFixture(t, options);
+  box.legacySnapshotApi();
+  return box;
 }
