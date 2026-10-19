@@ -50,6 +50,9 @@ let transportLost = false;
 let transportDrain = null;
 let signalCustodyInstalled = false;
 let transportDrop = () => {};
+let markTransportGone;
+// Settles when the transport is lost, so a write waiting on a dead stdout stops waiting (#888).
+const transportGone = new Promise(resolveGone => { markTransportGone = resolveGone; });
 let heartbeatTimer = null;
 let workerId = 'starting';
 let rejectPendingFrame = null;
@@ -594,7 +597,14 @@ function createDescendantTracker(directory) {
       for (const pid of ownedPids) {
         const row = current.get(pid);
         const prior = known.get(pid);
-        if (row && prior?.birth === row.birth) Object.assign(prior, row);
+        if (!row || prior?.birth !== row.birth) continue;
+        Object.assign(prior, row);
+        // A detached child is forked into its parent's group and calls setsid a moment later. A census in that window
+        // records the parent's group; once this proven identity leads its own group, track that group instead (#888).
+        if (!prior.root && row.pgid === row.pid && prior.group !== row.pid) {
+          prior.group = row.pid;
+          detachedGroups.set(row.pid, row.birth);
+        }
       }
       return current;
     } catch {
@@ -638,7 +648,13 @@ function createDescendantTracker(directory) {
     });
     if (!ownedMember) return false;
     try { process.kill(-pgid, signal); }
-    catch (error) { if (error.code === 'ESRCH') return false; throw error; }
+    catch (error) {
+      if (error.code === 'ESRCH') return false;
+      // macOS answers EPERM for a group whose members exited but are not yet reaped. Throwing here escaped cleanup and
+      // skipped the lease release (#888); retry on a fresh census instead, as for any other ambiguity.
+      if (error.code === 'EPERM') return null;
+      throw error;
+    }
     return true;
   }
 
@@ -766,6 +782,7 @@ function installSignalCustody() {
   const disconnected = () => {
     if (transportLost) return;
     transportLost = true;
+    markTransportGone();
     beginCleanup();
     rejectPendingFrame?.(new Error('runner transport was lost'));
     clearInterval(heartbeatTimer);
@@ -1070,7 +1087,10 @@ function outputSink() {
   const write = part => {
     const bytes = Buffer.isBuffer(part) ? part : Buffer.from(part);
     hash.update(bytes);
-    if (!process.stdout.write(bytes)) return once(process.stdout, 'drain');
+    // A lost transport never drains. Discard instead of waiting: a paused command pipe never closes, its group never
+    // finishes draining, and with only unref'd timers left the worker exits before releasing its lease (#888).
+    if (transportLost || process.stdout.destroyed) return Promise.resolve();
+    if (!process.stdout.write(bytes)) return Promise.race([once(process.stdout, 'drain'), transportGone]);
     return Promise.resolve();
   };
   return { hash, write, get pipeFailed() { return pipeFailed; }, set pipeFailed(value) { pipeFailed = value; }, wallStart };
@@ -1081,7 +1101,8 @@ async function stopOwnedGroup(pid, closed, tracker) {
   if (!pid) return;
   const signal = async type => {
     for (;;) {
-      const sent = tracker?.signalOwnedGroup(pid, type) ?? false;
+      // Keep null (an ambiguous census, or EPERM) distinct from false, so it retries instead of passing as drained.
+      const sent = tracker ? tracker.signalOwnedGroup(pid, type) : false;
       if (sent === true || sent === false) return sent;
       await new Promise(resolvePause => setTimeout(resolvePause, 250));
     }
