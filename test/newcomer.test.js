@@ -1,11 +1,16 @@
 /** First-run guidance on private Git repos, including unrelated files setup must not stage [I1,I2]. */
 import assert from 'node:assert/strict';
-import { runFixtureExecFile as execFileSync, runFixtureChild as spawnSync, runFixtureChild, runFixtureGit } from './fixture-child.js';
+import { runFixtureExecFile as execFileSync, runFixtureChild as spawnSync, runFixtureChild, runFixtureChildAsync, runFixtureGit } from './fixture-child.js';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { test } from 'node:test';
 import { AGENT_SHELL_MARKERS } from '../src/person.js';
+import {
+  bindLocalSession,
+  CHECKOUT_SESSION_TOKEN_ENV,
+} from '../src/agent-session.js';
+import { repoInfo } from '../src/git.js';
 
 const BIN = resolve(import.meta.dirname, '../bin/pullboard.js');
 
@@ -172,4 +177,57 @@ test('bare pullboard starts with the tour and init pointer; explicit help and JS
   const document = JSON.parse(box.run('--json').stdout);
   assert.equal(typeof document.help, 'string');
   assert.ok(document.help.includes('pullboard init'));
+});
+
+/** A directory whose pullboard is this checkout's, so init's Git hooks run the code under test (#906). */
+function checkoutPullboard(root) {
+  const bin = join(root, '.this-pullboard');
+  mkdirSync(bin);
+  symlinkSync(BIN, join(bin, 'pullboard'));
+  return bin;
+}
+
+test('init --yes commits its setup and exits in every agent session [I1,I2]', { timeout: 600_000 }, async (t) => { // budget: hang ceiling for eight inits, each about 2 s.
+  for (const marker of AGENT_SHELL_MARKERS) {
+    const box = project(t);
+    for (const name of [...AGENT_SHELL_MARKERS, CHECKOUT_SESSION_TOKEN_ENV]) delete box.env[name];
+    box.env[marker] = '1';
+    Object.assign(box.env, { PATH: checkoutPullboard(box.root) + ':' + box.env.PATH, PULLBOARD_MACHINE_HOME: join(box.root, '.private-machine'), PULLBOARD_VIEW_BACKGROUND: '0' });
+    box.git('config', 'user.name', 'Newcomer');
+    box.git('config', 'user.email', 'newcomer@example.invalid');
+    box.git('commit', '-q', '--allow-empty', '-m', 'initial');
+    // 0.9.1 hung here for good: the pre-commit hook of init's own commit waited on init's checkout lease (#906).
+    const running = runFixtureChildAsync(process.execPath, [BIN, 'init', '--yes', '--model', 'Test Model'], { cwd: box.root, env: box.env, detached: true });
+    let timer;
+    const result = await Promise.race([running, new Promise((done) => { timer = setTimeout(() => done(null), 60_000); })]); // budget: hang ceiling; init --yes takes about 2 s.
+    clearTimeout(timer);
+    if (!result) { try { process.kill(-running.child.pid, 'SIGKILL'); } catch { /* the group already ended */ } }
+    assert.ok(result, `init --yes with ${marker} set never exited`);
+    assert.equal(result.status, 0, result.context);
+    assert.equal(String(box.git('log', '--format=%s', '-1')).trim(), 'chore: set up Pullboard', `${marker}: init committed its setup`);
+  }
+});
+
+test('a command started under a held checkout acts under it, and a hook that must wait names the holder and stops [I1,I2]', async (t) => {
+  const box = project(t);
+  box.git('config', 'user.name', 'Newcomer');
+  box.git('config', 'user.email', 'newcomer@example.invalid');
+  box.git('commit', '-q', '--allow-empty', '-m', 'initial');
+  const info = repoInfo(box.root);
+  const before = process.env[CHECKOUT_SESSION_TOKEN_ENV];
+  delete process.env[CHECKOUT_SESSION_TOKEN_ENV];
+  const holder = await bindLocalSession(info, { agent: 'holding-agent', digest: 'a'.repeat(64), keepLease: true });
+  try {
+    // A child of the holding command (its env carries the lease) proceeds at once instead of queueing behind it.
+    assert.ok(process.env[CHECKOUT_SESSION_TOKEN_ENV], 'the holding command passes its lease to what it starts');
+    await bindLocalSession(info, { agent: 'holding-agent', digest: 'a'.repeat(64) });
+    // An unrelated command waits, and a hook gives up after its limit with the holder named.
+    delete process.env[CHECKOUT_SESSION_TOKEN_ENV];
+    await assert.rejects(bindLocalSession(info, { agent: 'holding-agent', digest: 'a'.repeat(64), waitLimitMs: 300 }),
+      (error) => error.code === 'CHECKOUT_BUSY' && /in use by holding-agent \(since /u.test(error.message) && /then commit again/u.test(error.message));
+  } finally {
+    holder.release();
+    if (before === undefined) delete process.env[CHECKOUT_SESSION_TOKEN_ENV];
+    else process.env[CHECKOUT_SESSION_TOKEN_ENV] = before;
+  }
 });

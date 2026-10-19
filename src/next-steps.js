@@ -203,6 +203,7 @@ export const NEXT_STEPS = Object.freeze({
   BROWSER_SLOT_REQUIRED: 'release the gate lease and take it again with browser: true',
   CANNOT_SIGN: 'sign only approved rows: pullboard spec signoff <approved ids>',
   CHECKOUT_SESSION: 'run pullboard takeover from the agent session that owns this checkout',
+  CHECKOUT_BUSY: 'let the named command finish, or stop it if it is stuck, then commit again',
   CHECK_SYNTAX: 'close the quote the shell names, then set the check again: inside single quotes write an apostrophe as \'\\\'\' or match it with ., and test with sh -n -c "<command>"',
   CHECK_ACCEPT_PERSON_ONLY: 'ask the coordinator to bring the check to the person: pullboard shout coordinator "#<id> needs the person to accept its check" --decision',
   CHECK_ACCEPT_STALE: 'read the current check with pullboard show <id>, then the person accepts it again: pullboard check accept <id>',
