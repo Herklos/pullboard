@@ -1130,13 +1130,13 @@ async function everyBoardJourney(t, slow = null) {
 test('pullboard.dev shows every board, linked and local [N40]', {
   timeout: relayWorkBudgetMs() * 5 + 180_000,
   skip: (!findChromeExecutable() && 'Chrome is not installed')
-    || (process.env.CI && '#902: skipped on CI until the hosted page starts its relay transport on every runner; #902 un-skips it'),
+    || (process.env.CI && !process.env.PULLBOARD_HOSTED_JOURNEYS && '#902: skipped on CI until the hosted page starts its relay transport on every runner; #902 un-skips it; repeat.yml runs it with PULLBOARD_HOSTED_JOURNEYS=1'),
 }, (t) => everyBoardJourney(t));
 
 test('pullboard.dev shows every board under the CI condition [N40,N26]', {
   timeout: relayWorkBudgetMs() * 5 + 180_000,
   skip: (!findChromeExecutable() && 'Chrome is not installed')
-    || (process.env.CI && '#902: skipped on CI until the hosted page starts its relay transport on every runner; #902 un-skips it'),
+    || (process.env.CI && !process.env.PULLBOARD_HOSTED_JOURNEYS && '#902: skipped on CI until the hosted page starts its relay transport on every runner; #902 un-skips it; repeat.yml runs it with PULLBOARD_HOSTED_JOURNEYS=1'),
 }, (t) => everyBoardJourney(t, { armed: false, ms: 3_500 }));
 
 // ---------------------------------------------------------------------------------------------------------------
