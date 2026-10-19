@@ -367,12 +367,13 @@ test("the view's refresh re-renders only what changed [N26,A2]", async () => {
     api: async () => ({ events: [] }),
     boardPath: () => '/board',
     // refresh() calls these helpers, defined outside the slice this test runs (#644's clock-blind board text and
-    // in-place ages, #633's share invitation); the page's own behavior is covered elsewhere.
+    // in-place ages, #633's share invitation, #900's render handshake); the page's own behavior is covered elsewhere.
     boardText: (state) => JSON.stringify(state),
     showFlowAges: () => {},
     tickAges: () => {},
     sharingReady: null,
     sharingInvitation: () => Promise.resolve(),
+    transport: null,
     boardState: () => {
       let resolve;
       const promise = new Promise((done) => { resolve = done; });
