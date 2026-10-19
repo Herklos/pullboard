@@ -544,9 +544,9 @@ globalThis.fetch = function tracedFetch(input, init) {
     cliChildDeadlineMs(snapshotUploads);
     return runCliChild(args, snapshotUploads, true);
   }
-  /** Start the production CLI with live output so a browser confirmation can interleave with SSH sign-in. */
-  function startCli(args, extraEnv = {}) {
-    const child = spawn(process.execPath, [CLI, ...args, '--json'], { cwd: root, env: { ...env, ...extraEnv }, stdio: ['ignore', 'pipe', 'pipe'] });
+  /** Start live CLI output; raw mode also preserves the foreground wait for an already-paired phone's link tap. */
+  function startCli(args, extraEnv = {}, { json = true } = {}) {
+    const child = spawn(process.execPath, [CLI, ...args, ...(json ? ['--json'] : [])], { cwd: root, env: { ...env, ...extraEnv }, stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
     const deadlineMs = cliChildDeadlineMs(DEFAULT_SNAPSHOT_UPLOADS);

@@ -8,6 +8,7 @@ import { Refused } from './refused.js';
 import { enqueueStream, followStream } from './browser-stream.js';
 import { homeLineDismissed, homeScreenLine, noticeLines, nothingShared, rememberOwnedRequestId, showRelayScreen, storedOwnedRequestState } from './browser-notice.js';
 import { registerApp, requestPairingPersistence } from './install.js';
+import { placePhoneApprovals } from './browser-approval-card.js';
 
 const KEYS = 'pullboard.relay.keys.v1';
 const PENDING = 'pullboard.relay.pair.v1';
@@ -180,6 +181,7 @@ export async function createTransport({ onUpdate = () => {}, onOpenBoard = () =>
     const phoneWaiting = root.dataset.relayDevice === 'phone' && paired.size === 0;
     showRelayScreen(root, phoneWaiting || nothingShared({ paired, waitingBoards, failure }) ? 'share' : null,
       phoneWaiting && (failure || waitingBoards.size) ? lines.join(' ') : '');
+    placePhoneApprovals(document);
   }
 
   /** Ask once after pairing; a refusal leaves one dismissible line under the board, never above it. */
@@ -589,6 +591,8 @@ export async function createTransport({ onUpdate = () => {}, onOpenBoard = () =>
   if (await enrollPhone((path, options) => documentAt(path, denied, options))) keepPairingStorage();
   await listing();
   await installPhoneApprovals((path, options) => documentAt(path, denied, options), keys, openApprovedBoard, access.signal);
+  // The existing startup awaits the first feed; move its authenticated cards before handing the transport to the view.
+  placePhoneApprovals(document);
   return {
     /** Return decoded API state or seal narrow person intent; no board key or plaintext leaves the device. */
     async request(path, body) {
