@@ -1,6 +1,6 @@
 /**
  * Draft only: hold one real local-board HTTP response after the server has processed a prior shout.
- * This is a controlled overlap mechanism, not evidence that either Studio failure followed it.
+ * This is a controlled overlap mechanism, not evidence that either earlier failure followed it.
  */
 export async function holdPriorShoutResponse(chrome, expectedText) {
   const trace = [];
