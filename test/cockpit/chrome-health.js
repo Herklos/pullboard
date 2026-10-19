@@ -23,6 +23,8 @@ export function networkServicePids(profile) {
  */
 export function chromeHealth(chrome, profile, atStart) {
   const said = String(chrome?.stderr?.() ?? '').split('\n')
-    .filter((line) => /network ?service|crash|restart/iu.test(line)).slice(-12).map((line) => line.slice(0, 300));
+    // Chrome's updater logs its crash handler on every launch; only the network service and real crashes are kept.
+    .filter((line) => !/updater|crash_reporter|crash-handler/iu.test(line) && /network ?service|crashed|restarting/iu.test(line))
+    .slice(-12).map((line) => line.slice(0, 300));
   return { networkService: { atStart, now: networkServicePids(profile) }, stderr: said };
 }
