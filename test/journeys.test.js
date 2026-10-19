@@ -1011,6 +1011,9 @@ async function everyBoardJourney(t, slow = null) {
       () => journeyTrace.snapshot(),
     );
     if (!rowObservation.ready) await failJourneyRows(t, rowObservation, authTrace, cookiePauses);
+    // Every run reports how many API pauses carried their cookie, so a passing CI run still shows its Chrome's behaviour (#835).
+    const pauseCounts = Object.groupBy(cookiePauses, ({ cookie }) => cookie);
+    t.diagnostic('cookie pauses ' + JSON.stringify(Object.fromEntries(Object.entries(pauseCounts).map(([cookie, rows]) => [cookie, rows.length]))));
     if (slow) {
       assert.ok(cookiePauses.some(({ pathKind, cookie }) => pathKind === '/api/v1/devices/session' && cookie === 'restored'),
         'the CI condition sent the session read without its paused cookie, and the stand-in restored it from the jar');
@@ -1120,14 +1123,12 @@ async function everyBoardJourney(t, slow = null) {
 
 test('pullboard.dev shows every board, linked and local [N40]', {
   timeout: relayWorkBudgetMs() * 5 + 180_000,
-  skip: (!findChromeExecutable() && 'Chrome is not installed')
-    || (process.env.CI && '#835: skipped on CI for the 0.9.1 release (the person, 18 Oct): Chrome on the CI runners drops the session cookie from intercepted requests; its fix un-skips it'),
+  skip: !findChromeExecutable() && 'Chrome is not installed',
 }, (t) => everyBoardJourney(t));
 
 test('pullboard.dev shows every board under the CI condition [N40,N26]', {
   timeout: relayWorkBudgetMs() * 5 + 180_000,
-  skip: (!findChromeExecutable() && 'Chrome is not installed')
-    || (process.env.CI && '#835: skipped on CI for the 0.9.1 release (the person, 18 Oct): Chrome on the CI runners drops the session cookie from intercepted requests; its fix un-skips it'),
+  skip: !findChromeExecutable() && 'Chrome is not installed',
 }, (t) => everyBoardJourney(t, { armed: false, ms: 3_500 }));
 
 // ---------------------------------------------------------------------------------------------------------------
