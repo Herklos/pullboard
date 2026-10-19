@@ -40,7 +40,8 @@ export function createStorageQuota({ directory, auth, limitBytes = ACCOUNT_STORA
   const stat = lstatSync(file);
   if (!stat.isFile() || stat.isSymbolicLink() || stat.mode & 0o077) throw new Refused('RELAY_STORAGE', 'Keep quota notices in a private regular database.');
   const db = new DatabaseSync(file);
-  db.exec('PRAGMA busy_timeout=30000; CREATE TABLE IF NOT EXISTS storage_warning (board TEXT PRIMARY KEY, storage TEXT NOT NULL, needed INTEGER NOT NULL)');
+  try { db.exec('PRAGMA busy_timeout=30000; CREATE TABLE IF NOT EXISTS storage_warning (board TEXT PRIMARY KEY, storage TEXT NOT NULL, needed INTEGER NOT NULL)'); }
+  catch (error) { db.close(); throw error; }
   let closed = false;
 
   /** Refuse use after shutdown instead of exposing a native database error. */

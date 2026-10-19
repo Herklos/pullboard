@@ -105,7 +105,11 @@ export function createRelayPages({ directory, boardId, now = Date.now }) {
       }
       const row = db.prepare('SELECT id,children FROM page_object WHERE id=?').get(id);
       if (!row) {
-        if (complete) throw new Refused('SNAPSHOT_PAGE_MISSING', 'Upload the referenced sealed page before publishing: ' + id);
+        if (complete) {
+          const error = new Refused('SNAPSHOT_PAGE_MISSING', 'Upload the referenced sealed page before publishing this snapshot.');
+          error.page = id;
+          throw error;
+        }
         return;
       }
       visiting.add(id);
@@ -126,6 +130,16 @@ export function createRelayPages({ directory, boardId, now = Date.now }) {
       const id = randomUUID();
       db.prepare('INSERT INTO page_upload VALUES (?,?,?,?)').run(id, owner, sequence, clock() + UPLOAD_MS);
       return { id, sequence };
+    });
+  }
+
+  /** Resume the same authenticated machine's interrupted upload without inventing another sequence. */
+  function resume(id, principal, sequence) {
+    return atomic(() => {
+      const saved = upload(id, principal);
+      if (saved.sequence !== sequence) throw new Refused('BAD_SEQUENCE', 'Resume the original upload coverage sequence.');
+      db.prepare('UPDATE page_upload SET expires=? WHERE id=?').run(clock() + UPLOAD_MS, saved.id);
+      return { id: saved.id, sequence: saved.sequence };
     });
   }
 
@@ -157,10 +171,10 @@ export function createRelayPages({ directory, boardId, now = Date.now }) {
     return atomic(() => {
       const staged = upload(id, principal);
       if (reference.sequence !== staged.sequence) throw new Refused('BAD_SEQUENCE', 'Publish the coverage sequence named when this upload began.');
-      const root = db.prepare('SELECT sequence FROM page_object WHERE id=?').get(reference.id);
+      const root = db.prepare('SELECT sequence,payload FROM page_object WHERE id=?').get(reference.id);
       if (!root || root.sequence !== reference.sequence) throw new Refused('SNAPSHOT_PAGE_MISSING', 'Upload this snapshot’s sealed root before publishing it.');
       graph([reference.id], true);
-      const result = publishHead(reference);
+      const result = publishHead(reference, Buffer.from(root.payload));
       if (result && typeof result.then === 'function') throw new Refused('RELAY_CONFIG', 'Commit the journal head synchronously before finishing publication.');
       db.prepare('DELETE FROM page_upload WHERE id=?').run(id);
       return result;
@@ -226,5 +240,5 @@ export function createRelayPages({ directory, boardId, now = Date.now }) {
 
   /** Close exactly this store; repeated shutdown is harmless. */
   function close() { if (!closed) { db.close(); closed = true; } }
-  return { begin, put, publish, pin, get, prune, usage, close, file };
+  return { begin, resume, put, publish, pin, get, prune, usage, close, file };
 }
