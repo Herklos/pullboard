@@ -84,13 +84,29 @@ function project(t) {
 function addItem(box, title, specId = 'G1') {
   const result = box.pullboard(box.root, 'add', 'web', title, '--criterion', `Check ${title}.`, '--specs', specId, '--json');
   assert.equal(result.status, 0, `${result.stdout}${result.context}`);
-  return JSON.parse(result.stdout).item.item_id;
+  return jsonOf(result).item.item_id;
 }
 
-/** Require a fixture child's success; a killed child names its signal and elapsed time, never a bare null [S19]. */
-function requireSuccess(result) {
-  assert.equal(result.status, 0, `${result.stdout}${result.context}`);
+/**
+ * Require a fixture child's exit status: a number, or 'refused' for any nonzero exit. A killed child has
+ * no status, so the message carries its signal and elapsed time, never a bare null [S19].
+ */
+function requireExit(result, status) {
+  const message = `${result.stdout}${result.context}`;
+  if (status === 'refused') assert.ok(Number.isInteger(result.status) && result.status !== 0, `expected a refusal\n${message}`);
+  else assert.equal(result.status, status, message);
   return result;
+}
+
+/** Require a fixture child's success; a killed child names its signal and elapsed time [S19]. */
+function requireSuccess(result) {
+  return requireExit(result, 0);
+}
+
+/** Parse a fixture child's JSON output; output a killed child cut short names its signal and elapsed time [S19]. */
+function jsonOf(result) {
+  try { return JSON.parse(result.stdout); }
+  catch (error) { return assert.fail(`${error.message}\n${result.stdout}${result.context}`); }
 }
 
 /** Run a CLI command and require its successful result. */
@@ -194,8 +210,8 @@ test('[S19,V3] doctor and resume list stale frozen items in every lifecycle stat
   const bytesBeforeDoctor = boardBytes(box);
 
   const doctorJson = box.pullboard(box.root, 'doctor', '--json');
-  assert.notEqual(doctorJson.status, 0, doctorJson.stderr || doctorJson.stdout);
-  const doctorDocument = JSON.parse(doctorJson.stdout);
+  requireExit(doctorJson, 'refused');
+  const doctorDocument = jsonOf(doctorJson);
   const findings = doctorDocument.problems.filter((problem) => problem.code === 'STALE_ITEM');
   assert.deepEqual(findings.map((finding) => Number(/item #(\d+)/u.exec(finding.message)?.[1])).sort((a, b) => a - b), expected);
   for (const finding of findings) {
@@ -209,11 +225,11 @@ test('[S19,V3] doctor and resume list stale frozen items in every lifecycle stat
   assert.deepEqual(boardBytes(box), bytesBeforeDoctor, 'doctor did not write or migrate any board bytes');
 
   const doctorText = box.pullboard(box.root, 'doctor');
-  assert.equal(doctorText.status, 1, doctorText.stderr || doctorText.stdout);
+  requireExit(doctorText, 1);
   for (const id of expected) assert.match(doctorText.stdout, new RegExp(`item #${id}\\b`));
   const afterResumeBaseline = receiptSnapshot(box);
   const resumeJson = succeeds(box, box.root, 'resume', '--json');
-  const resumeDocument = JSON.parse(resumeJson.stdout);
+  const resumeDocument = jsonOf(resumeJson);
   assert.deepEqual(resumeDocument.stale.map((item) => item.id).sort((a, b) => a - b), expected);
   for (const item of resumeDocument.stale) {
     if (['open', 'claimed', 'submitted'].includes(item.status)) assert.match(item.next, new RegExp(`pullboard refreeze ${item.id}\\b`));
@@ -233,7 +249,7 @@ test('[S19,V3] doctor and resume list stale frozen items in every lifecycle stat
   assert.deepEqual(receiptSnapshot(box), before, 'diagnostics do not alter accepted receipts or frozen bars');
   assert.ok(!findings.some((finding) => finding.message.includes(`item #${ids.unaffected} `)), 'the item frozen on G3 remains unaffected');
   succeeds(box, box.root, 'refreeze', String(ids.open));
-  const afterRefreeze = JSON.parse(succeeds(box, box.root, 'resume', '--json').stdout);
+  const afterRefreeze = jsonOf(succeeds(box, box.root, 'resume', '--json'));
   assert.deepEqual(afterRefreeze.stale.map((item) => item.id).sort((a, b) => a - b), expected.filter((id) => id !== ids.open), 'explicit refreeze clears only the active item repaired against new text');
   const historical = (snapshot) => snapshot.items.filter((item) => item.item_status === 'verified');
   assert.deepEqual(historical(receiptSnapshot(box)), historical(before), 'refreezing active work preserves every accepted historical receipt');
@@ -249,15 +265,15 @@ test('[A5,S19,V3] doctor and resume distinguish unchanged doctrine citations fro
   claim(box, specItem);
   succeeds(box, box.web, 'release', String(specItem));
   const baseline = receiptSnapshot(box);
-  const before = JSON.parse(succeeds(box, box.root, 'resume', '--json').stdout);
+  const before = jsonOf(succeeds(box, box.root, 'resume', '--json'));
   assert.deepEqual(before.stale, [], 'a namespaced citation with unchanged inherited text is current');
-  const doctorBefore = JSON.parse(box.pullboard(box.root, 'doctor', '--json').stdout);
+  const doctorBefore = jsonOf(box.pullboard(box.root, 'doctor', '--json'));
   assert.deepEqual(doctorBefore.problems.filter(problem => problem.code === 'STALE_ITEM'), []);
   const path = join(box.root, 'DOCTRINE.md');
   writeFileSync(path, readFileSync(path, 'utf8') + '\n## Local override\n- PB1 [approved, must] Updated inherited rule. | gate: true\n');
-  const after = JSON.parse(succeeds(box, box.root, 'resume', '--json').stdout);
+  const after = jsonOf(succeeds(box, box.root, 'resume', '--json'));
   assert.deepEqual(after.stale.map(item => [item.id, item.rows]), [[doctrineItem, ['doctrine:PB1']]]);
-  const doctorAfter = JSON.parse(box.pullboard(box.root, 'doctor', '--json').stdout);
+  const doctorAfter = jsonOf(box.pullboard(box.root, 'doctor', '--json'));
   const findings = doctorAfter.problems.filter(problem => problem.code === 'STALE_ITEM');
   assert.equal(findings.length, 1);
   assert.match(findings[0].message, /old text of doctrine:PB1/);
@@ -266,5 +282,9 @@ test('[A5,S19,V3] doctor and resume distinguish unchanged doctrine citations fro
 
 test('[S19] a killed fixture child names its signal and elapsed time', () => {
   const killed = runFixtureChild('sh', ['-c', 'kill -KILL $$'], { encoding: 'utf8' });
-  assert.throws(() => requireSuccess(killed), (error) => /status: null\nsignal: SIGKILL\nelapsed: \d+ms/u.test(error.message));
+  const named = (error) => /status: null\nsignal: SIGKILL\nelapsed: \d+ms/u.test(error.message);
+  assert.throws(() => requireSuccess(killed), named, 'an expected success');
+  assert.throws(() => requireExit(killed, 1), named, 'an expected exit status, as text doctor');
+  assert.throws(() => requireExit(killed, 'refused'), named, 'an expected refusal, as JSON doctor');
+  assert.throws(() => jsonOf(killed), named, 'JSON output cut short');
 });
