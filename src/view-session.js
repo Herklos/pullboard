@@ -1,5 +1,6 @@
 /** Private runtime records that let an unattended CLI hand off its live view link. */
 import { spawnSync } from 'node:child_process';
+import { Refused } from './refused.js';
 import {
   chmodSync,
   existsSync,
@@ -123,14 +124,30 @@ function listenerProgram(pid, listedName) {
  * @returns {{ pid: number, name: string } | null}
  */
 export function portHolder(port) {
+  return readPortHolder(port).holder;
+}
+
+/** Inspect only a listener's public identity; nonblocking filesystem probes keep dead mounts out of port diagnosis. */
+function readPortHolder(port) {
+  /** Keep the failed target and OS code, never process arguments or arbitrary tool output. */
+  const unavailable = reason => ({ holder: null, issue: `could not read the listener on port ${port} (lsof ${reason})` });
   const lsof = ['/usr/sbin/lsof', '/usr/bin/lsof'].find((file) => existsSync(file));
-  if (!lsof) return null;
-  const listed = spawnSync(lsof, ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-Fpc'], { encoding: 'utf8', timeout: 2_000 });
+  if (!lsof) return unavailable('not installed');
+  const listed = spawnSync(lsof, ['-b', '-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-Fpc'], { encoding: 'utf8', timeout: 2_000 });
+  if (listed.error || listed.status !== 0) return unavailable(listed.error?.code ?? `exit ${listed.status}`);
   const pids = [...String(listed.stdout ?? '').matchAll(/^p(\d+)$/gmu)].map((match) => Number(match[1]));
-  // One listener is an answer; none or several (an unusual shared socket) names no single process.
-  if (listed.status !== 0 || pids.length !== 1 || !Number.isInteger(pids[0]) || pids[0] < 1) return null;
+  if (pids.length !== 1 || !Number.isInteger(pids[0]) || pids[0] < 1) return unavailable('no single listener reported');
   const pid = pids[0];
-  if (readSession(port)?.pid === pid) return { pid, name: 'pullboard view' };
+  if (readSession(port)?.pid === pid) return { holder: { pid, name: 'pullboard view' }, issue: '' };
   const listedName = /^c(.+)$/mu.exec(listed.stdout)?.[1]?.trim() || 'a program';
-  return { pid, name: listenerProgram(pid, listedName) };
+  return { holder: { pid, name: listenerProgram(pid, listedName) }, issue: '' };
+}
+
+/** Keep the original busy-port recovery while naming a failed listener lookup instead of inventing a process to stop. */
+export function busyViewPortRefusal(port, hosted) {
+  if (!hosted) return new Refused('PORT_BUSY', `port ${port} is in use: name another with --port N, or use --port 0 to take a free one`);
+  const { holder, issue } = readPortHolder(port);
+  const stop = holder && (process.platform === 'win32' ? `taskkill /PID ${holder.pid} /T` : `kill ${holder.pid}`);
+  const identity = holder ? ` by ${holder.name} (pid ${holder.pid})` : issue ? ` (${issue})` : '';
+  return new Refused('PORT_BUSY', `port ${port} is in use${identity}, and pullboard.dev looks for your view on that port: stop ${holder ? `it with ${stop}` : 'the other view there'}, then run pullboard view again`);
 }
