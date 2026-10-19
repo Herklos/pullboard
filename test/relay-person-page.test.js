@@ -110,6 +110,76 @@ window.fetch = async (input, options) => {
   assert.equal(box.calls.filter(call => call.path.endsWith('/authorize')).length - authorizations, 1, 'one tap authorizes exactly once');
 });
 
+test('a phone draws its saved board while the approvals read never answers [N26,H5,H17]', chromeOptions, async t => {
+  const box = await relayClientFixture(t);
+  const marker = 'READABLE_BOARD_WITH_PENDING_REQUESTS_899';
+  assert.equal((await box.cli('add', box.lane, marker)).code, 0);
+  await box.link();
+  const board = JSON.parse(readFileSync(box.linkFile, 'utf8')).board;
+  const encoded = readFileSync(box.keyFile, 'utf8').trim();
+  const chrome = await startChrome();
+  t.after(() => chrome.close());
+  await chrome.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 2, mobile: true });
+  await chrome.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
+  const cookie = await chrome.send('Network.setCookie', {
+    name: 'pb_session', value: (await box.phoneSession()).token, url: box.origin, httpOnly: true, sameSite: 'Lax',
+  });
+  assert.equal(cookie.success, true, 'the private fixture session is installed');
+  // Private fixture key material is passed only as a CDP argument, never in an assertion or diagnostic label.
+  await chrome.send('Page.addScriptToEvaluateOnNewDocument', {
+    source: `localStorage.setItem('pullboard.relay.keys.v1', ${JSON.stringify(JSON.stringify({ [board]: encoded }))});
+const nativeFetch = window.fetch;
+window.fetch = (input, options) => {
+  const url = new URL(typeof input === 'string' ? input : input.url, location.href);
+  if (url.origin === 'http://127.0.0.1:4890') return Promise.reject(new TypeError('Fixture has no local view'));
+  if (/^\\/api\\/v1\\/devices\\/[^/]+\\/approvals$/.test(url.pathname)) {
+    window.approvalsPending899 = true;
+    if (window.approvalsRecovered899) return Promise.resolve(new Response(JSON.stringify({ version: 1, approvals: [] }), {
+      headers: { 'content-type': 'application/json' },
+    }));
+    return new Promise(() => {});
+  }
+  return nativeFetch(input, options);
+};`,
+  });
+  await chrome.navigate(box.origin);
+  await chrome.waitFor("document.readyState === 'complete'");
+  // Seed a real non-extractable browser key without exporting it; the authenticated saved board is already readable.
+  const seeded = await chrome.send('Runtime.evaluate', { awaitPromise: true, returnByValue: true, expression: `(async () => {
+    const { createDeviceKeys } = await import('/relay/device-keys.js');
+    const { ENGINE_VERSION } = await import('/relay/engine.js');
+    const identity = await (await fetch('/api/v1/devices/session', { headers: { 'x-pullboard-engine': String(ENGINE_VERSION) } })).json();
+    const device = { ...await createDeviceKeys(), account: identity.account, locator: 'fixture-899' };
+    const db = await new Promise((resolve, reject) => {
+      const request = indexedDB.open('pullboard-relay-device-v1', 1);
+      request.onupgradeneeded = () => request.result.createObjectStore('keys');
+      request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error);
+    });
+    try { await new Promise((resolve, reject) => {
+      const transaction = db.transaction('keys', 'readwrite'); transaction.objectStore('keys').put(device, 'device');
+      transaction.oncomplete = resolve; transaction.onerror = transaction.onabort = () => reject(transaction.error);
+    }); } finally { db.close(); }
+    return true;
+  })()` });
+  assert.equal(Boolean(seeded.exceptionDetails), false, 'the synthetic private browser device is retained');
+  assert.equal(seeded.result?.value, true);
+  await chrome.navigate('about:blank');
+  await chrome.navigate(box.origin);
+  await chrome.waitFor('window.approvalsPending899 === true');
+  await chrome.waitFor(`document.querySelector('#chain')?.textContent.includes(${JSON.stringify(marker)})`, 3000, // budget: declared #899 three-second ceiling while the late request never answers.
+    'readable board renders while approvals remain pending');
+  assert.equal(await chrome.evaluate('window.approvalsPending899 === true'), true);
+  assert.ok((await chrome.evaluate('document.body.innerText')).includes(marker));
+  assert.ok((await chrome.evaluate('document.body.innerText')).includes('Checking requests from your computer'),
+    'the pending background read has visible guidance alongside the board');
+  await chrome.waitFor("document.body.innerText.includes('Requests from your computer did not load')", 20_000, // budget: product fifteen-second I/O ceiling plus five seconds for native fixture scheduling.
+    'an uncooperative request still reports its deadline');
+  assert.ok((await chrome.evaluate('document.body.innerText')).includes(marker), 'the board survives the background failure');
+  await chrome.evaluate('window.approvalsRecovered899 = true');
+  await chrome.waitFor("!document.querySelector('.phone-approval-status')", 3000, // budget: derived from one-second approvals polling plus two seconds for fixture scheduling.
+    'a later successful poll clears the failure guidance');
+  assert.ok((await chrome.evaluate('document.body.innerText')).includes(marker), 'the board survives recovery too');
+});
 
 test('a signed-in phone shows its first screen before a local probe can answer [N26,H5,H17]', chromeOptions, async t => {
   const handle = createRelayBrowserHandler({ authenticate: async () => ({ kind: 'session' }) });

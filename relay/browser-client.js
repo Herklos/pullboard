@@ -8,7 +8,8 @@ import { Refused } from './refused.js';
 import { enqueueStream, followStream } from './browser-stream.js';
 import { homeLineDismissed, homeScreenLine, noticeLines, nothingShared, rememberOwnedRequestId, showRelayScreen, storedOwnedRequestState } from './browser-notice.js';
 import { registerApp, requestPairingPersistence } from './install.js';
-import { placePhoneApprovals } from './browser-approval-card.js';
+import { browserJSON, withBrowserDeadline } from './browser-deadline.js';
+import { phoneApprovalStatus, placePhoneApprovals } from './browser-approval-card.js';
 
 const KEYS = 'pullboard.relay.keys.v1';
 const PENDING = 'pullboard.relay.pair.v1';
@@ -60,7 +61,7 @@ async function snapshotDocument(plain) {
     if (typeof DecompressionStream !== 'function') throw new Error('This browser cannot read gzip snapshots. Upgrade the browser client.');
     try {
       const stream = new Blob([plain]).stream().pipeThrough(new DecompressionStream('gzip'));
-      return JSON.parse(await new Response(stream).text());
+      return JSON.parse(await withBrowserDeadline(() => new Response(stream).text()));
     } catch { throw new Refused('SNAPSHOT_FORMAT', 'The sealed gzip snapshot is invalid. Refresh it from a linked machine.'); }
   }
   if (plain[0] !== 0x7b) {
@@ -83,8 +84,7 @@ async function checkAuthorization(path, status, onDenied, error) {
 async function documentAt(path, onDenied, options = {}) {
   const headers = new Headers(options.headers ?? {});
   headers.set('x-pullboard-engine', String(ENGINE_VERSION));
-  const response = await fetch(path, { ...options, headers, credentials: 'same-origin', cache: 'no-store', redirect: 'error' });
-  const document = await response.json();
+  const { response, document } = await browserJSON(path, { ...options, headers, credentials: 'same-origin', cache: 'no-store', redirect: 'error' });
   if (!response.ok) {
     const error = document.error;
     await checkAuthorization(path, response.status, onDenied, error);
@@ -96,7 +96,7 @@ async function documentAt(path, onDenied, options = {}) {
 }
 
 /** Build the API adapter the existing cockpit consumes; no board key enters an HTTP request. */
-export async function createTransport({ onUpdate = () => {}, onOpenBoard = () => {} } = {}) {
+export async function createTransport({ onUpdate = () => {}, onOpenBoard = () => {}, waitForRender = false } = {}) {
   void registerApp();
   const savedKeys = stored(localStorage, KEYS, {});
   const keys = savedKeys && typeof savedKeys === 'object' && !Array.isArray(savedKeys) ? savedKeys : {};
@@ -111,6 +111,8 @@ export async function createTransport({ onUpdate = () => {}, onOpenBoard = () =>
   let accessError = null;
   const access = new AbortController();
   let persistenceRequest = null;
+  // New viewers acknowledge their first actual render; old viewers retain the prior transition contract.
+  let rendered = waitForRender !== true;
   rememberPairing();
   let pair = takePairing() ?? stored(sessionStorage, PENDING, null);
   if (pair && (!BOARD.test(pair.board ?? '') || typeof pair.key !== 'string')) pair = null;
@@ -178,7 +180,7 @@ export async function createTransport({ onUpdate = () => {}, onOpenBoard = () =>
     }
     // A phone has no local-view screen to fall back to: keep its shell and the real reason until a board is readable.
     const root = document.documentElement;
-    const phoneWaiting = root.dataset.relayDevice === 'phone' && paired.size === 0;
+    const phoneWaiting = root.dataset.relayDevice === 'phone' && (!rendered || paired.size === 0);
     showRelayScreen(root, phoneWaiting || nothingShared({ paired, waitingBoards, failure }) ? 'share' : null,
       phoneWaiting && (failure || waitingBoards.size) ? lines.join(' ') : '');
     placePhoneApprovals(document);
@@ -217,12 +219,11 @@ export async function createTransport({ onUpdate = () => {}, onOpenBoard = () =>
 
   /** Authenticate the latest native snapshot before installing its presentation in this device. */
   async function snapshot(entry) {
-    const response = await fetch('/api/v1/boards/' + entry.id + '/state', {
+    const { response, document } = await browserJSON('/api/v1/boards/' + entry.id + '/state', {
       credentials: 'same-origin', cache: 'no-store', redirect: 'error',
       headers: { 'x-pullboard-engine': String(ENGINE_VERSION), ...(entry.state && entry.snapshotTag ? { 'if-none-match': entry.snapshotTag } : {}) },
     });
     if (response.status === 304 && entry.state) return;
-    const document = await response.json();
     if (!response.ok) {
       await checkAuthorization('/api/v1/boards/' + entry.id + '/state', response.status, denied, document.error);
       if (document.error?.code === 'NO_BOARD' || document.error?.code === 'NO_SNAPSHOT') waitForFirstSnapshot(entry);
@@ -232,7 +233,7 @@ export async function createTransport({ onUpdate = () => {}, onOpenBoard = () =>
     const row = document.state;
     if (!row || !Number.isSafeInteger(row.sequence) || row.sequence < 0) throw new Error('The relay snapshot cursor is invalid. Refresh this board.');
     warning(row.warning, entry.id);
-    const plain = await unseal(entry.key, transportBytes(row.sealed), { boardId: entry.id, kind: 'snapshot', sequence: row.sequence });
+    const plain = await withBrowserDeadline(() => unseal(entry.key, transportBytes(row.sealed), { boardId: entry.id, kind: 'snapshot', sequence: row.sequence }));
     const value = await snapshotDocument(plain);
     const state = snapshotState(value, entry.id);
     if (accessLost) throw new Error('Sign in again to read this board.');
@@ -265,7 +266,7 @@ export async function createTransport({ onUpdate = () => {}, onOpenBoard = () =>
       if (row.event_id <= entry.cursor) return;
       if (row.event_id !== entry.cursor + 1) throw new Error('The relay event prefix is incomplete. Refresh this board.');
     }
-    const plain = await unseal(entry.key, transportBytes(row.sealed), { boardId: entry.id, kind: row.kind, sequence: row.event_id });
+    const plain = await withBrowserDeadline(() => unseal(entry.key, transportBytes(row.sealed), { boardId: entry.id, kind: row.kind, sequence: row.event_id }));
     const move = JSON.parse(new TextDecoder().decode(plain));
     if (accessLost) throw new Error('Sign in again to read this board.');
     if (row.kind === 'request') {
@@ -432,7 +433,7 @@ export async function createTransport({ onUpdate = () => {}, onOpenBoard = () =>
           waitForFirstSnapshot({ id: board.id, repository: board.repository });
           continue;
         }
-        failure = ['ENGINE_VERSION', 'RELAY_ENGINE_VERSION'].includes(error.code) || /^\[(?:ENGINE_VERSION|RELAY_ENGINE_VERSION)\]/u.test(error.message)
+        failure = ['ENGINE_VERSION', 'RELAY_ENGINE_VERSION', 'RELAY_UNAVAILABLE', 'DEVICE_STORAGE'].includes(error.code) || /^\[(?:ENGINE_VERSION|RELAY_ENGINE_VERSION)\]/u.test(error.message)
           ? error.message
           : 'Could not open this board with its saved key. Pair this browser again from a linked machine.';
         failureBoard = board.id;
@@ -510,7 +511,7 @@ export async function createTransport({ onUpdate = () => {}, onOpenBoard = () =>
 
   /** Seal an unchanged intent at its current public sequence after another client wins the order. */
   async function requestEnvelope(entry, value, sequence) {
-    const bytes = await seal(entry.key, new TextEncoder().encode(JSON.stringify(value)), { boardId: entry.id, kind: 'request', sequence });
+    const bytes = await withBrowserDeadline(() => seal(entry.key, new TextEncoder().encode(JSON.stringify(value)), { boardId: entry.id, kind: 'request', sequence }));
     let binary = '';
     for (const byte of bytes) binary += String.fromCharCode(byte);
     return { id: value.id, sequence, sealed: btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/u, '') };
@@ -520,7 +521,7 @@ export async function createTransport({ onUpdate = () => {}, onOpenBoard = () =>
   async function sendOutbox(entry) {
     const pending = entry.outbox;
     if (!pending) return null;
-    const plain = await unseal(entry.key, transportBytes(pending.sealed), { boardId: entry.id, kind: 'request', sequence: pending.sequence });
+    const plain = await withBrowserDeadline(() => unseal(entry.key, transportBytes(pending.sealed), { boardId: entry.id, kind: 'request', sequence: pending.sequence }));
     const value = validatePersonRequest(JSON.parse(new TextDecoder().decode(plain)));
     if (value.id !== pending.id) throw new Refused('REQUEST_STORAGE', 'The saved request is inconsistent. Pair this browser again.');
     for (let attempt = 0; attempt < 5; attempt += 1) {
@@ -588,12 +589,22 @@ export async function createTransport({ onUpdate = () => {}, onOpenBoard = () =>
   let devicePairing = /(?:^#|&)device=/u.test(location.hash);
   try { devicePairing ||= sessionStorage.getItem('pullboard.relay.device-pair.v1') !== null; } catch { /* No storage: no saved pairing. */ }
   if (!pair && !devicePairing && !Object.keys(keys).length) showRelayScreen(document.documentElement, 'share');
-  if (await enrollPhone((path, options) => documentAt(path, denied, options))) keepPairingStorage();
-  await listing();
-  await installPhoneApprovals((path, options) => documentAt(path, denied, options), keys, openApprovedBoard, access.signal);
-  // The existing startup awaits the first feed; move its authenticated cards before handing the transport to the view.
-  placePhoneApprovals(document);
+  try {
+    if (await enrollPhone((path, options) => documentAt(path, denied, options))) keepPairingStorage();
+    await listing();
+  } catch (error) {
+    failure = error.message || 'Your boards did not open. Try opening this page again.';
+    notice();
+    throw error;
+  }
+  // Requests are a separate background feed, not a prerequisite for handing a readable board to the cockpit.
+  void installPhoneApprovals((path, options) => documentAt(path, denied, { ...options, signal: access.signal }),
+    keys, openApprovedBoard, access.signal).catch(() => {
+    if (!accessLost) phoneApprovalStatus(document, 'Requests from your computer did not load. Open this page again to retry.');
+  });
   return {
+    /** Give the startup frame back only after an opted-in viewer has drawn a readable board. */
+    didRender() { rendered = true; notice(); },
     /** Return decoded API state or seal narrow person intent; no board key or plaintext leaves the device. */
     async request(path, body) {
       if (accessLost) throw accessError;
