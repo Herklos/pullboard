@@ -386,6 +386,26 @@ test('README is concise and skimmable without removing its instructions or figur
   }
 });
 
+test('the README shows a demo Roadmap with an expanded item in both themes [I10,I13]', () => {
+  const light = 'docs/img/roadmap-light.png', dark = 'docs/img/roadmap-dark.png';
+  for (const name of [light, dark]) {
+    const png = readFileSync(join(ROOT, name));
+    assert.deepEqual(png.subarray(0, 8), Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), name + ' is a real PNG screenshot');
+  }
+  const picture = [...README.matchAll(/<picture>[\s\S]*?<\/picture>/gu)].map(match => match[0])
+    .find(block => block.includes(light) && block.includes(dark));
+  assert.ok(picture, 'one picture references both Roadmap screenshots');
+  const darkSource = [...picture.matchAll(/<source\b[^>]*>/gu)].map(match => match[0]).find(tag => tag.includes(dark));
+  assert.match(darkSource ?? '', /media="\(prefers-color-scheme:\s*dark\)"/u, 'the dark image follows the reader theme');
+  assert.match(picture, /<img\b[^>]*src="docs\/img\/roadmap-light\.png"/u, 'light is the fallback image');
+  const alt = /<img\b[^>]*alt="([^"]+)"/u.exec(picture)?.[1] ?? '';
+  for (const word of ['demo', 'roadmap', 'expanded', 'criterion', 'agents', 'history', 'release']) {
+    assert.ok(alt.toLowerCase().includes(word), 'alt text describes ' + word);
+  }
+  assert.ok(README.indexOf(picture) < README.indexOf('The full plan lives in the Roadmap tab'),
+    'the picture sits beside the Roadmap explanation');
+});
+
 test("what's next lists only unbuilt work [I11]", () => {
   const spec = readFileSync(join(ROOT, 'SPEC.md'), 'utf8');
   const sectionStart = README.indexOf("### What's next\n");

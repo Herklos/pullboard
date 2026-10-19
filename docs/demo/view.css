@@ -22,6 +22,7 @@
 body { margin: 0; background: var(--ground); color: var(--ink); font: 14px/1.5 var(--sans); }
 button, input, select, textarea { font: inherit; color: inherit; }
 [hidden] { display: none !important; }
+.visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); clip-path: inset(50%); white-space: nowrap; border: 0; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 .shell { display: grid; grid-template-columns: var(--side-w) minmax(0, 1fr); min-height: 100vh; }
@@ -134,6 +135,97 @@ main { padding: 16px 18px 56px; }
 .first code { font: 600 13px var(--mono); color: var(--ink); }
 .boardless .first { display: block; }
 .loading .top, .loading [data-pane], .boardless .top, .boardless [data-pane] { display: none; }
+a { color: var(--accent-strong); text-underline-offset: 2px; }
+a.go, a.ghost { display: inline-flex; align-items: center; text-decoration: none; }
+a.ghost { color: var(--ink); }
+.proj small .src { color: var(--ink-muted); }
+.proj .pname .owner { color: var(--ink-faint); font-weight: 400; }
+/* Opening your board at app.pullboard.dev (#764): one screen at a time stands alone on the page, centred, with the
+ * theme toggle in its own header; the sidebar, tabs and status line wait until there is a board to list. A note over
+ * a list is one quiet card. Every big button, command box and "or" box is 60 px tall; the GitHub button is dark. */
+.open-board .shell, .hosted-page.boardless .shell { display: block; }
+/* A request waiting for the person on this device (relay/browser-devices.js #phone-approvals) is never hidden behind a screen. */
+.open-board .side, .open-board .top, .open-board .status, .open-board main > :not(#local-note):not(#phone-approvals), .hosted-page.boardless .side { display: none !important; }
+.open-board main { padding: 0; }
+.open-board #local-note { display: grid; grid-template-rows: auto 1fr; min-height: 100vh; min-height: 100dvh; }
+.ob-top { display: flex; justify-content: flex-end; padding: 12px 16px 0; }
+.ob-panel { align-self: center; justify-self: center; box-sizing: border-box; width: 100%; max-width: 520px; padding: 24px 20px 64px; text-align: center; font-size: 16px; }
+#local-note.wide .ob-panel { max-width: 900px; }
+.ob-mark { display: inline-flex; align-items: center; gap: 10px; font-weight: 700; font-size: 17px; }
+.ob-mark svg { width: 28px; height: 28px; }
+.ob-panel h1 { margin: 22px 0 0; font-size: 30px; line-height: 1.15; letter-spacing: -.025em; text-wrap: balance; }
+.ob-say { margin: 12px auto 0; max-width: 440px; color: var(--ink-muted); font-size: 17px; text-wrap: balance; }
+.ob-act { margin: 28px auto 0; max-width: 400px; text-align: left; }
+.ob-big { display: flex; align-items: center; justify-content: center; gap: 12px; box-sizing: border-box; width: 100%; height: 60px; border-radius: 14px; font-weight: 600; font-size: 18px; text-decoration: none; cursor: pointer; }
+.ob-big svg { width: 22px; height: 22px; }
+.ob-gh, .ob-gh:hover { background: #1f2328; color: #fff; }
+:root[data-scheme="dark"] .ob-gh { border: 1px solid var(--line-strong); }
+.ob-go, .ob-go:hover { background: var(--accent); color: var(--on-accent); }
+.ob-cmd, .ob-agent { display: flex; align-items: center; justify-content: space-between; gap: 10px; box-sizing: border-box; height: 60px; padding: 0 0 0 16px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); }
+.ob-cmd code { overflow: hidden; color: var(--ink); font: 600 17px var(--mono); white-space: nowrap; text-overflow: ellipsis; }
+.ob-p { margin-right: 8px; color: var(--ink-faint); }
+.ob-agent > span { flex: 1; min-width: 0; font-weight: 600; line-height: 1.3; }
+.ob-agent small { display: block; color: var(--ink-muted); font-weight: 400; font-size: 13px; }
+.ob-agent svg, .ob-help svg { flex: none; width: 22px; height: 22px; color: var(--accent); }
+/* Inside a 60 px box the Copy button takes the box's own right edge, so box and button are both 60 px. */
+.ob-cmd button, .ob-agent button, .ob-help button { flex: none; box-sizing: border-box; height: 60px; padding: 0 18px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface-2); color: var(--ink); font-weight: 600; font-size: 15px; cursor: pointer; }
+.ob-cmd button, .ob-agent button { margin: -1px -1px -1px 0; border-radius: 0 14px 14px 0; }
+.ob-cmd button:hover, .ob-agent button:hover, .ob-help button:hover { background: var(--accent-soft); }
+.ob-or { display: flex; align-items: center; gap: 12px; margin: 14px 0; color: var(--ink-faint); font-size: 13.5px; }
+.ob-or::before, .ob-or::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+.ob-small { margin: 12px auto 0; max-width: 400px; color: var(--ink-muted); font-size: 14.5px; text-wrap: balance; }
+.ob-live { display: inline-flex; align-items: center; gap: 10px; margin: 22px 0 0; padding: 8px 14px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface); color: var(--ink-muted); font-size: 14.5px; }
+.ob-live i { width: 9px; height: 9px; border-radius: 50%; background: var(--accent); animation: ob-pulse 1.4s ease-in-out infinite; }
+@keyframes ob-pulse { 50% { opacity: .25; transform: scale(.8); } }
+/* The spinner is a ring with one dot going round it, so no edge of any box takes the accent colour. */
+.ob-spin { position: relative; width: 36px; height: 36px; margin: 28px auto 0; box-sizing: border-box; border-radius: 50%; border: 3px solid var(--line); animation: ob-turn .9s linear infinite; }
+.ob-spin::after { content: ""; position: absolute; top: -5.5px; left: 50%; width: 8px; height: 8px; margin-left: -4px; border-radius: 50%; background: var(--accent); }
+@keyframes ob-turn { to { transform: rotate(1turn); } }
+@media (prefers-reduced-motion: reduce) { .ob-live i, .ob-spin { animation: none; } }
+.ob-help { display: flex; align-items: center; gap: 12px; max-width: 500px; margin: 26px auto 0; padding: 10px 10px 10px 14px; border: 1px dashed var(--line-strong); border-radius: 14px; text-align: left; color: var(--ink-muted); font-size: 14.5px; }
+.ob-help > span { flex: 1; min-width: 0; }
+.ob-help small { display: block; color: var(--ink); font-size: 15px; font-weight: 600; }
+/* The help strip's Copy is the mockup's 40 px button, so on a computer its sentence keeps to one line. */
+.ob-help button { height: 40px; padding: 0 14px; border-radius: 10px; font-size: 14.5px; }
+/* On a computer the sentence keeps to one line whatever fonts are installed (#829): the strip keeps the mockup's
+   width and grows only as far as a wider font needs, centred, into the panel's own padding. Linux's DejaVu needs
+   513px for the longest sentence where the panel's box gives 520px. */
+@media (width >= 760px) { .ob-help { position: relative; left: 50%; transform: translateX(-50%); width: max-content; min-width: min(500px, 100%); max-width: calc(100vw - 32px); margin: 26px 0 0; } .ob-help small { white-space: nowrap; } }
+/* The browser's own permission prompt, drawn so people know what to click. */
+.ob-ask { position: relative; margin: 28px auto 0; max-width: 380px; padding: 16px 18px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); box-shadow: var(--shadow); text-align: left; }
+.ob-ask .t { font-weight: 600; }
+.ob-ask .d { margin-top: 4px; color: var(--ink-muted); font-size: 14.5px; }
+.ob-ask .b { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+.ob-ask .b span { padding: 7px 16px; border: 1px solid var(--line); border-radius: 999px; font-size: 14.5px; }
+.ob-ask .b .yes { border-color: #1a73e8; background: #1a73e8; color: #fff; outline: 3px solid color-mix(in srgb, var(--accent) 60%, transparent); outline-offset: 3px; }
+.ob-ask .arrow { position: absolute; right: 4px; bottom: -30px; color: var(--accent-strong); font-weight: 700; font-size: 14px; }
+.ob-steps { margin: 24px auto 0; max-width: 420px; padding: 0; list-style: none; text-align: left; counter-reset: ob-step; }
+.ob-steps li { counter-increment: ob-step; display: grid; grid-template-columns: 32px 1fr; gap: 10px; align-items: start; padding: 10px 0; border-top: 1px solid var(--line); color: var(--ink-muted); }
+.ob-steps li:first-child { border-top: 0; }
+.ob-steps li::before { content: counter(ob-step); display: grid; place-items: center; width: 26px; height: 26px; border-radius: 50%; background: var(--accent-soft); color: var(--accent-strong); font: 600 13px var(--mono); }
+.ob-steps b { color: var(--ink); font-weight: 600; }
+/* The one place two paths exist: two equal cards that say plainly how they differ. */
+.ob-two { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-top: 30px; text-align: left; }
+.ob-card { display: grid; grid-template-rows: auto auto 1fr auto auto; gap: 8px; padding: 24px; border: 1px solid var(--line); border-radius: 18px; background: var(--surface); }
+.ob-k { color: var(--accent-strong); font: 700 12.5px var(--mono); letter-spacing: .08em; text-transform: uppercase; }
+.ob-card h2 { margin: 0; font-size: 20px; letter-spacing: -.01em; }
+.ob-card p { margin: 0; color: var(--ink-muted); }
+.ob-card .ob-act { margin: 10px 0 0; max-width: none; }
+.ob-card .ob-small { margin: 10px 0 0; max-width: none; text-align: left; }
+.ob-two.signed-in { grid-template-columns: minmax(0, 440px); justify-content: center; }
+.ob-two.signed-in .ob-card + .ob-card { display: none; }
+@media (width < 760px) { .ob-two { grid-template-columns: 1fr; } .ob-cmd code { font-size: 15px; } }
+#local-note[data-kind="note"] { display: grid; gap: 4px; margin: 0 0 14px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); }
+#local-note[data-kind="note"] .ob-top, #local-note[data-kind="note"] .ob-mark { display: none; }
+#local-note[data-kind="note"] .ob-panel { max-width: none; padding: 0; text-align: left; font-size: 14px; }
+#local-note[data-kind="note"] h1 { margin: 0; font-size: 15px; }
+#local-note[data-kind="note"] .ob-say { margin: 2px 0 0; max-width: none; font-size: 14px; }
+/* The relay's banner, filled by its client: the same quiet card. */
+#relay-notice { display: grid; gap: 6px; margin: 0 0 14px; padding: 14px 16px; }
+#relay-notice p { margin: 0; color: var(--ink-muted); }
+#relay-notice a { justify-self: start; font-weight: 600; }
+.loading #relay-notice, .boardless #relay-notice { max-width: 560px; margin: 10vh auto 14px; }
+#pairing-storage-notice { margin: 0 0 14px; padding: 12px 16px; color: var(--ink-muted); }
 .two { display: grid; grid-template-columns: minmax(0, 1fr) clamp(300px, 42%, 600px); gap: 16px; align-items: start; }
 .two.narrow { grid-template-columns: minmax(0, 1fr) var(--agents-w); }
 .roadmap-layout { display: grid; grid-template-columns: minmax(0, 1fr) clamp(260px, 30%, 360px); gap: 16px; align-items: start; }
@@ -166,8 +258,9 @@ main { padding: 16px 18px 56px; }
 .milestone-head { display: flex; align-items: center; gap: 10px; min-height: 44px; cursor: pointer; border-radius: 8px; }
 .milestone-head .milestone-count { margin-left: auto; }
 /* A small triangle that turns down when its part is open. */
-.roadmap-layout .caret { flex: none; width: 7px; height: 9px; background: var(--ink-faint); clip-path: polygon(0 0, 100% 50%, 0 100%); transition: transform .15s; }
-.milestone-head[aria-expanded="true"] > .caret { transform: rotate(90deg); }
+.roadmap-layout .caret { display: inline-block; flex: none; width: 16px; height: 16px; margin: calc((1lh - 16px) / 2) 8px 0 0; vertical-align: top; color: var(--ink-muted); transition: transform .15s, color .15s; }
+.milestone-head:hover .caret { color: var(--ink); }
+.milestone-head[aria-expanded="true"] .caret { transform: rotate(90deg); }
 .shipped { padding: 4px 16px; }
 .shipped > .milestone-head h2 { margin: 0; font-size: 15px; color: var(--ink-muted); }
 .shipped-one { border-top: 1px solid var(--line); }
@@ -183,6 +276,13 @@ main { padding: 16px 18px 56px; }
 .milestone-item { display: grid; grid-template-columns: 12px minmax(0, 1fr) auto; gap: 10px; align-items: center; width: 100%; min-height: var(--tap); padding: 0 9px; border: 1px solid transparent; border-radius: 10px; background: none; text-align: left; }
 .milestone-item[data-go] { cursor: pointer; }
 .milestone-item[data-go]:hover { background: var(--surface-2); }
+.milestone-item.blocked { cursor: pointer; }
+.milestone-item.blocked:hover { background: var(--surface-2); }
+.milestone-item.blocked .t { display: flex; align-items: center; }
+.milestone-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.block-dot { display: inline-block; flex: none; width: 7px; height: 7px; margin-left: 6px; border-radius: 50%; background: var(--reject); vertical-align: middle; }
+.milestone-why { margin: 2px 9px 8px 31px; font-size: 13px; }
+.milestone-why .kv { margin: 0 0 6px; }
 .milestone-item .t { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .milestone-item .t code { white-space: nowrap; }
 .milestone-item .id { margin-right: 6px; color: var(--ink-faint); font: 500 12px var(--mono); }
@@ -243,6 +343,21 @@ main { padding: 16px 18px 56px; }
 .pipeline-item > span:first-child { color: var(--ink-faint); font-family: var(--mono); }
 .pipeline-item > span:last-child { overflow-wrap: anywhere; }
 .card-panel { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow); min-width: 0; }
+/* Upgrade details scroll within one card so the first item remains in the viewport. */
+.upgrade-note { padding: 12px; max-height: min(24vh, 190px); overflow-y: auto; overflow-wrap: anywhere; }
+.upgrade-note header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.upgrade-note h2 { margin: 0; font-size: 16px; }
+.upgrade-note h3 { margin: 10px 0 4px; font-size: 13px; }
+.upgrade-note p, .upgrade-note footer { margin: 4px 0; font-size: 12px; }
+.upgrade-note button { flex: none; min-height: var(--tap); }
+/* On a phone the link invitation above can wrap a line taller with Linux fonts (199px, not 179px), so the card keeps
+   20px less and scrolls inside; it says the same and the first item stays above the fold (#871). */
+@media (width < 600px) { .upgrade-note { max-height: min(21vh, 170px); } }
+.release-note { padding: 0 2px 12px; }
+.release-note p { margin: 0; font-size: 13px; line-height: 1.6; color: var(--ink-muted); overflow-wrap: anywhere; }
+.release-note code { font: 12px var(--mono); color: var(--ink); white-space: nowrap; }
+.release-note a { color: var(--ink); margin-left: 4px; white-space: nowrap; }
+.release-note button { margin-left: 6px; min-height: var(--tap); padding: 2px 10px; font-size: 12px; }
 /* The Items toolbar keeps its view, filters, and creation action together on one line. */
 .toolbar { display: flex; flex-wrap: nowrap; gap: 6px; align-items: center; min-width: 0; padding: 10px; }
 .toolbar .go { flex: none; margin-left: auto; }
@@ -330,6 +445,12 @@ input:disabled { background: var(--surface-2); color: var(--ink-muted); }
 .chip.busy { background: var(--blue-soft); color: var(--blue); }
 .chip.free { background: var(--violet-soft); color: var(--violet); }
 .chip.gate { background: none; color: var(--ink-muted); outline: 1px dashed var(--line-strong); outline-offset: -1px; }
+/* A stale verdict (#726) is a quiet word with a small dot beside the verified chip; its title says what main moved. */
+.chip.stale { background: none; color: var(--ink-muted); padding-inline: 0; }
+.chip.stale::before { content: ''; display: inline-block; width: 6px; height: 6px; margin-right: 4px; border-radius: 50%; background: var(--warn); vertical-align: 1px; }
+.row .meta > .stale { margin-left: auto; }
+.milestone-item:has(> .stale) { grid-template-columns: 12px minmax(0, 1fr) auto auto; }
+.agent-work:has(> .stale) { grid-template-columns: minmax(0, 1fr) auto auto; }
 .meta .gate { color: var(--ink-muted); }
 .meta .gate .wait-unit, .kv dd.waits-on .wait-unit { white-space: nowrap; }
 .meta .gate button.ref, .meta .gate a.ref { min-height: 0; }
@@ -388,6 +509,7 @@ input:disabled { background: var(--surface-2); color: var(--ink-muted); }
 .rowref { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; font-size: 13px; padding: 3px 0; }
 .rowref code { font-weight: 600; }
 .links { display: flex; flex-wrap: wrap; gap: 6px; }
+.links > button { min-height: var(--tap); }
 .links-item { border: 1px solid var(--line); background: var(--surface-2); border-radius: 6px; padding: 3px 9px; cursor: pointer; font-size: 12.5px; min-height: var(--tap); display: flex; align-items: center; }
 
 .panel-form { display: grid; gap: 10px; }
@@ -575,11 +697,22 @@ code.inline.long { white-space: break-spaces; overflow-wrap: anywhere; }
 .flow g:hover > .box, .flow g:hover > .edge { stroke-width: 2.2; }
 .console { position: static; width: min(560px, calc(100% - 32px)); margin: 8px auto; background: var(--surface); border: 1px solid var(--line-strong); border-radius: 12px; box-shadow: var(--shadow); padding: 10px 12px; font: 12px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 38vh; overflow: auto; cursor: pointer; }
 .console.ok { border-color: var(--accent); } .console.no { border-color: var(--reject); }
-.snapshot-controls:not([hidden]) { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 16px; padding: 12px 16px; }
-.snapshot-controls > span { font-weight: 600; }
-#replay-play { min-inline-size: 12em; }
-.snapshot-controls label { display: flex; align-items: center; gap: 6px; }
-.snapshot-controls output { color: var(--ink-muted); font: 12px/1.5 var(--mono); }
+/* Keep the replay viewport width fixed when its event list grows a classic scrollbar. */
+:root:has(body.snapshot) { overflow-y: scroll; }
+/* Changing Play and event labels occupy their own tracks, so they cannot rewrap a tap target. */
+.snapshot-controls:not([hidden]) { display: grid; grid-template-columns: minmax(0, 18rem) max-content max-content; align-items: center; gap: 10px; margin-bottom: 16px; padding: 12px 16px; }
+.snapshot-controls > span { grid-column: 1 / -1; font-weight: 600; }
+#replay-play { grid-column: 1; min-inline-size: 0; }
+/* Reserve Pause's tap box as replay ends, independently of its intrinsic text width. */
+#replay-pause { grid-column: 2; inline-size: 5rem; }
+.snapshot-controls label { grid-column: 3; display: flex; align-items: center; gap: 6px; }
+.snapshot-controls output { grid-column: 1 / -1; min-width: 0; overflow-wrap: anywhere; color: var(--ink-muted); font: 12px/1.5 var(--mono); }
+@media (width < 600px) {
+  .snapshot-controls:not([hidden]) { grid-template-columns: minmax(0, 1fr) max-content; }
+  #replay-play { grid-column: 1 / -1; }
+  #replay-pause { grid-column: 1; justify-self: start; }
+  .snapshot-controls label { grid-column: 2; }
+}
 .snapshot #new-item, .snapshot form, .snapshot [data-new], .snapshot [data-release], .snapshot [data-shout], .snapshot [data-go^="decide:"] { display: none !important; }
 .read-only:not(.requests) #new-item, .read-only:not(.requests) form, .read-only:not(.requests) [data-new], .read-only:not(.requests) [data-release], .read-only:not(.requests) [data-shout], .read-only:not(.requests) [data-go^="decide:"] { display: none !important; }
 .person-requests { margin-bottom: 12px; padding: 12px; min-width: 0; }
@@ -779,3 +912,89 @@ code.inline.long { white-space: break-spaces; overflow-wrap: anywhere; }
 @media (width < 480px) { .proof-stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 
 .milestone-head:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* The hosted page's one star line (#727): a quiet sentence under the board, with a small way to dismiss it. */
+.star-line { display: flex; align-items: center; justify-content: center; gap: 4px; margin: 18px 0 0; color: var(--ink-faint); font-size: 12.5px; }
+.star-line[hidden] { display: none; }
+.star-line a { color: var(--ink-muted); text-decoration: none; }
+.star-line a:hover { color: var(--ink); text-decoration: underline; text-underline-offset: 2px; }
+.star-dismiss { display: grid; place-items: center; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 6px; background: none; color: var(--ink-faint); font: inherit; font-size: 15px; cursor: pointer; }
+.star-dismiss:hover { background: color-mix(in srgb, var(--ink) 7%, transparent); color: var(--ink); }
+.star-dismiss:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+@media (pointer: coarse) { .star-dismiss { width: 44px; height: 44px; } }
+
+.milestone-targetline { margin: 0 14px 10px; color: var(--ink-muted); font-size: 13px; }
+.roadmap-shipped-commit { flex: none; color: var(--ink-muted); font: 11px var(--mono); }
+
+/* Approved milestone summary: all quantities are supplied by the roadmap API [N26]. */
+.roadmap-has-summary > .milestone-head { align-items: flex-start; }
+.roadmap-has-summary > .milestone-head h2 { flex: 1; min-width: 0; font-size: 18px; line-height: 1.35; }
+.roadmap-left { flex: none; display: grid; gap: 4px; margin-left: auto; text-align: right; white-space: nowrap; }
+.roadmap-left > b { font-size: 19px; font-weight: 600; line-height: 1.1; }
+.roadmap-left > span { color: var(--ink-muted); font: 12px var(--mono); }
+.roadmap-summary { margin: 0 14px 14px; min-width: 0; }
+.roadmap-summary-bar { display: block; height: 10px; margin: 10px 0; border-radius: 5px; }
+.roadmap-summary-swatch { display: inline-block; width: 8px; height: 8px; margin-right: 6px; border-radius: 50%; }
+.roadmap-summary .landed { background: var(--accent); fill: var(--accent); }
+.roadmap-summary .landing { background: var(--accent-strong); fill: var(--accent-strong); }
+.roadmap-summary .review { background: var(--violet); fill: var(--violet); }
+.roadmap-summary .building { background: var(--blue); fill: var(--blue); }
+.roadmap-summary .waiting { background: var(--ink-faint); fill: var(--ink-faint); }
+.roadmap-summary .held { background: var(--warn); fill: var(--warn); }
+.roadmap-summary-legend { display: flex; flex-wrap: wrap; gap: 6px 16px; color: var(--ink-muted); font-size: 13px; }
+.roadmap-summary-legend b { font-weight: 600; color: var(--ink); }
+.roadmap-summary-meta { display: flex; flex-wrap: wrap; gap: 8px 20px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); color: var(--ink-muted); font-size: 13px; }
+.roadmap-summary-needs { margin-top: 12px; padding: 8px 12px; border-radius: 8px; background: var(--warn-soft); color: var(--warn); font-size: 13px; overflow-wrap: anywhere; }
+.roadmap-summary-needs a { color: inherit; }
+.shipped-one > .milestone-head h2 { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Roadmap title references keep their colour and tooltip while the whole row expands in place. */
+.milestone-item span.ref { color: var(--accent-strong); display: inline-block; line-height: inherit; font: inherit; }
+
+/* The approved dense Roadmap detail uses the view's own light/dark tokens [N26]. */
+.milestone-item[role="button"] { cursor: pointer; }
+.milestone-item[role="button"]:hover { background: var(--surface-2); }
+.roadmap-status { display: inline-flex; align-items: center; gap: 6px; }
+.roadmap-blocked svg, .roadmap-landed svg, .roadmap-items svg { width: 12px; height: 12px; flex: none; }
+.roadmap-detail { display: grid; grid-template-columns: 104px minmax(0, 1fr); gap: 5px 12px; margin: 10px 0 0; font-size: 12.5px; line-height: 1.55; }
+.roadmap-detail dt { display: flex; align-self: start; align-items: flex-start; gap: 6px; color: var(--ink-muted); white-space: nowrap; }
+.roadmap-detail dt svg { flex: none; width: 14px; height: 14px; margin-top: 3px; color: var(--ink-faint); }
+.roadmap-detail dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
+.roadmap-detail b { font-weight: 600; }
+.roadmap-detail .roadmap-criterion { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.roadmap-ref { display: inline; padding: 1px 5px; border-radius: 4px; font-size: 11px; white-space: nowrap; }
+.roadmap-return { padding: 5px 7px; border-radius: 5px; background: var(--reject-soft); color: var(--reject); }
+.roadmap-event { display: inline; white-space: nowrap; }
+.roadmap-step { display: inline-block; width: 7px; height: 7px; margin-right: 5px; border-radius: 50%; background: var(--ink-faint); }
+.roadmap-step.busy { background: var(--blue); }
+.roadmap-step.warn { background: var(--warn); }
+.roadmap-step.ok { background: var(--accent); }
+.roadmap-step.no { background: var(--reject); }
+.roadmap-step.free { background: var(--violet); }
+.roadmap-arrow { color: var(--ink-faint); }
+.roadmap-items { display: inline-flex; align-items: center; gap: 5px; margin-top: 8px; font-size: 12.5px; }
+
+/* Prototype (18 Oct): the link-to-pullboard.dev invitation as a calm, closable card. */
+.share-card { display: flex; align-items: center; gap: 12px; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 10px 10px 10px 14px; margin: 0 0 14px; }
+.share-card[hidden], .share-again[hidden] { display: none; }
+.share-ic { width: 30px; height: 30px; border-radius: 8px; background: var(--accent-soft); color: var(--accent-strong); display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.share-txt { flex: 1; min-width: 0; font-size: 13px; line-height: 1.45; color: var(--ink-muted); }
+.share-txt b { display: block; color: var(--ink); font-weight: 600; font-size: 13.5px; }
+.share-gh { display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; padding: 7px 11px; border-radius: 8px; white-space: nowrap; border: 0; cursor: pointer; }
+.share-x { width: 28px; height: 28px; border: 0; background: none; color: var(--ink-faint); border-radius: 6px; cursor: pointer; font-size: 18px; line-height: 1; flex-shrink: 0; }
+.share-x:hover { background: var(--shade); color: var(--ink); }
+.share-again { display: block; margin: 10px 12px 0; padding: 6px 8px; border: 0; background: none; color: var(--accent-strong); font-size: 12.5px; cursor: pointer; text-align: left; border-radius: 6px; }
+.share-again:hover { background: var(--shade); }
+
+/* Keep the approved invitation readable and its controls reachable at phone widths. */
+.share-gh, .share-again { min-height: var(--tap); }
+.share-x { min-width: var(--tap); min-height: var(--tap); }
+@media (pointer: coarse) { .share-txt a { display: inline-flex; align-items: center; min-height: var(--tap); } }
+@media (width < 600px) {
+  .share-card { display: grid; grid-template-columns: 30px minmax(0, 1fr) var(--tap); align-items: start; }
+  .share-ic { margin-top: 4px; }
+  .share-txt { grid-column: 2; }
+  .share-txt a { display: flex; align-items: center; width: fit-content; min-height: var(--tap); }
+  .share-x { grid-column: 3; grid-row: 1; }
+  .share-gh { grid-column: 2 / 4; justify-self: start; }
+}
