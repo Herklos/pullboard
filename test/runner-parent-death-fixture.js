@@ -8,8 +8,12 @@ import { takeResource } from '../src/resources.js';
 import { runFixtureChild } from './fixture-child.js';
 import { readRemoteGateHolders, waitForCondition } from './runner-fixture-state.js';
 
-/** Keep the original custody assertions identical in ordinary and forced database ordering cases. */
-export async function parentDeathDrainFixture(t, tools, { holdRelease = false } = {}) {
+/**
+ * Keep the original custody assertions identical in ordinary and forced ordering cases: `holdRelease` forces a real
+ * release write conflict, and `chatty` makes the command keep writing output, so some always arrives after the
+ * transport drops (#888: a forwarded write then waited forever for a drain from a destroyed stdout).
+ */
+export async function parentDeathDrainFixture(t, tools, { holdRelease = false, chatty = false } = {}) {
   const { cli, git, installSshStandIn, observe, startQueueController, waitForMarker, processIsAlive, shellQuote, HOST } = tools;
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'pullboard-runner-parent-death-')));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -29,6 +33,20 @@ export async function parentDeathDrainFixture(t, tools, { holdRelease = false } 
   const childGone = join(dir, 'detached-child-gone');
   const workerLog = join(dir, 'worker-stderr.log');
   let releaseLock;
+  /** The worker's own account of a stalled release: its runner status lines and any cleanup files in its private job (#888). */
+  function workerCleanupReport() {
+    const lines = existsSync(workerLog) ? readFileSync(workerLog, 'utf8').split('\n')
+      .filter(line => /^PULLBOARD_RUNNER_(?!HEARTBEAT)[A-Z_]+ /u.test(line)).slice(-20) : [];
+    const jobs = join(remoteHome, '.pullboard-runner', 'jobs');
+    const files = {};
+    for (const job of existsSync(jobs) ? readdirSync(jobs) : []) {
+      for (const name of ['cleanup-timeout.json', 'release-pending.json']) {
+        const file = join(jobs, job, name);
+        if (existsSync(file)) files[job + '/' + name] = readFileSync(file, 'utf8').slice(0, 2_000);
+      }
+    }
+    return { lines, files };
+  }
   /** Release only this fixture's explicit write reservation. */
   function unlockRelease() {
     if (!releaseLock) return;
@@ -55,7 +73,7 @@ const child = spawn(process.execPath, [require.resolve('./remote-detached-child.
   detached: true, stdio: 'ignore', env: process.env,
 });
 child.unref();
-setInterval(() => {}, 1_000);
+${chatty ? "setInterval(() => process.stdout.write('launcher output\\n'), 20);" : 'setInterval(() => {}, 1_000);'}
 `);
   writeFileSync(join(repo, 'remote-detached-child.js'), `const { existsSync, writeFileSync } = require('node:fs');
 const [ready, pidFile, term, release, gone] = process.argv.slice(2);
@@ -153,7 +171,10 @@ setInterval(() => {}, 1_000);
         ({ pid, agent, browser, item, kind, alive: processIsAlive(pid) })) };
       return holders.length === 0;
     }, 'the remote physical gate holder is released after child exit',
-    { signal: t.signal, state: () => lastReleaseState, onTimeout: message => t.diagnostic(message) });
+    { signal: t.signal, state: () => lastReleaseState, onTimeout: message => {
+      t.diagnostic(message);
+      t.diagnostic('worker cleanup report ' + JSON.stringify(workerCleanupReport()));
+    } });
     const controller = await remoteRun.closed;
     remoteRun = null;
     assert.equal(controller.signal, 'SIGTERM', 'the owned API controller alone received SIGTERM');

@@ -1667,11 +1667,13 @@ syncBuiltinESMExports();\n`);
 
 const parentDeathTools = { cli, git, installSshStandIn, observe, startQueueController, waitForMarker, processIsAlive, shellQuote, HOST };
 test('a queued run executes on a registered runner and its result comes back [C7] (parent death drains a detached worker descendant before releasing its lease)',
-  { timeout: 90_000, skip: '#888: skipped for the 0.9.1 release (the person, 19 Oct); #888 fixes the remote drain and removes this skip' }, t => parentDeathDrainFixture(t, parentDeathTools)); // budget: fixture ceiling covers declared30-second remote cleanup plus startup, transport and final cleanup.
+  { timeout: 90_000 }, t => parentDeathDrainFixture(t, parentDeathTools)); // budget: fixture ceiling covers declared30-second remote cleanup plus startup, transport and final cleanup.
 
 test('parent death retries a failed remote holder deletion after the real database writer releases [C7]',
   { timeout: 90_000 }, t => parentDeathDrainFixture(t, parentDeathTools, { holdRelease: true })); // budget: same fixture deadline includes the real10-second SQLite busy attempt and release retry.
 
+test('a queued run executes on a registered runner and its result comes back [C7] (parent death drains its worker while the command keeps writing output)',
+  { timeout: 90_000 }, t => parentDeathDrainFixture(t, parentDeathTools, { chatty: true })); // budget: same fixture ceiling as the ordinary parent-death case.
 
 test('a queued run executes on a registered runner and its result comes back [C7] (unverified cleanup times out as a named red result)', { timeout: 90_000 }, async (t) => { // budget: bounded 30-second remote cleanup timeout plus startup, transport and fixture cleanup ceiling.
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'pullboard-runner-cleanup-timeout-')));

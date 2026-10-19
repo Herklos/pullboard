@@ -50,6 +50,9 @@ let transportLost = false;
 let transportDrain = null;
 let signalCustodyInstalled = false;
 let transportDrop = () => {};
+let markTransportGone;
+// Settles when the transport is lost, so a write waiting on a dead stdout stops waiting (#888).
+const transportGone = new Promise(resolveGone => { markTransportGone = resolveGone; });
 let heartbeatTimer = null;
 let workerId = 'starting';
 let rejectPendingFrame = null;
@@ -766,6 +769,7 @@ function installSignalCustody() {
   const disconnected = () => {
     if (transportLost) return;
     transportLost = true;
+    markTransportGone();
     beginCleanup();
     rejectPendingFrame?.(new Error('runner transport was lost'));
     clearInterval(heartbeatTimer);
@@ -1070,7 +1074,10 @@ function outputSink() {
   const write = part => {
     const bytes = Buffer.isBuffer(part) ? part : Buffer.from(part);
     hash.update(bytes);
-    if (!process.stdout.write(bytes)) return once(process.stdout, 'drain');
+    // A lost transport never drains. Discard instead of waiting: a paused command pipe never closes, its group never
+    // finishes draining, and with only unref'd timers left the worker exits before releasing its lease (#888).
+    if (transportLost || process.stdout.destroyed) return Promise.resolve();
+    if (!process.stdout.write(bytes)) return Promise.race([once(process.stdout, 'drain'), transportGone]);
     return Promise.resolve();
   };
   return { hash, write, get pipeFailed() { return pipeFailed; }, set pipeFailed(value) { pipeFailed = value; }, wallStart };
