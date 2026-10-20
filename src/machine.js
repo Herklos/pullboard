@@ -10,6 +10,7 @@
  */
 
 import { RIGOR_NOTICE_ENGINE } from './rigor-source.js';
+import { HEALTH_CAP_ENGINE } from './health-receipts.js';
 
 /** First writer for withdraw-and-remove milestone behavior; shipment remains engine 45. */
 export const WITHDRAW_MILESTONE_ENGINE = 51;
@@ -31,6 +32,7 @@ export const STRONG_REJECTION_NOTICE_ENGINE = 54;
 export const SUBMITTED_CONFLICT_ENGINE = 60;
 
 export const ENGINE_VERSION = Math.max(
+  HEALTH_CAP_ENGINE,
   SUBMITTED_CONFLICT_ENGINE,
   ROW_DRAFT_ENGINE,
   AUTO_ESCALATE_ENGINE,
