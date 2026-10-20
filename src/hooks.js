@@ -3,7 +3,10 @@
  * its folders, no secret or env file is committed, and a push sends exactly what the gate checked.
  * Each check returns its problems; an empty list lets git go on.
  */
-import { spawnSync } from 'node:child_process';
+import {
+  execFileSync,
+  spawnSync,
+} from 'node:child_process';
 import { hostname } from 'node:os';
 import {
   chmodSync,
@@ -146,14 +149,32 @@ export function commitMsgProblems(raw, { rules, spec, doctrine = null }) {
 }
 
 /**
- * This machine's names as a commit message would show them: the host name and its first label. Names
- * under three characters are ignored, so a short word cannot refuse an honest message (C1).
+ * This machine's computer name as macOS shows it, or null when the platform has no such name or the
+ * lookup fails. The lookup has a short timeout, so a stuck scutil cannot stall a submit (C1).
  *
+ * @returns {string | null}
+ */
+export function computerName() {
+  if (process.platform !== 'darwin') return null;
+  try {
+    return execFileSync('/usr/sbin/scutil', ['--get', 'ComputerName'], { encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] }).trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * This machine's names as a commit message would show them: the host name, its first label and the
+ * computer name, matched case-insensitively. Names under three characters are ignored, so a short word
+ * cannot refuse an honest message (C1). The sources are a parameter so a test can stand in for them.
+ *
+ * @param {{ host?: string, computer?: string | null }} [sources] - Defaults to this machine.
  * @returns {string[]} Lower-case names.
  */
-export function machineNames() {
-  const full = hostname().trim().toLowerCase();
-  return [...new Set([full, full.split('.')[0]])].filter((name) => name.length >= 3);
+export function machineNames(sources = { host: hostname(), computer: computerName() }) {
+  const host = String(sources.host ?? '').trim().toLowerCase();
+  const computer = String(sources.computer ?? '').trim().toLowerCase();
+  return [...new Set([host, host.split('.')[0], computer])].filter((name) => name.length >= 3);
 }
 
 /**
