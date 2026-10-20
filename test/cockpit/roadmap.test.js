@@ -7,6 +7,35 @@ import { test } from 'node:test';
 import { tapTarget, SPEC, machine, project, build, sendBack, fetchLive, startView, target, accept, chromeExecutable, openSnapshotChrome, closeSnapshotChrome, press, travel, pressedInto, settled, roadmapRow, showing, readRoadmap, openRoadmapParts, tabBar, proofShot, pickProject, chooseFilter } from './fixture.js';
 
 
+/** The roadmap state a failed wait saw: its tab, rows, row ids and expansion, dots and open detail (#938). */
+const ROADMAP_FACTS = `JSON.stringify({ tab: typeof view === 'undefined' ? null : view.tab,
+  rows: document.querySelectorAll('#roadmap .milestone-item').length,
+  ids: [...document.querySelectorAll('#roadmap .milestone-item .id')].slice(0, 12).map((node) => node.textContent),
+  expanded: [...document.querySelectorAll('#roadmap .milestone-item')].slice(0, 12).map((row) => row.getAttribute('aria-expanded')),
+  dots: document.querySelectorAll('#roadmap .dot').length,
+  detail: (document.querySelector('#detail h2')?.textContent || '').trim().slice(0, 80) })`;
+
+/**
+ * Name the step a roadmap wait was waiting on and the roadmap state it last saw, so a timeout reads as a diagnosis
+ * rather than a bare 90 s test timeout (#938).
+ */
+function namedRoadmapWaits(chrome) {
+  const waitFor = chrome.waitFor.bind(chrome);
+  chrome.waitFor = async (...args) => {
+    try { return await waitFor(...args); }
+    catch (error) {
+      try { error.message += `; waiting for step: ${args[0]}; the roadmap showed ${await chrome.stable(ROADMAP_FACTS)}`; } catch { /* the page may be gone; the wait's own error stays */ }
+      throw error;
+    }
+  };
+  return chrome;
+}
+
+/** Open the Chrome a roadmap case drives, with its waits named (#938). */
+async function openRoadmapChrome(...args) {
+  return namedRoadmapWaits(await openSnapshotChrome(...args));
+}
+
 /** Expand a real roadmap row, then use its explicit link to leave for Items. */
 async function openRoadmapItem(chrome, id) {
   const row = roadmapRow(id);
@@ -42,7 +71,7 @@ test('Roadmap references stay inline and rows expand before opening Items [N26,N
   const profile = mkdtempSync(join(tmpdir(), 'pullboard-prose-references-chrome-'));
   let chrome;
   try {
-    chrome = await openSnapshotChrome(executable, view.link.href, profile);
+    chrome = await openRoadmapChrome(executable, view.link.href, profile);
     await chrome.waitFor("document.querySelector('#chain .row[data-item=\"2\"]')");
     for (const width of [375, 1280]) {
       await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
@@ -167,7 +196,7 @@ test('the roadmap reads every item as the Items tab does, opens each one, anothe
     const direct = await fetchLive(new URL(roadmap, view.link));
     assert.equal(direct.status, 200, 'the view serves its page at /roadmap, behind its secret');
     assert.equal((await fetchLive(new URL('/roadmap', view.link))).status, 403, 'and nothing there without the secret');
-    chrome = await openSnapshotChrome(executable, new URL(roadmap, view.link).href, profile);
+    chrome = await openRoadmapChrome(executable, new URL(roadmap, view.link).href, profile);
     const consoleErrors = [];
     chrome.socket.addEventListener('message', ({ data }) => {
       const message = JSON.parse(String(data));
@@ -318,7 +347,7 @@ test('a milestone lists work to ship first, shipped below, and no withdrawn item
     };
   })())`));
   try {
-    chrome = await openSnapshotChrome(executable, view.link.href, profile);
+    chrome = await openRoadmapChrome(executable, view.link.href, profile);
     await chrome.waitFor('data?.project?.milestones?.length === 2');
     await press(chrome, "document.querySelector('[data-tab=roadmap]')");
     await chrome.waitFor("!document.querySelector('[data-pane=roadmap]').hidden && document.querySelector('#roadmap-list > [data-key=\"m:Next\"]')");
@@ -401,7 +430,7 @@ test('the roadmap leads with the next release and folds shipped ones [N26]', { t
   /** Activate a disclosure or item through the shared native pointer helper. */
   const click = (selector) => press(chrome, `document.querySelector(${JSON.stringify(selector)})`);
   try {
-    chrome = await openSnapshotChrome(executable, view.link.href, profile);
+    chrome = await openRoadmapChrome(executable, view.link.href, profile);
     await chrome.waitFor("typeof data === 'object' && data?.project?.milestones?.length === 5");
     await press(chrome, "document.querySelector('[data-tab=roadmap]')");
     await chrome.waitFor("!document.querySelector('[data-pane=roadmap]').hidden && document.querySelectorAll('#roadmap-list > [data-key]').length > 0");
@@ -522,7 +551,7 @@ test('the roadmap keeps every upcoming release open [N26]', {
       viewport:document.documentElement.clientWidth,scroll:document.documentElement.scrollWidth,body:document.body.scrollWidth};
   })())`));
   try {
-    chrome = await openSnapshotChrome(executable, view.link.href, profile);
+    chrome = await openRoadmapChrome(executable, view.link.href, profile);
     await chrome.waitFor("data?.project?.milestones?.length === 5");
     await press(chrome, "document.querySelector('[data-tab=roadmap]')");
     for (const width of [375, 1280]) {
@@ -634,7 +663,7 @@ test('the roadmap panel jumps to each release [N26]', {
       viewport:document.documentElement.clientWidth,scrollY:window.scrollY,pageWidth:Math.max(document.documentElement.scrollWidth,document.body.scrollWidth)};
   })())`));
   try {
-    chrome = await openSnapshotChrome(executable, view.link.href, profile);
+    chrome = await openRoadmapChrome(executable, view.link.href, profile);
     await chrome.waitFor('data?.project?.milestones?.length === 14');
     // The panel's breakpoint is below 900px, not at it: at 900 the panel stays on the right, sticky, with its own
     // Shipping; at 899 it is the chip row above the list, and the counts sit under the next release.
@@ -735,7 +764,7 @@ test('a refresh between pointer down and up preserves a roadmap release click [N
   const profile = mkdtempSync(join(tmpdir(), 'pullboard-roadmap-refresh-press-'));
   let chrome, trace;
   try {
-    chrome = await openSnapshotChrome(executable, view.link.href, profile);
+    chrome = await openRoadmapChrome(executable, view.link.href, profile);
     await chrome.waitFor('data?.project?.milestones?.length === 8');
     for (const width of [375,1280]) {
       await chrome.send('Emulation.setDeviceMetricsOverride', { width, height:900, deviceScaleFactor:1, mobile:false });
@@ -794,7 +823,7 @@ test('the roadmap chips keep their scroll through a redraw with wide fonts [N26]
   const labels = async () => JSON.parse(await chrome.stable("JSON.stringify([...document.querySelectorAll('#roadmap-releases .roadmap-release > span')].map((e) => { const r = document.createRange(); r.selectNodeContents(e); return [e.textContent, r.getBoundingClientRect().width]; }))"));
   const widths = (list) => JSON.stringify(list.map(([name, width]) => [name, Math.round(width * 100) / 100]));
   try {
-    chrome = await openSnapshotChrome(executable, view.link.href, profile);
+    chrome = await openRoadmapChrome(executable, view.link.href, profile);
     await chrome.waitFor('data?.project?.milestones?.length === 13');
     await chrome.send('Emulation.setDeviceMetricsOverride', { width: 375, height: 900, deviceScaleFactor: 1, mobile: false });
     await chrome.waitFor('innerWidth === 375');
@@ -865,7 +894,7 @@ test('the roadmap panel counts the next release by stage [N26]', {
       documentWidth:Math.max(document.documentElement.scrollWidth,document.body.scrollWidth),viewport:document.documentElement.clientWidth,viewportHeight:document.documentElement.clientHeight};
   })())`));
   try {
-    chrome = await openSnapshotChrome(executable, view.link.href, profile);
+    chrome = await openRoadmapChrome(executable, view.link.href, profile);
     await chrome.waitFor('data?.project?.milestones?.length === 2');
     await press(chrome, "document.querySelector('[data-tab=roadmap]')");
     for (const width of [375, 1280]) {
@@ -926,7 +955,7 @@ test('the roadmap shows landed, accepted and past target [N26]', { timeout: 90_0
   const view=await startView(box),profile=mkdtempSync(join(tmpdir(),'pullboard-roadmap-truth-'));let chrome;
   const milestone=name=>`document.querySelector('[data-key="m:${name}"]')`;
   try {
-    chrome=await openSnapshotChrome(executable,view.link.href,profile);await chrome.waitFor('data?.project?.milestones?.length===6');
+    chrome=await openRoadmapChrome(executable,view.link.href,profile);await chrome.waitFor('data?.project?.milestones?.length===6');
     const apiSummary=JSON.parse(await chrome.stable("JSON.stringify(data.project.milestones.find(m=>m.name==='State summary').summary)"));
     assert.deepEqual(apiSummary,rawRoadmap.milestones.find(m=>m.name==='State summary').summary,'the live API carries the real CLI summary unchanged');
     await press(chrome,"document.querySelector('[data-tab=roadmap]')");
@@ -1033,7 +1062,7 @@ test('a blocked roadmap item shows its dot and expands to say why [N26]', { time
   /** Count item reads, excluding ordinary board polling. */
   async function reads() { return JSON.parse(await chrome.stable('JSON.stringify(window.__requests)')).filter(url => /\/items\/\d/.test(url)); }
   try {
-    chrome = await openSnapshotChrome(executable, view.link.href, profile);
+    chrome = await openRoadmapChrome(executable, view.link.href, profile);
     await chrome.waitFor('data?.project?.milestones?.length===1');
     await press(chrome, "document.querySelector('[data-tab=roadmap]')");
     await chrome.waitFor(`${row('#2')}?.querySelector('.block-dot')`);
@@ -1136,7 +1165,7 @@ test('the expanded row keeps send-backs short and names agents plainly [N26]', {
     return await chrome.stable(`${row(id)}.parentElement.querySelector('.milestone-why').textContent`);
   }
   try {
-    chrome = await openSnapshotChrome(executable, view.link.href, profile);
+    chrome = await openRoadmapChrome(executable, view.link.href, profile);
     await chrome.send('Emulation.setLocaleOverride', { locale: 'en-US' });
     await chrome.send('Page.reload');
     await chrome.waitFor('data?.project?.milestones?.length===1');
@@ -1175,7 +1204,7 @@ test('a release jump on a phone leaves its heading below the top bar [N26]', { t
   const profile = mkdtempSync(join(tmpdir(), 'pullboard-roadmap-phone-jump-'));
   let chrome;
   try {
-    chrome = await openSnapshotChrome(executable, view.link.href, profile);
+    chrome = await openRoadmapChrome(executable, view.link.href, profile);
     await chrome.waitFor('data?.project?.milestones?.length === 12');
     await chrome.send('Emulation.setDeviceMetricsOverride', { width: 375, height: 812, deviceScaleFactor: 1, mobile: false });
     await chrome.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
@@ -1242,7 +1271,7 @@ test('the release chevron lines up with its title [N26]', { timeout: 90_000 }, a
       offset: mark ? Math.round(((mark.top + mark.height / 2) - (line.top + line.height / 2)) * 10) / 10 : null };
   }))`));
   try {
-    chrome = await openSnapshotChrome(executable, view.link.href, profile);
+    chrome = await openRoadmapChrome(executable, view.link.href, profile);
     await chrome.waitFor('data?.project?.milestones?.length === 3');
     await press(chrome, "document.querySelector('[data-tab=roadmap]')");
     await chrome.waitFor("!document.querySelector('[data-pane=roadmap]').hidden && document.querySelector('[data-key=\"shipped\"] > .milestone-head')");
@@ -1266,5 +1295,24 @@ test('the release chevron lines up with its title [N26]', { timeout: 90_000 }, a
     if (chrome) await closeSnapshotChrome(chrome);
     rmSync(profile, { recursive: true, force: true });
     await view.stop();
+  }
+});
+
+test('a roadmap case that times out names the page state and its waiting step [N26]', { timeout: 90_000 }, async () => {
+  const executable = chromeExecutable();
+  assert.ok(executable, 'the roadmap diagnostics need real Chrome');
+  const profile = mkdtempSync(join(tmpdir(), 'pullboard-roadmap-wait-'));
+  let chrome;
+  try {
+    chrome = await openRoadmapChrome(executable, 'about:blank', profile);
+    let failure = null;
+    const neverArrives = ['fal', 'se'].join('');
+    try { await chrome.waitFor(neverArrives, 1_500); } catch (error) { failure = error; } // budget: hang ceiling for the control's own wait that never arrives; no throughput claim.
+    assert.ok(failure, 'a wait that never arrives times out');
+    assert.match(failure.message, /waiting for step: false/u, 'the timeout names the step it waited on');
+    assert.match(failure.message, /the roadmap showed \{/u, 'a wait that never arrives names the roadmap state it saw');
+  } finally {
+    if (chrome) await closeSnapshotChrome(chrome);
+    rmSync(profile, { recursive: true, force: true });
   }
 });
