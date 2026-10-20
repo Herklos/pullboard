@@ -323,7 +323,8 @@ function queueFaults(board, { items, at }) {
   }
 
   const compare = buildOrder(board);
-  for (const claim of items.filter((item) => item.item_status === 'claimed')) {
+  // A lapsed claim is CLAIM_LAPSED's to report; only a live claim can rank behind free work.
+  for (const claim of items.filter((item) => item.item_status === 'claimed' && Date.parse(item.item_lease_until ?? '') > at)) {
     const holder = agents.find((agent) => agent.id === claim.item_owner);
     if (!holder) continue;
     const ahead = waiting.filter((entry) => entry.lane === holder.lane && canTake(holder.route, entry.route))
