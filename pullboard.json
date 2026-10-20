@@ -7,7 +7,7 @@
     "test/refusal-next-steps.test.js"
   ],
   "spec": "SPEC.md",
-  "verify": "any",
+  "verify": { "policy": "any", "unrelatedTrunkMoves": true, "composeAtAdmission": true },
   "lease": "2h",
   "lanes": {
     "core": {
@@ -91,5 +91,8 @@
     ],
     "noEmoji": true
   },
-  "staticChecks": "node --experimental-vm-modules --disable-warning=ExperimentalWarning bin/static-style-checks.js"
+  "staticChecks": "node --experimental-vm-modules --disable-warning=ExperimentalWarning bin/static-style-checks.js",
+  "flakes": {
+    "rerun": true
+  }
 }

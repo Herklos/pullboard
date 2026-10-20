@@ -59,7 +59,7 @@ test('[R1,R2,A1] stats JSON is versioned, text states the same proof numbers and
   const observed = Date.parse(json.data.stats.flow.asOf);
   assert.ok(observed >= observationBefore && observed <= Date.now(), 'the CLI records its own observation clock');
   const expected = proofStats(board, { now: observed });
-  assert.deepEqual(json.data, { version: 1, stats: expected });
+  assert.deepEqual(json.data, { version: 1, stats: expected, gateWaits: [] }, 'a board with no gated runs reports no gate waits (#836)');
   assert.deepEqual([expected.submissions, expected.rejections, expected.rejectionShare, expected.merged, expected.mergedWithoutAccept], [2, 1, 0.5, 1, 0]);
   const text = await run(root, ['stats']);
   assert.equal(text.code, 0, text.stderr);
@@ -72,6 +72,7 @@ test('[R1,R2,A1] stats JSON is versioned, text states the same proof numbers and
   assert.match(text.stdout, /build: average 0 min · median 0 min · 1 measured/u);
   assert.match(text.stdout, /review: average unmeasured · median unmeasured · 0 measured; 1 of 1 completed items unmeasured/u);
   assert.match(text.stdout, /not enough measured flow to name a bottleneck \(1 items completed since the beginning, none with every stage measured\)/u);
+  assert.match(text.stdout, /gate waits, last day: no gated runs recorded/u);
   assert.deepEqual(store.events(board), before, 'reading statistics appends no move');
 });
 
