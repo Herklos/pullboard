@@ -24,44 +24,19 @@ function declaredLoads(source) {
     .filter(path => MODULE.test(path) && !path.startsWith('../') && !path.startsWith('/'));
 }
 
-/** Calls whose result is a path built from their arguments, so a literal passed to them still bounds the target. */
-const PATH_CALLS = new Set(['join', 'resolve', 'URL', 'fileURLToPath', 'pathToFileURL']);
+/** The one computed form the selector resolves (#803): new URL('<literal relative path>', import.meta.url), with or without .href. */
+const URL_LITERAL = /^\s*new\s+URL\(\s*(['"])([^'"\\\r\n]+)\1\s*,\s*import\.meta\.url\s*\)(?:\s*\.\s*href)?\s*$/u;
 
 /**
- * Whether a computed import's argument leaves its target open: a fallback (||, ??) or a ternary, an environment
- * variable, a template interpolation, or a bare variable that picks the file. A variable that only supplies the
- * directory, as the first argument of join or resolve, does not pick the file, so it stays readable.
- *
- * @param {string} argument the source text between the import call's parentheses
- * @returns {boolean} true when some branch of the target is unresolved
- */
-function unresolvedBranch(argument) {
-  if (/\|\||\?\?|\?|process\s*\.\s*env|\$\{/u.test(argument)) return true;
-  // Remove literal text, then directory variables, then calls and members; what is left is a bare variable.
-  const bare = argument
-    .replace(/(['"`])(?:\\[\s\S]|(?!\1)[^\\\r\n])*\1/gu, '""')
-    .replace(/\b(join|resolve)\(\s*[A-Za-z_$][\w$.]*\s*,/gu, '$1(');
-  for (const match of bare.matchAll(/[A-Za-z_$][\w$]*/gu)) {
-    const before = bare[match.index - 1] ?? '';
-    const after = bare.slice(match.index + match[0].length).trimStart()[0] ?? '';
-    // Only known path builders may be called: what any other call returns is decided at run time (#803).
-    if (after === '(') { if (PATH_CALLS.has(match[0])) continue; return true; }
-    if (before === '.' || after === '.' || match[0] === 'new') continue;
-    return true;
-  }
-  return false;
-}
-
-/**
- * The repository modules a computed import names by literal path, such as join(root, 'src/x.js'). A computed
- * import whose target has any unresolved branch (see unresolvedBranch) is not read from its literal; neither is
- * one with no literal module path. Either leaves the file unreadable, so the caller falls back to the whole suite.
- * Matching by the path's tail can select a module too many, never too few.
+ * The repository modules a test file's computed imports read, when every one of them is new URL('<literal relative
+ * path>', import.meta.url). Any other computed specifier (a variable, a call, an environment value, any expression)
+ * cannot be resolved safely, so the file must declare what it loads; without that this returns null and the caller
+ * falls back to the whole suite (#803).
  *
  * @param {string} source the test file's text
  * @param {string} path the test file's repository path
  * @param {string[]} modulePaths every module path in the committed tree
- * @returns {string[] | null} the modules it reads, or null when some computed import cannot be read
+ * @returns {string[] | null} the modules it reads, or null when some computed import is not that literal form
  */
 function literalLoads(source, path, modulePaths) {
   const targets = new Set();
@@ -70,18 +45,12 @@ function literalLoads(source, path, modulePaths) {
     if (/^\s*(?:'[^'\\\r\n]*'|"[^"\\\r\n]*")\s*\)/u.test(source.slice(start))) continue;
     let depth = 1, end = start;
     for (; end < source.length && depth; end += 1) depth += source[end] === '(' ? 1 : source[end] === ')' ? -1 : 0;
-    const argument = source.slice(start, end);
-    if (unresolvedBranch(argument)) return null;
-    const values = [...argument.matchAll(/(['"`])((?:\\.|(?!\1)[^\\\r\n])*)\1/gu)].map(match => match[2].split(/[?#]/u)[0]);
-    const modules = values.filter(value => MODULE.test(value) && posix.basename(value).replace(MODULE, '') !== '');
-    if (!modules.length) return null;
-    for (const value of modules) {
-      const relative = posix.normalize(posix.join(posix.dirname(path), value));
-      const tail = posix.normalize(value).replace(/^(?:\.\.?\/)+/u, '');
-      const matches = modulePaths.filter(candidate => candidate === relative || candidate === tail || candidate.endsWith('/' + tail));
-      if (!matches.length) return null;
-      for (const match of matches) targets.add(match);
-    }
+    const literal = URL_LITERAL.exec(source.slice(start, end - 1));
+    if (!literal) return null;
+    const value = literal[2].split(/[?#]/u)[0];
+    const target = posix.normalize(posix.join(posix.dirname(path), value));
+    if (!MODULE.test(target) || !modulePaths.includes(target)) return null;
+    targets.add(target);
   }
   return [...targets];
 }

@@ -248,10 +248,12 @@ test('a change to one test file selects only what reads it [V4,C7]', (t) => {
   assert.match(selection.reason, /test\/guess\.test\.js/u, 'the fallback names the file that cannot be read');
 });
 
-test('a computed import through a helper call is not read from the literal it passes [V4,C7]', (t) => {
+test('an undeclared non-literal specifier, through a helper or a path builder, selects the whole suite [V4,C7]', (t) => {
   for (const loader of [
     "function pick(fallback) { return process.env.CASE_MODULE || fallback; }\nawait import(new URL(pick('../src/api.js'), import.meta.url).href);\n",
     "const helpers = { pick: (fallback) => process.env.CASE_MODULE || fallback };\nawait import(new URL(helpers.pick('../src/api.js'), import.meta.url).href);\n",
+    // A path builder is a call too: without a declaration even join(dir, literal) is not resolved (#803's refrozen bar).
+    "import { join } from 'node:path';\nconst dir = process.env.CASE_DIR ?? '..';\nawait import(join(import.meta.dirname, dir, 'src/api.js'));\n",
   ]) {
     const box = graph(t);
     box.put('src/b.js', 'export const value = 1;\n');
