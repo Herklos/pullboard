@@ -149,6 +149,7 @@ export const NEXT_STEPS = Object.freeze({
   BAD_BROWSER_RESOURCE: 'request the "gate" resource with browser: true',
   BAD_CHECK: 'ask your coordinator to set the check: pullboard edit <id> --check "<command>"',
   BAD_CHECK_BASELINE: 'the coordinator sets the check again: pullboard edit <id> --check "<command>"',
+  CHECK_MASKS_EXIT: 'set the check to run its proof alone, or capture the output first and test it, then retry: pullboard edit <id> --check "<command>"',
   BAD_CONFIG: 'fix pullboard.json as the message says, then commit it: git commit -m "chore: fix pullboard config" pullboard.json',
   BAD_CURSOR: 'pass a nonnegative integer from the last response you received',
   BAD_DECISION: 'choose accept or reject with a supported reason: pullboard verify <id> reject --reason TEST_FAILURE --note "<what failed>"',

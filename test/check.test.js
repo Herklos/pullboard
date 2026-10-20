@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { after, test } from 'node:test';
-import { addItem, closeBoard, openBoard } from '../src/board.js';
+import { addItem, closeBoard, openBoard, validateItemAddition } from '../src/board.js';
 import { prepareCheckBaseline } from '../src/check-baseline.js';
 import { removeFixtureDirectory } from './cleanup-diagnostics.js';
 
@@ -302,4 +302,46 @@ test('check cleanup waits for every background writer [C7]', async () => {
   });
   await waitForFile(startedFile, child, `background writer ${baseline.request} started its check`);
   assert.equal(existsSync(completedFile), false, 'the baseline is still writing after the test body reaches cleanup');
+});
+
+test('a check that pipes its proof into tail is refused [C7,V4]', () => {
+  const board = openBoard(':memory:');
+  try {
+    const masked = { by: 'coordinator', lane: 'core', title: 'Masked proof', criterion: 'the proof passes', route: 'strong', check: `${shellWord(process.execPath)} -e "process.exit(1)" | tail -5` };
+    assert.throws(() => validateItemAddition(board, masked), (error) => error.code === 'CHECK_MASKS_EXIT'
+      && /pipes its proof into tail/u.test(error.message) && /pipefail/u.test(error.message));
+  } finally { closeBoard(board); }
+});
+
+test('a captured-output check is accepted [C7,V4]', () => {
+  const board = openBoard(':memory:');
+  try {
+    const captured = `out=$(${shellWord(process.execPath)} -e "process.exit(1)"); printf '%s\\n' "$out" | grep -Eq 'never'`;
+    assert.doesNotThrow(() => validateItemAddition(board, { by: 'coordinator', lane: 'core', title: 'Captured proof', criterion: 'the proof passes', route: 'strong', check: captured }));
+  } finally { closeBoard(board); }
+});
+
+/** Return the refusal code a check gets from the same validator add and edit use, or null when it passes [C7,V4]. */
+function maskRefusal(check) {
+  const board = openBoard(':memory:');
+  try {
+    validateItemAddition(board, { by: 'coordinator', lane: 'core', title: 'Mask probe', criterion: 'the proof passes', route: 'strong', check });
+    return null;
+  } catch (error) { return error.code; } finally { closeBoard(board); }
+}
+
+test('an uncaptured grep that decides the exit is refused [C7,V4]', () => {
+  assert.equal(maskRefusal('node -e "process.exit(1)" | grep -q x'), 'CHECK_MASKS_EXIT');
+});
+
+test('a pipe into xargs that hides the exit is refused [C7,V4]', () => {
+  assert.equal(maskRefusal('node -e "process.exit(1)" | xargs echo'), 'CHECK_MASKS_EXIT');
+});
+
+test('a bare pipefail mention in an echo does not stop a masked pipe being refused [C7,V4]', () => {
+  assert.equal(maskRefusal('echo pipefail; node -e "process.exit(1)" | tail -5'), 'CHECK_MASKS_EXIT');
+});
+
+test('a check that sets pipefail as a command is accepted [C7,V4]', () => {
+  assert.equal(maskRefusal('set -o pipefail; node -e "process.exit(1)" | tail -5'), null);
 });
