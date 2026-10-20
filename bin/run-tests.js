@@ -259,10 +259,16 @@ function testEnvironment(sandbox, gateMarkers = {}) {
 function runTests(args, env, concurrency) {
   let files = concurrency.files;
   const forwarded = [];
+  const namePatterns = [];
   for (let at = 0; at < args.length; at += 1) {
     const argument = args[at];
     if (argument === '--') { forwarded.push(...args.slice(at)); break; }
-    if (/^--test[-_]concurrency(?:=|$)/u.test(argument)) {
+    if (/^--test[-_]name[-_]pattern(?:=|$)/u.test(argument)) {
+      // Node reads a name pattern only before the files, so a pattern written after them moves ahead [C7].
+      const value = argument.includes('=') ? argument.slice(argument.indexOf('=') + 1) : args[++at];
+      if (value === undefined) throw new Error('--test-name-pattern requires a value');
+      namePatterns.push(`--test-name-pattern=${value}`);
+    } else if (/^--test[-_]concurrency(?:=|$)/u.test(argument)) {
       const value = argument.includes('=') ? argument.slice(argument.indexOf('=') + 1) : args[++at];
       if (!/^[1-9][0-9]*$/u.test(value ?? '') || !Number.isSafeInteger(Number(value))) {
         throw new Error('--test-concurrency must be a positive integer');
@@ -281,6 +287,7 @@ function runTests(args, env, concurrency) {
     ...(!reporter ? ['--test-reporter=tap'] : []),
     '--import',
     runner,
+    ...namePatterns,
     ...forwarded,
   ];
   return spawnSync(process.execPath, nodeArgs, { env, stdio: 'inherit' });
