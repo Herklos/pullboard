@@ -44,6 +44,7 @@ import {
   storeTriggers,
 } from './machine.js';
 import { Refused } from './refused.js';
+import { refuseMaskedExit } from './check-mask.js';
 import {
   ROUTES,
   canTake,
@@ -693,6 +694,7 @@ function checkRouted({ brief, route, criterion, check }) {
   if (brief.length > BRIEF_LIMIT) {
     throw new Refused('BRIEF_TOO_LONG', `the brief is ${brief.length} characters; keep it under ${BRIEF_LIMIT} and point to longer docs by path`);
   }
+  refuseMaskedExit(check);
   if (route === 'strong') return;
   const sections = briefSections(brief);
   const missing = [
