@@ -1114,3 +1114,21 @@ test('an item whose detail read is dropped once loads on its own [N26]', { timeo
     }
   }
 });
+
+test('a hosted wait that times out names the page state and Chrome\'s network service [N26]', { timeout: 60_000 }, async () => { // budget: hang ceiling for one Chrome and one deliberately failed wait.
+  const executable = chromeExecutable();
+  assert.ok(executable, 'the named-wait control needs real Chrome');
+  const profile = mkdtempSync(join(tmpdir(), 'pullboard-named-wait-'));
+  let chrome;
+  try {
+    chrome = namedWaits(await openSnapshotChrome(executable, 'about:blank', profile), profile);
+    // A wait that can never pass: its error must carry what the page showed and Chrome's network-service pids (#908).
+    const error = await chrome.waitFor('false', 1_000).then(() => null, (failure) => failure); // budget: hang ceiling for a condition that never holds.
+    assert.ok(error, 'the impossible wait failed');
+    assert.match(error.message, /; the hosted page showed \{"origin":"[^"]*","search":"[^"]*","note":[^,]*,"rows":\d+,"detail":"[^"]*","relaySession":/u, 'the failure names the page state');
+    assert.match(error.message, /; chrome \{"networkService":\{"atStart":\[\d*\],"now":\[\d*\]\}/u, 'and Chrome\'s network-service pids, start and now');
+  } finally {
+    try { if (chrome) await closeSnapshotChrome(chrome); }
+    finally { rmSync(profile, { recursive: true, force: true }); }
+  }
+});
