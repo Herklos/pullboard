@@ -11,7 +11,6 @@ import {
   spawnSync,
 } from 'node:child_process';
 import {
-  appendFileSync,
   existsSync,
   mkdirSync,
   readdirSync,
@@ -22,7 +21,6 @@ import {
 } from 'node:fs';
 import {
   hostname,
-  loadavg,
 } from 'node:os';
 import {
   basename,
@@ -32,7 +30,6 @@ import {
   relative,
   resolve,
 } from 'node:path';
-import { performance } from 'node:perf_hooks';
 import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import {
@@ -41,7 +38,16 @@ import {
   refuseNextIdle,
 } from './next-steps.js';
 import { reviewerStartup } from './next-steps.js';
+import * as seatCheckout from './seat-checkout.js';
+import { submitPreflight } from './submit-preflight.js';
 import * as store from './board.js';
+import * as nativeFlakes from './native-flake-cli.js';
+import {
+  firstInputLine,
+  hookRead,
+  readStdin,
+  traceServeStartup,
+} from './cli-support.js';
 import {
   CONFIG_FILE,
   COORDINATOR,
@@ -459,20 +465,6 @@ export { gateWaitReporter };
 const CHECKOUT_LEASES = new WeakMap();
 const CHECKOUT_BOARD_ONLY = new WeakMap();
 let startupMainTraced = false;
-
-/** Append an opt-in startup phase marker for the real CLI fixture measurement [A2,C7]. */
-function traceServeStartup(phase) {
-  const path = process.env.PULLBOARD_STARTUP_TRACE_FILE;
-  const entry = process.env.PULLBOARD_STARTUP_TRACE_ENTRY;
-  if (!path || !entry || resolve(process.argv[1] ?? '') !== resolve(entry)) return;
-  try {
-    appendFileSync(path, `${JSON.stringify({ phase, at: Date.now(), elapsedMs: performance.now(),
-      processId: process.pid, cpuUsage: process.cpuUsage(), loadAverage: loadavg(),
-      eventLoopUtilization: performance.eventLoopUtilization() })}\n`);
-  } catch {
-    // Diagnostic tracing must not change normal CLI behavior.
-  }
-}
 
 /**
  * Read the collision baseline from the primary branch, retained trunk, or detached HEAD default.
@@ -1030,7 +1022,7 @@ async function bindCheckoutSession(io, positionals, values) {
     const ctx = context(io);
     agent = withBoard(ctx, (board) => store.agentAt(board, info.root)?.agent_id
       ?? (command === 'hook' && store.landingBatches(board).some((batch) => batch.root === info.root && !['landed', 'blocked'].includes(batch.state)) ? COORDINATOR : null));
-    if (!agent && command !== 'join') throw new Refused('NOT_JOINED', 'this worktree has not joined a lane; run pullboard join <lane> --model "<model name>"');
+    if (!agent && command !== 'join') throw withBoard(ctx, (board) => seatCheckout.unjoinedRefusal(info, store.listAgents(board)));
   }
   if (['shout', 'fact'].includes(command) && localSessionMatches(info, { agent: agent ?? 'unjoined agent', digest })) {
     CHECKOUT_BOARD_ONLY.set(io, command);
@@ -2316,6 +2308,7 @@ function refuseUncommittedSetup(mainRoot, config) {
  */
 function readCommands(io, { first, second, rest, values }) {
   return {
+    flakes: () => nativeFlakes.command(context(io), { first, second, rest }, withBoard),
     doctrine: async () => {
       if (first !== 'check' || second || rest.length) throw new Refused('USAGE', 'pullboard doctrine check');
       const ctx = context(io);
@@ -2698,6 +2691,7 @@ async function submitHere(ctx, id) {
   const held = withBoard(ctx, (board) => {
     const me = whoAmI(ctx, board);
     const item = store.getItem(board, id);
+    seatCheckout.refuseHeldElsewhere(ctx.info, store.listAgents(board), item, 'submit');
     if (item.item_status !== 'claimed' || item.item_owner !== me.id) throw new Refused('NOT_YOURS', 'claim this item before submitting it');
     const correction = store.pendingRefreezeProblem(board, id);
     if (correction) throw correction;
@@ -2740,6 +2734,7 @@ async function submitHere(ctx, id) {
   if (stray.length) throw new Refused('UNTRACKED', `commit or ignore ${stray.length} untracked file(s), e.g. ${stray[0]}`);
   const commit = headCommit(root);
   if (!commit) throw new Refused('NO_COMMIT', 'nothing committed yet');
+  withBoard(ctx, (board) => submitPreflight(board, id, { agentId: me.id, commit, tree: headTree(root) ?? '' }));
   const trunk = requireTrunkMerge(root, commit);
   withBoard(ctx, (board) => refuseUnverifiedStack(root, board, held, commit, trunk));
   // Doctrine counts only fall: accepted main's rules, at this exact commit (D1). No rule, no change.
@@ -2754,7 +2749,8 @@ async function submitHere(ctx, id) {
     submitInvariants: acceptedMain.config.submitInvariants,
     // The accepted project runner interprets its current invariant files; candidate config cannot replace it.
     ...(acceptedMain.config.submitInvariants.length ? { affectedTests: acceptedMain.config.affectedTests } : {}) };
-  const gate = await runSubmitGate(root, submitConfig, { base: claimHead, trunk: acceptedMain.commit, check: frozenCheck(held), agent: me.id, item: String(id), onWait: queuedItemLease(ctx, held, me.id, 'build'), onBrowserFallback: browserAdmissionReporter(ctx.io, ctx.io.relayJson) });
+  const gate = await runSubmitGate(root, submitConfig, { base: claimHead, trunk: acceptedMain.commit, check: frozenCheck(held), agent: me.id, item: String(id), onWait: queuedItemLease(ctx, held, me.id, 'build'), onBrowserFallback: browserAdmissionReporter(ctx.io, ctx.io.relayJson),
+    onFailure: nativeFlakes.observer(ctx, { kind: 'submit', main: acceptedMain.commit, config: submitConfig }, { ordered, withBoard, resourceAgent }) });
   // Only the person's live waivers can pass a red proof, failure by failure; the item's own check is never waived [B3].
   const waived = !gate.isGreen && gate.check?.green ? withBoard(ctx, (board) => waivedFailures(board, accountedFailures(gate, root))) : null;
   if (!gate.isGreen && !waived) {
@@ -3012,7 +3008,7 @@ async function verifyHere(ctx, id, { second, values }) {
         const browser = !browserFreeChecksEnabled() || await checkNeedsBrowser(root, frozenCheck(item), { commit: checkedCommit, onFallback: browserAdmissionReporter(ctx.io, ctx.io.relayJson) });
         // A private checked composition needs this machine's live local gate markers [C7,V4].
         const shortEligible = Boolean(await explicitCheckFiles(root, frozenCheck(item), { commit: checkedCommit }));
-        check = await withGateSlot(root, (lease) => checkAtCommit(root, checkedItem, { waitMs: lease.waitMs, gateLease: lease }), { browser, remote: false, agent: me.id, item: String(id), kind: 'review', itemCheck: true, shortEligible, onWait: queuedItemLease(ctx, item, me.id, 'review') });
+        check = await withGateSlot(root, nativeFlakes.verify(ctx, checkedItem, frozenCheck(item), { board, main: trunk.commit, commit: checkedCommit }, { ordered, withBoard, resourceAgent }), { browser, remote: false, agent: me.id, item: String(id), kind: 'review', itemCheck: true, shortEligible, onWait: queuedItemLease(ctx, item, me.id, 'review') });
       } else {
         check = checkAtCommit(root, checkedItem);
       }
@@ -3260,6 +3256,7 @@ async function nextHere(io, values) {
     throw new Refused('USAGE', '--wait is a number of minutes from 0 to 240');
   }
   const deadline = Date.now() + minutes * 60_000;
+  const origin = ctx.info.root;
   for (;;) {
     const found = await nextOnce(ctx, values);
     if (found.context) ctx = found.context;
@@ -3283,8 +3280,9 @@ async function nextHere(io, values) {
         io.say(`check out exactly that commit, here: ${here} git switch --detach ${item.item_commit}`);
         io.say(`then: ${here} pullboard verify ${item.item_id} accept${as} --note "how you proved it", or reject${as} --reason CODE --note "what failed"`);
       } else {
+        if (found.seat && found.seat.path !== origin) io.say(seatCheckout.seatLeadLine(found.seat, item, found.held));
         if (found.reviewSkipped) io.say(`${reviewQueueLine(ctx, found.reviewSkipped, span)}; explicit build intent recorded with this claim`);
-        io.say(`${found.held ? 'you hold' : 'claimed'} #${item.item_id}: ${item.item_title}`);
+        io.say(`${found.held ? (found.seat && found.seat.path !== origin ? `${found.seat.agent} holds` : 'you hold') : 'claimed'} #${item.item_id}: ${item.item_title}`);
         if (found.seat) io.say(`${found.seat.created ? 'opened' : 'work in'} ${found.seat.agent}, ${found.seat.lane} lane: ${here}`);
         if (found.shared?.length) io.say(`it touches ${found.shared.length === 1 ? 'a file' : `${found.shared.length} files`} you worked in recently: ${found.shared.slice(0, 4).join(', ')}`);
         if (item.item_criterion) io.say(`criterion: ${item.item_criterion}`);
@@ -3563,6 +3561,7 @@ function workCommands(io, args) {
         const held = first ? store.getItem(board, idArg(first))
           : store.listItems(board).find((entry) => entry.item_status === 'claimed' && entry.item_owner === me.id && entry.item_parent_id === null);
         if (!held) throw new Refused('NOT_HOLDING', 'you hold no item; name one, pullboard check <id>, or run the project gate: pullboard gate');
+        seatCheckout.refuseHeldElsewhere(ctx.info, store.listAgents(board), held, 'check');
         return { item: held, author: store.itemCheckAuthor(board, held.item_id), caller: me.id, agents: store.listAgents(board) };
       });
       const check = frozenCheck(item);
@@ -3583,7 +3582,7 @@ function workCommands(io, args) {
       await runStaticChecks(ctx.info.root, (item.item_claim_head ? itemPolicy(ctx.info.root, item) : mainPolicy(ctx.info.root)).config, { agent: caller, item: String(item.item_id), onWait: queuedItemLease(ctx, item, caller, 'build'), onBrowserFallback: browserAdmissionReporter(io, values.json) });
       const browser = !browserFreeChecksEnabled() || await checkNeedsBrowser(ctx.info.root, check, { onFallback: browserAdmissionReporter(io, values.json) });
       const shortEligible = Boolean(await explicitCheckFiles(ctx.info.root, check));
-      const run = await withGateSlot(ctx.info.root, (lease) => runProfiledShell(ctx.info.root, check, { waitMs: lease.waitMs, artifactPrefix: `pullboard-check-${item.item_id}`, persistLog: true, gateLease: lease }), { browser, agent: caller, item: String(item.item_id), kind: 'check', itemCheck: true, shortEligible, onWait: queuedItemLease(ctx, item, caller, 'build') });
+      const run = await withGateSlot(ctx.info.root, nativeFlakes.check(ctx, item, check, { ordered, withBoard, resourceAgent }), { browser, agent: caller, item: String(item.item_id), kind: 'check', itemCheck: true, shortEligible, onWait: queuedItemLease(ctx, item, caller, 'build') });
       refuseSandboxBlocked(run);
       io.result?.({ id: item.item_id, green: run.isGreen, seconds: run.seconds, check, by, report: run.isGreen ? '' : digestOf(run.output) });
       const timings = timingDigest(run.profile);
@@ -3642,6 +3641,7 @@ function workCommands(io, args) {
     }),
     release: () => act(async (ctx, board, me) => {
       const args = [idArg(first), me.id, textArg(io, values, 'note') ?? ''];
+      seatCheckout.refuseHeldElsewhere(ctx.info, store.listAgents(board), store.getItem(board, args[0]), 'release');
       const problem = store.reviewReleaseNoteProblem(board, ...args);
       if (problem) throw problem;
       const review = await ordered(ctx, board, 'release', args);
@@ -4221,45 +4221,6 @@ async function specCommand(io, { first, second, rest, values }) {
   throw new Refused('USAGE', 'pullboard spec --json | check | view | show <id> | unmet [--must] | draft "<text>" | signoff <ids> | signers add | approve <ids> | decline <ids> --reason "why" | answer <id> "<choice or text>" | apply');
 }
 
-/** Read one consent line without waiting for EOF in an interactive terminal [V2]. */
-async function firstInputLine(stdin) {
-  if (!stdin) return '';
-  let text = '';
-  for await (const chunk of stdin) {
-    text += chunk.toString();
-    const newline = text.indexOf('\n');
-    if (newline >= 0) return text.slice(0, newline);
-    if (text.length > 256) return '';
-  }
-  return text;
-}
-
-/**
- * Read everything git writes on a hook's stdin, or nothing when run by hand.
- *
- * @param {any} stdin
- * @returns {Promise<string>}
- */
-async function readStdin(stdin) {
-  if (!stdin || stdin.isTTY) return '';
-  const chunks = [];
-  for await (const chunk of stdin) chunks.push(chunk);
-  return Buffer.concat(chunks).toString('utf8');
-}
-
-/** Wait up to the board's shared busy timeout while reading hook facts, without migrating its schema. */
-function hookRead(ctx, read) {
-  if (!existsSync(ctx.file)) return null;
-  const startedAt = Date.now();
-  let db;
-  try {
-    db = store.openBoardReadOnly(ctx.file);
-    return read({ db, clock: ctx.clock });
-  } catch (error) {
-    throw store.boardBusyError(ctx.file, startedAt, error);
-  } finally { db?.close(); }
-}
-
 /**
  * The hooks git runs. In a repo without pullboard.json they pass, so a stray hook never blocks.
  *
@@ -4512,7 +4473,8 @@ async function runCommand(argv, io) {
         throw error;
       }
       const waivers = values.landing ? withBoard(ctx, (board) => liveWaiverProjection(board)) : [];
-      const gate = await runGate(ctx.info.root, config, { landing: values.landing, agent: resourceAgent(ctx), onWait: gateWaitReporter(io), stages: Boolean(values.landing), waivers });
+      const gate = await runGate(ctx.info.root, config, { landing: values.landing, agent: resourceAgent(ctx), onWait: gateWaitReporter(io), stages: Boolean(values.landing), waivers,
+        onFailure: nativeFlakes.observer(ctx, { kind: values.landing ? 'land' : 'gate', config }, { ordered, withBoard, resourceAgent }) });
       // A landing gate honours the person's live waivers exactly as land does; a red run never stamps, so it stays waived, not green [B3,R3].
       const waived = values.landing && !gate.isGreen ? withBoard(ctx, (board) => waivedFailures(board, accountedFailures(gate, ctx.info.root))) : null;
       if (waived) {

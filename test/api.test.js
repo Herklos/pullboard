@@ -1006,6 +1006,15 @@ test('[A1] every catalog command and subcommand has a real CLI exercise', () => 
   assert.deepEqual(landing.items, []);
   json(source, source.repo, 'roadmap');
   json(source, source.repo, 'queue');
+  const failures = json(source, source.repo, 'flakes');
+  assert.deepEqual([failures.flakes, failures.unclassified, failures.regressions, failures.stable], [[], [], [], []]);
+  const failurePolicy = join(source.repo, 'pullboard.json');
+  const originalPolicy = readFileSync(failurePolicy, 'utf8');
+  assert.equal(json(source, source.repo, 'flakes', ['rerun', 'on'], 'rerun').flakes.rerun, true);
+  assert.equal(JSON.parse(readFileSync(failurePolicy, 'utf8')).flakes.rerun, true, 'the coordinator edits the private project policy');
+  assert.equal(json(source, source.repo, 'flakes', ['rerun', 'off'], 'rerun').flakes.rerun, false);
+  assert.equal(JSON.parse(readFileSync(failurePolicy, 'utf8')).flakes.rerun, false);
+  writeFileSync(failurePolicy, originalPolicy, 'utf8'); // These uncommitted policy edits do not alter the later catalog fixture.
   json(source, source.repo, 'rigor');
   const watch = json(source, source.repo, 'sentinel', ['propose', 'catalog-watch', '--check', 'true', '--every', 'hourly', '--owner', 'coordinator'], 'propose');
   assert.equal(watch.sentinel.status, 'pending');

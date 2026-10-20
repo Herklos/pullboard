@@ -97,6 +97,11 @@ import {
 } from './landing-exceptions.js';
 import { parseSpec } from './spec.js';
 import { invariantEvidence } from './submit-invariants.js';
+import { landingBatches } from './landing-batch-history.js';
+import {
+  NATIVE_FLAKE_ENGINE,
+  carriesFlakeDiagnostics,
+} from './flake-engine.js';
 import { preserveInvariantEvidence } from './submit-invariants.js';
 import { validateLandingBatch } from './submit-invariants.js';
 import { validateLandingRevision } from './submit-invariants.js';
@@ -105,6 +110,7 @@ import { SUBMISSION_PROOF_ENGINE } from './submit-invariants.js';
 export { landingFlakes, landingWaiverCovers, landingWaiverKind };
 export { acceptCheck } from './check-accept.js';
 export { proposeSentinel, decideSentinel, beginSentinelRun, finishSentinelRun } from './sentinels.js';
+export { flakeLedger, recordFlakeObservation } from './flakes.js';
 
 /** The seat readers live in seats.js; the board re-exports them so `store.*` callers keep one import. */
 export { agentAt, agentCreator, listAgents, nextSeatId, seatEnrolled, seatLineage, withVerifierStanding } from './seats.js';
@@ -2655,35 +2661,16 @@ export function recentShouts(board, limit = 40) {
   return board.db.prepare('SELECT * FROM shout ORDER BY shout_id DESC LIMIT ?').all(limit);
 }
 
-/**
- * Counts for the status line and the ledger's summary: items by status, verdicts by decision.
- *
- * @param {any} board
- * @returns {{ items: Record<string, number>, accepted: number, rejected: number }}
- */
-export function stats(board) {
-  const items = { open: 0, claimed: 0, submitted: 0, verified: 0, withdrawn: 0 };
-  for (const item of listItems(board, { all: true })) items[item.item_status] += 1;
-  const verdicts = board.db
-    .prepare('SELECT verdict_decision AS decision, COUNT(*) AS total FROM verdict GROUP BY verdict_decision')
-    .all();
-  const count = (decision) => verdicts.find((row) => row.decision === decision)?.total ?? 0;
-  return { items, accepted: count('ACCEPT'), rejected: count('REJECT') };
-}
+export { stats } from './board-stats.js';
 
-/** Read the latest append-only snapshot of each landing batch [B3,R3,R2]. */
-export function landingBatches(board) {
-  const batches = new Map();
-  for (const row of board.db.prepare("SELECT event_detail FROM event WHERE event_kind = 'landing_batch' ORDER BY event_id").all()) {
-    const { batch } = JSON.parse(row.event_detail);
-    batches.set(batch.id, batch);
-  }
-  return [...batches.values()];
-}
+export { landingBatches };
 
 /** Append one coordinator-owned batch revision without changing the board schema [B3,R3]. */
 export function recordLandingBatch(board, { agentId, batch, revision = 0 }) {
   coordinatorOnly(agentId, 'records landing batches');
+  if (carriesFlakeDiagnostics(batch) && (board.executionEngineVersion ?? ENGINE_VERSION) < NATIVE_FLAKE_ENGINE) {
+    throw new Refused('ENGINE_VERSION', `typed landing diagnostics require engine ${NATIVE_FLAKE_ENGINE}; upgrade Pullboard`);
+  }
   const evidence = (board.executionEngineVersion ?? ENGINE_VERSION) >= SUBMISSION_PROOF_ENGINE ? invariantEvidence(batch?.invariantEvidence) : undefined;
   validateLandingBatch(batch, revision);
   if ((board.executionEngineVersion ?? ENGINE_VERSION) >= VERDICT_REVIEW_ENGINE

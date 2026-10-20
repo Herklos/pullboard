@@ -52,6 +52,8 @@ export const JSON_SHAPES = {
     decisions: shape({ decisions: 'array' }),
     ledger: shape({ items: 'array', stats: 'object' }),
     log: shape({ events: 'array' }),
+    flakes: shape({ flakes: 'array', unclassified: 'array', regressions: 'array', stable: 'array' }),
+    'flakes rerun': shape({ flakes: 'object', file: 'string' }),
     rigor: shape({ causes: 'array', uncaused: 'number' }),
     'rigor draft': shape({ key: 'string', reads: 'string', evidence: 'object', proof: 'object', drafts: 'array' }),
     add: shape({ item: 'object' }),

@@ -11,6 +11,7 @@ import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { MACHINE } from '../../src/machine.js';
+import { themeVariants } from './theme.mjs';
 
 const SANS = "-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif";
 const MONO = "ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace";
@@ -591,7 +592,9 @@ export const FIGURES = { loop: drawLoop, lifecycle: drawLifecycle, layout: drawL
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   for (const [name, draw] of Object.entries(FIGURES)) {
-    writeFileSync(join(import.meta.dirname, `${name}.svg`), draw());
-    console.log(`drew docs/img/${name}.svg`);
+    const { light, dark } = themeVariants(draw());
+    writeFileSync(join(import.meta.dirname, `${name}.svg`), light);
+    writeFileSync(join(import.meta.dirname, `${name}-dark.svg`), dark);
+    console.log(`drew docs/img/${name}.svg and docs/img/${name}-dark.svg`);
   }
 }
