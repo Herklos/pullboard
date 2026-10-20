@@ -280,3 +280,34 @@ test('a computed import with an environment fallback reads every candidate, not 
   assert.equal(selection.full, true, 'an unresolved branch falls back to the whole suite instead of a partial read set');
   assert.match(selection.reason, /test\/loader\.test\.js/u, 'the fallback names the loader it cannot read');
 });
+
+test('a declaration counts only in the header, globs expand, and literal URLs resolve as the runtime does [V4,C7]', (t) => {
+  const box = graph(t);
+  box.put('src/actual.js', 'export const value = 1;\n');
+  box.put('src/%61ctual.js', 'export const value = "decoy";\n');
+  // Declaration-looking text inside a template is not a declaration; the undeclared import falls back (#803 review).
+  box.put('test/template.test.js', "const banner = `\n/** @pullboard-test-loads src/safe.js */\n`;\nawait import(process.env.TARGET ?? '../src/actual.js');\n");
+  const base = box.commit();
+  box.put('src/actual.js', 'export const value = 2;\n');
+  const commit = box.commit();
+  const hidden = selectAffectedTests(box.root, { base, commit, changed: ['src/actual.js'] });
+  assert.equal(hidden.full, true, 'a declaration inside a template string never stops the fallback');
+  assert.match(hidden.reason, /test\/template\.test\.js/u, 'the fallback names the undeclared file');
+
+  // A declared glob reads every committed module it matches.
+  box.put('test/template.test.js', "/** @pullboard-test-loads src/*.js */\nawait import(process.env.TARGET ?? '../src/actual.js');\n");
+  // A literal URL with a percent-escape reads the decoded file, never the encoded decoy.
+  box.put('test/encoded.test.js', "await import(new URL('../src/%61ctual.js', import.meta.url).href);\n");
+  const declared = box.commit();
+  box.put('src/actual.js', 'export const value = 3;\n');
+  const after = box.commit();
+  const selected = selectAffectedTests(box.root, { base: declared, commit: after, changed: ['src/actual.js'] });
+  assert.equal(selected.full, false, selected.reason);
+  assert.ok(selected.files.includes('test/template.test.js'), 'the declared glob src/*.js selects its reader of src/actual.js');
+  assert.ok(selected.files.includes('test/encoded.test.js'), 'the percent-escaped literal reads src/actual.js, as Node loads it');
+
+  // Glob syntax the selector cannot expand is not a usable declaration.
+  box.put('test/template.test.js', "/** @pullboard-test-loads src/{a,b}.js */\nawait import(process.env.TARGET ?? '../src/actual.js');\n");
+  const braces = box.commit();
+  assert.equal(selectAffectedTests(box.root, { base: after, commit: braces, changed: ['src/actual.js'] }).full, true, 'an unexpandable glob falls back');
+});

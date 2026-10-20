@@ -1,6 +1,8 @@
 /** Select committed Node test files through import edges; uncertainty requires the full gate [V4,C7]. */
 import { spawnSync } from 'node:child_process';
 import { posix } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { pathToFileURL } from 'node:url';
 import { cleanGitEnvironment } from './git.js';
 import {
   commonJsIn,
@@ -14,14 +16,55 @@ const DOC = /^docs\/.+\.md$/u;
 const TEST_TREE_INPUT = '/** @pullboard-test-input test-tree */';
 const SOURCE_TREE_INPUT = '/** @pullboard-test-input source-tree */';
 const DOCS_TREE_INPUT = '/** @pullboard-test-input docs-tree */';
-// A computed-import test may declare the repository modules it can load; a comment anywhere in the file counts.
-const LOADS = /^\/\*\* @pullboard-test-loads (.+?) \*\/$/gmu;
+// A computed-import test may declare the repository modules it can load, in its leading comment header only.
+const LOADS = /^\/\*\* @pullboard-test-loads (.+?) \*\/$/u;
 const GLOBAL = new Set(['bin/run-tests.js', 'package.json', 'package-lock.json', 'npm-shrinkwrap.json', 'yarn.lock', 'pnpm-lock.yaml', 'src/gate.js', 'src/cli.js', 'src/hooks.js', 'src/trusted-policy.js', 'src/affected-tests.js', 'src/module-imports.js']);
 
-/** The repository modules a computed-import test declares it can load, normalized; anything outside the repository is ignored. */
-function declaredLoads(source) {
-  return [...source.matchAll(LOADS)].flatMap(match => match[1].trim().split(/\s+/u)).map(path => posix.normalize(path))
-    .filter(path => MODULE.test(path) && !path.startsWith('../') && !path.startsWith('/'));
+/**
+ * The file's leading comment header: its lines before the first line of code. A declaration counts only here, so
+ * declaration-looking text inside a string or template later in the file is never read as one (#803).
+ */
+function headerLines(source) {
+  const lines = [];
+  let inBlock = false;
+  for (const [index, line] of source.split(/\r?\n/u).entries()) {
+    const text = line.trim();
+    if (inBlock) { lines.push(line); if (text.includes('*/')) inBlock = false; continue; }
+    if (!text || (index === 0 && text.startsWith('#!')) || text.startsWith('//')) { lines.push(line); continue; }
+    if (!text.startsWith('/*')) break;
+    lines.push(line);
+    inBlock = !text.slice(2).includes('*/');
+  }
+  return lines;
+}
+
+/** Match a declared path glob: * and ? stay within one folder, ** crosses folders; null for other glob syntax. */
+function globPattern(glob) {
+  if (/[[\]{}]/u.test(glob)) return null;
+  const source = glob.split(/(\*\*\/|\*\*|\*|\?)/u).map(part => part === '**/' ? '(?:.*/)?' : part === '**' ? '.*'
+    : part === '*' ? '[^/]*' : part === '?' ? '[^/]' : part.replace(/[.+^$()|\\]/gu, '\\$&')).join('');
+  return new RegExp(`^${source}$`, 'u');
+}
+
+/**
+ * The repository modules a computed-import test declares in its header that it can load, normalized, with globs
+ * expanded over the committed modules; anything outside the repository is ignored. A glob form this cannot expand
+ * makes the whole declaration unusable (null), so the caller falls back to the whole suite (#803).
+ *
+ * @returns {string[] | null}
+ */
+function declaredLoads(source, modulePaths) {
+  const declared = headerLines(source).map(line => LOADS.exec(line)).filter(Boolean)
+    .flatMap(match => match[1].trim().split(/\s+/u)).map(path => posix.normalize(path))
+    .filter(path => !path.startsWith('../') && !path.startsWith('/'));
+  const loads = [];
+  for (const path of declared) {
+    if (!/[*?[\]{}]/u.test(path)) { if (MODULE.test(path)) loads.push(path); continue; }
+    const pattern = globPattern(path);
+    if (!pattern) return null;
+    loads.push(...modulePaths.filter(module => pattern.test(module)));
+  }
+  return loads;
 }
 
 /** The one computed form the selector resolves (#803): new URL('<literal relative path>', import.meta.url), with or without .href. */
@@ -47,8 +90,11 @@ function literalLoads(source, path, modulePaths) {
     for (; end < source.length && depth; end += 1) depth += source[end] === '(' ? 1 : source[end] === ')' ? -1 : 0;
     const literal = URL_LITERAL.exec(source.slice(start, end - 1));
     if (!literal) return null;
-    const value = literal[2].split(/[?#]/u)[0];
-    const target = posix.normalize(posix.join(posix.dirname(path), value));
+    // Resolve as the runtime does: a file URL against this file, percent-escapes decoded; anything else is unresolved.
+    let target;
+    try { target = posix.relative('/repo', fileURLToPath(new URL(literal[2], pathToFileURL(posix.join('/repo', path))))); }
+    catch { return null; }
+    if (target.startsWith('../') || posix.isAbsolute(target)) return null;
     if (!MODULE.test(target) || !modulePaths.includes(target)) return null;
     targets.add(target);
   }
@@ -226,8 +272,8 @@ function graphAt(root, commit, changedDocs = []) {
       }
       if (target.startsWith('node:')) continue;
       if (target === '(computed)' && TEST.test(path)) {
-        const declared = declaredLoads(modules.get(path));
-        const loads = declared.length ? declared : literalLoads(modules.get(path), path, paths) ?? [];
+        const declared = declaredLoads(modules.get(path), paths);
+        const loads = declared === null ? [] : declared.length ? declared : literalLoads(modules.get(path), path, paths) ?? [];
         if (!loads.length) undeclared.set(path, 'a computed import declares no @pullboard-test-loads and names no module it can read');
         for (const load of loads) {
           if (!reverse.has(load)) reverse.set(load, new Set());
