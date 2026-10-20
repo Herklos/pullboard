@@ -42,6 +42,7 @@ import {
 } from './next-steps.js';
 import { reviewerStartup } from './next-steps.js';
 import * as itemSessions from './item-sessions.js';
+import * as seatCheckout from './seat-checkout.js';
 import { submitPreflight } from './submit-preflight.js';
 import * as store from './board.js';
 import {
@@ -1034,7 +1035,7 @@ async function bindCheckoutSession(io, positionals, values) {
     const ctx = context(io);
     agent = withBoard(ctx, (board) => store.agentAt(board, info.root)?.agent_id
       ?? (command === 'hook' && store.landingBatches(board).some((batch) => batch.root === info.root && !['landed', 'blocked'].includes(batch.state)) ? COORDINATOR : null));
-    if (!agent && command !== 'join') throw new Refused('NOT_JOINED', 'this worktree has not joined a lane; run pullboard join <lane> --model "<model name>"');
+    if (!agent && command !== 'join') throw withBoard(ctx, (board) => seatCheckout.unjoinedRefusal(info, store.listAgents(board)));
   }
   if (['shout', 'fact'].includes(command) && localSessionMatches(info, { agent: agent ?? 'unjoined agent', digest })) {
     CHECKOUT_BOARD_ONLY.set(io, command);
@@ -2703,6 +2704,7 @@ async function submitHere(ctx, id) {
   const held = withBoard(ctx, (board) => {
     const me = whoAmI(ctx, board);
     const item = store.getItem(board, id);
+    seatCheckout.refuseHeldElsewhere(ctx.info, store.listAgents(board), item, 'submit');
     if (item.item_status !== 'claimed' || item.item_owner !== me.id) throw new Refused('NOT_YOURS', 'claim this item before submitting it');
     const correction = store.pendingRefreezeProblem(board, id);
     if (correction) throw correction;
@@ -3267,6 +3269,7 @@ async function nextHere(io, values) {
     throw new Refused('USAGE', '--wait is a number of minutes from 0 to 240');
   }
   const deadline = Date.now() + minutes * 60_000;
+  const origin = ctx.info.root;
   for (;;) {
     const found = await nextOnce(ctx, values);
     if (found.context) ctx = found.context;
@@ -3290,8 +3293,9 @@ async function nextHere(io, values) {
         io.say(`check out exactly that commit, here: ${here} git switch --detach ${item.item_commit}`);
         io.say(`then: ${here} pullboard verify ${item.item_id} accept${as} --note "how you proved it", or reject${as} --reason CODE --note "what failed"`);
       } else {
+        if (found.seat && found.seat.path !== origin) io.say(seatCheckout.seatLeadLine(found.seat, item, found.held));
         if (found.reviewSkipped) io.say(`${reviewQueueLine(ctx, found.reviewSkipped, span)}; explicit build intent recorded with this claim`);
-        io.say(`${found.held ? 'you hold' : 'claimed'} #${item.item_id}: ${item.item_title}`);
+        io.say(`${found.held ? (found.seat && found.seat.path !== origin ? `${found.seat.agent} holds` : 'you hold') : 'claimed'} #${item.item_id}: ${item.item_title}`);
         if (found.seat) io.say(`${found.seat.created ? 'opened' : 'work in'} ${found.seat.agent}, ${found.seat.lane} lane: ${here}`);
         if (found.shared?.length) io.say(`it touches ${found.shared.length === 1 ? 'a file' : `${found.shared.length} files`} you worked in recently: ${found.shared.slice(0, 4).join(', ')}`);
         if (item.item_criterion) io.say(`criterion: ${item.item_criterion}`);
@@ -3570,6 +3574,7 @@ function workCommands(io, args) {
         const held = first ? store.getItem(board, idArg(first))
           : store.listItems(board).find((entry) => entry.item_status === 'claimed' && entry.item_owner === me.id && entry.item_parent_id === null);
         if (!held) throw new Refused('NOT_HOLDING', 'you hold no item; name one, pullboard check <id>, or run the project gate: pullboard gate');
+        seatCheckout.refuseHeldElsewhere(ctx.info, store.listAgents(board), held, 'check');
         return { item: held, author: store.itemCheckAuthor(board, held.item_id), caller: me.id, agents: store.listAgents(board) };
       });
       const check = frozenCheck(item);
@@ -3649,6 +3654,7 @@ function workCommands(io, args) {
     }),
     release: () => act(async (ctx, board, me) => {
       const args = [idArg(first), me.id, textArg(io, values, 'note') ?? ''];
+      seatCheckout.refuseHeldElsewhere(ctx.info, store.listAgents(board), store.getItem(board, args[0]), 'release');
       const problem = store.reviewReleaseNoteProblem(board, ...args);
       if (problem) throw problem;
       const review = await ordered(ctx, board, 'release', args);
