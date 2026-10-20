@@ -291,8 +291,8 @@ function queueFaults(board, { items, at }) {
       subject: `${route} route`, key: `ROUTE_UNSERVED:route:${route}`, since: since(first.id), now,
       title: 'route has no active agent',
       why: `${open.length} open ${route} ${open.length === 1 ? 'item waits' : 'items wait'}, starting with #${first.id}, and no active agent can take ${route} work`,
-      next: `start an agent on the ${route} route: pullboard join ${first.lane} --route ${route}`,
-      command: `pullboard join ${first.lane} --route ${route}`,
+      next: `start an agent on the ${route} route: in a shell with PULLBOARD_MODEL set, run pullboard worktree ${first.lane} --route ${route}`,
+      command: `pullboard worktree ${first.lane} --route ${route}`,
       owner: { role: 'coordinator', who: COORDINATOR }, detail: { route, items: open.map((entry) => entry.id) },
     }));
   }
@@ -303,8 +303,8 @@ function queueFaults(board, { items, at }) {
       subject: `#${entry.id}`, key: `ITEM_UNTAKEABLE:item:${entry.id}`, since: since(entry.id), now,
       title: 'nobody can take it',
       why: `no active agent in the ${entry.lane} lane can take a ${entry.route} item, so #${entry.id} waits: ${entry.title}`,
-      next: `start an agent in the ${entry.lane} lane on the ${entry.route} route: pullboard join ${entry.lane} --route ${entry.route}`,
-      command: `pullboard join ${entry.lane} --route ${entry.route}`,
+      next: `start an agent in the ${entry.lane} lane on the ${entry.route} route: in a shell with PULLBOARD_MODEL set, run pullboard worktree ${entry.lane} --route ${entry.route}`,
+      command: `pullboard worktree ${entry.lane} --route ${entry.route}`,
       owner: { role: 'coordinator', who: COORDINATOR }, detail: { lane: entry.lane, route: entry.route },
     }));
   }
