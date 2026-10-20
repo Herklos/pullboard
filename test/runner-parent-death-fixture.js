@@ -13,8 +13,9 @@ import { readRemoteGateHolders, waitForCondition } from './runner-fixture-state.
  * Keep the original custody assertions identical in ordinary and forced ordering cases: `holdRelease` forces a real
  * release write conflict, `chatty` makes the command keep writing output, so some always arrives after the
  * transport drops (#888: a forwarded write then waited forever for a drain from a destroyed stdout), and `epermOnce`
- * makes the worker's repeat signal to one process group answer EPERM, as macOS did when the command group finished
- * exiting during the TERM grace loop (#888); the launcher lingers 300 ms after TERM so that repeat signal is sent.
+ * makes the worker's first real signal to one process group answer EPERM while its members are still alive (#927), so
+ * the forced EPERM does not depend on how the OS answers an exited, unreaped group; the worker retries on a fresh census
+ * (#888), and the launcher lingers 300 ms after TERM so the retry's group signal reaches a live launcher.
  * `lateGroup` starts the child in the launcher's group and moves it to its own a second later, so the worker's census
  * always sees it first in the old group, as it did under load when a detached child had not yet called setsid (#888).
  */
@@ -130,11 +131,15 @@ setInterval(() => {}, 1_000);
     const preload = join(dir, 'eperm-once.mjs');
     writeFileSync(preload, `import { writeFileSync } from 'node:fs';
 const kill = process.kill.bind(process);
-const groups = new Map();
 let answered = false;
+const groupCalls = new Map();
 process.kill = (pid, signal) => {
-  if (pid < 0) groups.set(pid, (groups.get(pid) ?? 0) + 1);
-  if (!answered && pid < 0 && groups.get(pid) === 2) {
+  // The second real signal to one process group answers EPERM while its members are still alive: the detached child
+  // has already received TERM and is waiting for its release, so the answer does not depend on how the OS treats an
+  // exited, unreaped group (#927). Probes with signal 0 pass through, and the first signal is never answered, so the
+  // child's TERM handler still runs.
+  if (pid < 0 && signal !== 0) groupCalls.set(pid, (groupCalls.get(pid) ?? 0) + 1);
+  if (!answered && pid < 0 && signal !== 0 && groupCalls.get(pid) === 2) {
     answered = true;
     writeFileSync(${JSON.stringify(epermAnswered)}, 'eperm\\n');
     throw Object.assign(new Error('kill EPERM'), { code: 'EPERM', errno: -1, syscall: 'kill' });
@@ -234,7 +239,7 @@ process.kill = (pid, signal) => {
       t.diagnostic(message);
       t.diagnostic('worker cleanup report ' + JSON.stringify(workerCleanupReport()));
     } });
-    if (epermOnce) assert.equal(existsSync(epermAnswered), true, 'a repeat group signal really answered EPERM before the release');
+    if (epermOnce) assert.equal(existsSync(epermAnswered), true, 'a group signal really answered EPERM before the release');
     const controller = await remoteRun.closed;
     remoteRun = null;
     assert.equal(controller.signal, 'SIGTERM', 'the owned API controller alone received SIGTERM');
