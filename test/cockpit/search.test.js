@@ -1,11 +1,26 @@
 /** Cockpit search checks, using the shared real-board fixtures [N26]. */
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, constants, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { SPEC, machine, project, startView, chromeExecutable, openSnapshotChrome, closeSnapshotChrome, searchFor, press, allowLiveHold, holdLive } from './fixture.js';
+
+/** Copy Node into a path with spaces so executable wrappers exercise the path they cannot put in a shebang. */
+function nodeWithSpaces(root) {
+  const folder = join(root, 'node with spaces');
+  mkdirSync(folder, { recursive: true });
+  const node = join(folder, 'node');
+  copyFileSync(realpathSync(process.execPath), node, constants.COPYFILE_FICLONE);
+  chmodSync(node, 0o700);
+  return node;
+}
+
+/** Quote one POSIX shell word so fixture paths preserve spaces and shell metacharacters. */
+function shellWord(value) {
+  return `'${String(value).replaceAll("'", "'\\''")}'`;
+}
 
 /** Capture the current search page and its last real board-state request without exposing the session key. */
 async function searchSetupState(chrome) {
@@ -57,7 +72,8 @@ function interleavedAges(file, when) {
   writeFileSync(future, specTarget ? SPEC + g5 + g3 + g4 : r1 + r2);
   const realGit = execFileSync('which', ['git'], { encoding: 'utf8' }).trim();
   const wrapper = join(box.dir, 'bin', 'git');
-  writeFileSync(wrapper, `#!${process.execPath}
+  const program = join(box.dir, 'bin', 'git-wrapper.mjs');
+  writeFileSync(program, `
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 const args = process.argv.slice(2), file = ${JSON.stringify(file)}, receipt = ${JSON.stringify(receipt)};
@@ -85,6 +101,7 @@ if (interleave) {
 } else result = run(args);
 process.stdout.write(result.stdout ?? ''); process.stderr.write(result.stderr ?? ''); process.exitCode = result.status ?? 1;
 `);
+  writeFileSync(wrapper, `#!/bin/sh\nexec ${shellWord(process.execPath)} ${shellWord(program)} "$@"\n`);
   chmodSync(wrapper, 0o755);
   // Both tabs may read the on-disk row before its commit lands between their history reads.
   writeFileSync(join(alpha.repo, file), readFileSync(future));
@@ -113,6 +130,28 @@ test('row ages read from one captured commit [N26]', () => {
     assert.deepEqual(spec, file === 'SPEC.md' ? [['G5', 0], ['G4', 1], ['G3', 2]] : [['G5', 1], ['G4', 2], ['G3', 3]], diagnostic);
     assert.deepEqual(doctrine, file === 'SPEC.md' ? [['R2', 1], ['R1', 2]] : [['R2', 0], ['R1', 1]], diagnostic);
     assert.deepEqual(state.rowAgesAt, { 'SPEC.md': captured, 'ways.md': captured }, diagnostic);
+  }
+});
+
+test('search wrappers run when Node lives at a path with spaces [C7]', { timeout: 480_000 }, () => {
+  const root = mkdtempSync(join(tmpdir(), 'pullboard-search-spaced-node-'));
+  try {
+    const node = nodeWithSpaces(root);
+    const pattern = 'row ages read from one captured commit|spec rows keep newest-first order across a capture that moves';
+    const args = ['--test', '--test-reporter=tap', '--test-name-pattern', pattern, 'test/cockpit/search.test.js'];
+    const env = { ...process.env };
+    delete env.NODE_TEST_CONTEXT;
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      const result = spawnSync(node, args, { cwd: process.cwd(), env, encoding: 'utf8', timeout: 150_000 });
+      const output = `${result.stdout ?? ''}\n${result.stderr ?? ''}`;
+      assert.equal(result.status, 0, `spaced Node run ${attempt}/3 failed: ${output}`);
+      assert.match(output, /^ok \d+ - row ages read from one captured commit \[N26\]$/m, `spaced Node run ${attempt}/3 omitted row-age case`);
+      assert.match(output, /^ok \d+ - spec rows keep newest-first order across a capture that moves \[N26\]$/m, `spaced Node run ${attempt}/3 omitted moving-capture case`);
+      assert.match(output, /^# pass 2$/m, `spaced Node run ${attempt}/3 did not complete both cases`);
+      assert.doesNotMatch(output, /# SKIP\b/, `spaced Node run ${attempt}/3 skipped a case`);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });
 
@@ -155,7 +194,8 @@ test('spec rows keep newest-first order across a capture that moves [N26]', { ti
     box.git(alpha.repo, 'commit', '-q', '-m', 'test(view): advance the capture [G1]');
     const captured = box.git(alpha.repo, 'rev-parse', 'HEAD');
     const wrapper = join(box.dir, 'bin', 'git');
-    writeFileSync(wrapper, `#!${process.execPath}
+    const program = join(box.dir, 'bin', 'git-wrapper.mjs');
+    writeFileSync(program, `
 import { spawnSync } from 'node:child_process';
 import { existsSync, unlinkSync, writeFileSync } from 'node:fs';
 const args = process.argv.slice(2), realGit = ${JSON.stringify(realGit)};
@@ -177,6 +217,7 @@ if (args[0] === 'log' && args.includes('--format=%H') && args.at(-1) === 'SPEC.m
 const result = run(args);
 process.stdout.write(result.stdout ?? ''); process.stderr.write(result.stderr ?? ''); process.exitCode = result.status ?? 1;
 `);
+    writeFileSync(wrapper, `#!/bin/sh\nexec ${shellWord(process.execPath)} ${shellWord(program)} "$@"\n`);
     chmodSync(wrapper, 0o755);
     writeFileSync(armed, 'capture');
     await chrome.stable('refresh()');
