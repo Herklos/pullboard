@@ -13,10 +13,14 @@ import { startFixtureChild } from './fixture-child.js';
 import { apiStatus } from '../src/api-http.js';
 import { NEXT_STEPS } from '../src/next-steps.js';
 import { chromeHealth, networkServicePids } from './cockpit/chrome-health.js';
+import {
+  JOURNEY_HOSTED,
+  JOURNEY_LOCAL,
+  journeyApiPathKind,
+  routeJourneyOrigins,
+} from './cockpit/journey-routes.js';
 import { machine, project, startView, fetchLive, openSnapshotChrome, closeSnapshotChrome, press, pickProject, chromeExecutable, boardOf } from './cockpit/fixture.js';
 
-const JOURNEY_HOSTED = 'https://app.pullboard.dev';
-const JOURNEY_LOCAL = 'http://127.0.0.1:4890';
 const JOURNEY_BOARD_NAMES = ['fixture/repository', 'local-machine-b'];
 const CLI = resolve(import.meta.dirname, '../bin/pullboard.js');
 
@@ -63,12 +67,6 @@ async function stopRelayAll(run) {
   clearTimeout(timer);
   if (!closed && run.child.exitCode === null && run.child.signalCode === null) run.child.kill('SIGKILL');
   await run.done.catch(() => {});
-}
-
-/** Normalize only resource identifiers in API paths before retaining bounded fixture diagnostics. */
-function journeyApiPathKind(pathname) {
-  const names = new Set(['api', 'v1', 'boards', 'state', 'events', 'moves', 'items', 'shouts', 'answers', 'devices', 'session', 'enrollments', 'approvals', 'requests', 'keys']);
-  return pathname.split('/').map(part => !part || names.has(part) ? part : ':id').join('/');
 }
 
 /** Keep only the two fixture board names this journey owns; never report arbitrary client names. */
@@ -769,123 +767,6 @@ async function journeyRelaySite(box, localOrigin) {
 }
 
 /**
- * The headers a hosted request is forwarded with. Chrome can pause a request before its network stack attaches
- * cookies, so the paused headers may lack pb_session (#835; chromium-bidi met the same, wpt PR 63104): a missing
- * Cookie header is restored from Chrome's jar for the request's URL. With the CI condition armed, an API request's
- * paused Cookie header is dropped first: on CI the page loaded signed in, then its API reads answered 401. Each API pause records which case it was, never a value.
- *
- * @param {object} chrome - The browser B connection.
- * @param {{url: string, headers: object}} asked - The paused request.
- * @param {{cookieless?: boolean}|null} condition - The CI stand-in, if any.
- * @param {object[]} pauses - Bounded record of API pauses: path kind and 'paused', 'restored' or 'none'.
- */
-async function journeyForwardHeaders(chrome, asked, condition, pauses) {
-  const address = new URL(asked.url);
-  const api = address.pathname.startsWith('/api/');
-  let headers = Object.entries(asked.headers).filter(([name]) => !['host', 'content-length'].includes(name.toLowerCase()));
-  if (condition?.cookieless && api) headers = headers.filter(([name]) => name.toLowerCase() !== 'cookie');
-  const paused = headers.some(([name]) => name.toLowerCase() === 'cookie');
-  let restored = false;
-  if (!paused) {
-    const { cookies } = await chrome.send('Network.getCookies', { urls: [asked.url] });
-    if (cookies.length > 0) { headers.push(['Cookie', cookies.map(({ name, value }) => name + '=' + value).join('; ')]); restored = true; }
-  }
-  if (api && pauses.length < 128) {
-    pauses.push({ pathKind: journeyApiPathKind(address.pathname), cookie: paused ? 'paused' : restored ? 'restored' : 'none' });
-  }
-  return headers;
-}
-
-/**
- * Fulfill only the hosted document/assets; rewrite live API and local requests to owned HTTP servers. With `slow`
- * armed, the next discovery read of this machine's view answers only after `slow.ms`, once: the CI condition (#786),
- * where a macOS runner's first local answer outlasted the page's three-second wait. Off unless a test arms it.
- *
- * @param {{armed: boolean, ms: number, cookieless?: boolean}|null} [slow] - The stand-in for a slow first discovery answer.
- * @param {object[]} [pauses] - Receives each hosted API pause's cookie case (see journeyForwardHeaders).
- */
-async function routeJourneyOrigins(chrome, site, view, slow = null, pauses = []) {
-  const failures = [];
-  const tasks = [];
-  const listener = ({ data }) => {
-    const message = JSON.parse(String(data));
-    if (message.method !== 'Fetch.requestPaused') return;
-    tasks.push((async () => {
-      const { requestId, request: asked } = message.params;
-      const address = new URL(asked.url);
-      if (address.origin === JOURNEY_HOSTED && address.pathname.startsWith('/api/')) {
-        const accept = Object.entries(asked.headers).find(([name]) => name.toLowerCase() === 'accept')?.[1] || '';
-        const liveStream = address.pathname.endsWith('/events') || String(accept).includes('text/event-stream');
-        if (liveStream) {
-          const headers = (await journeyForwardHeaders(chrome, asked, slow, pauses)).map(([name, value]) => ({ name, value }));
-          await chrome.send('Fetch.continueRequest', {
-            requestId, url: site.base + address.pathname + address.search, headers,
-          });
-          return;
-        }
-        const headers = Object.fromEntries(await journeyForwardHeaders(chrome, asked, slow, pauses));
-        const response = await fetchLive(site.base + address.pathname + address.search, {
-          method: asked.method, headers, redirect: 'manual',
-          ...(asked.postData === undefined ? {} : { body: asked.postData }),
-          signal: AbortSignal.timeout(10_000),
-        });
-        const body = Buffer.from(await response.arrayBuffer());
-        await chrome.send('Fetch.fulfillRequest', {
-          requestId,
-          responseCode: response.status,
-          responseHeaders: [...response.headers]
-            .filter(([name]) => !['content-length', 'connection', 'transfer-encoding', 'keep-alive', 'date'].includes(name.toLowerCase()))
-            .map(([name, value]) => ({ name, value })),
-          body: body.toString('base64'),
-        });
-        return;
-      }
-      if (address.origin === JOURNEY_LOCAL) {
-        if (slow?.armed && address.pathname === '/local/protocol') {
-          slow.armed = false;
-          await new Promise((later) => setTimeout(later, slow.ms)); // budget: the stand-in's one slow answer, longer than the page's 3 s wait; no throughput claim.
-          // By now the page has stopped waiting and Chrome has dropped the request, so the late answer has nowhere to go.
-          try { await chrome.send('Fetch.continueRequest', { requestId, url: view.base + address.pathname + address.search }); } catch { /* the request the page gave up on */ }
-          return;
-        }
-        await chrome.send('Fetch.continueRequest', { requestId, url: view.base + address.pathname + address.search });
-        return;
-      }
-      if (address.origin !== JOURNEY_HOSTED) throw new Error('unexpected fixture browser origin');
-      const headers = Object.fromEntries(await journeyForwardHeaders(chrome, asked, slow, pauses));
-      const response = await fetchLive(site.base + address.pathname + address.search, {
-        method: asked.method, headers, redirect: 'manual',
-        ...(asked.postData === undefined ? {} : { body: asked.postData }),
-        signal: AbortSignal.timeout(10_000),
-      });
-      const body = Buffer.from(await response.arrayBuffer());
-      await chrome.send('Fetch.fulfillRequest', {
-        requestId,
-        responseCode: response.status,
-        responseHeaders: [...response.headers]
-          .filter(([name]) => !['content-length', 'connection', 'transfer-encoding', 'keep-alive', 'date'].includes(name.toLowerCase()))
-          .map(([name, value]) => ({ name, value })),
-        body: body.toString('base64'),
-      });
-    })().catch(async (error) => {
-      failures.push(error.message);
-      try { await chrome.send('Fetch.failRequest', { requestId: message.params.requestId, errorReason: 'Failed' }); } catch { /* Chrome may already have closed. */ }
-    }));
-  };
-  chrome.socket.addEventListener('message', listener);
-  await chrome.send('Fetch.enable', { patterns: [
-    { urlPattern: JOURNEY_HOSTED + '/*', requestStage: 'Request' },
-    { urlPattern: JOURNEY_LOCAL + '/*', requestStage: 'Request' },
-  ] });
-  return async () => {
-    chrome.socket.removeEventListener('message', listener);
-    await Promise.all(tasks);
-    await chrome.send('Fetch.disable');
-    assert.deepEqual(failures, [], 'owned hosted and loopback HTTP routes finish without cancelling event streams');
-  };
-}
-
-/**
  * The two-home hosted journey: machine A links a board through the relay, and machine B's browser at pullboard.dev
  * lists it beside B's own local board. With `slow`, B's first discovery read on that last visit answers late.
  *
@@ -970,7 +851,7 @@ async function everyBoardJourney(t, slow = null) {
       try { await chromeB.send('Browser.grantPermissions', { origin: JOURNEY_HOSTED, permissions }); break; }
       catch { /* Chrome versions expose different local-network permission names. */ }
     }
-    await chromeB.send('Page.navigate', { url: JOURNEY_HOSTED + '/#device=' + pending.locator + '.' + pending.secret });
+    await stopRoutes.navigate(JOURNEY_HOSTED + '/#device=' + pending.locator + '.' + pending.secret);
     try {
       await waitFor(() => setup.child.exitCode !== null || setup.child.signalCode !== null,
         'A completes the actual phone enrollment within its relay work allowance', relayWorkBudgetMs());
@@ -983,14 +864,14 @@ async function everyBoardJourney(t, slow = null) {
     assert.equal(linkedSetup.document.linked.length, 1, 'the one registered A board links through the CLI');
     assert.equal(linkedSetup.document.paired, true, 'the fixture phone completes the actual device enrollment');
     await chromeB.waitFor("location.hash === '' && document.querySelector('#chain')?.textContent.includes('linked machine A board')", 45_000); // budget: bounded setup wait within this journey test’s declared outer timeout (5x relay-work budget plus 180 seconds).
-    await chromeB.send('Page.navigate', { url: 'about:blank' });
+    await stopRoutes.navigate('about:blank');
     journeyTrace.begin();
     networkAtStart = networkServicePids(profileB);
     authTrace.begin();
     cookiePauses.length = 0;
     // The CI condition: a slow first discovery answer, and from here Chrome's paused requests arrive without cookies (#835).
     if (slow) Object.assign(slow, { armed: true, cookieless: true });
-    await chromeB.send('Page.navigate', { url: JOURNEY_HOSTED + '/' });
+    await stopRoutes.navigate(JOURNEY_HOSTED + '/');
     const rowPredicate = `(${journeySidebarReady.toString()})([...document.querySelectorAll('#proj-list .proj.repo .pname')].map(node => node.textContent.trim()), ${JSON.stringify(JOURNEY_BOARD_NAMES)})`;
     const rowObservation = await observeJourneyRows(
       () => chromeB.waitFor(rowPredicate, 45_000), // budget: bounded setup wait within this journey test’s declared outer timeout (5x relay-work budget plus 180 seconds).

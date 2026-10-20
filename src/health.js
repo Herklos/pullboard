@@ -6,6 +6,7 @@
  * It reads the board through a read-only SQLite connection and asks git only questions that leave
  * every checkout alone: merge-tree writes a tree object and never an index or a working tree.
  */
+import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import {
   COORDINATOR,
@@ -243,7 +244,8 @@ export function healthReport({ db, root, config, now }) {
     }));
   }
 
-  for (const fault of queueFaults(board, { items, at })) report.stuck.push(fault);
+  report.retired = [];
+  for (const fault of queueFaults(board, { items, at, retired: report.retired, gone: goneWorktrees(root) })) report.stuck.push(fault);
 
   const overdue = releaseOverdue(db, root, at, limits.ms.release, history);
   if (overdue) found(report.stuck, overdue);
@@ -261,10 +263,11 @@ const QUEUE_ACTIVE_MS = 30 * 60_000;
  * names the item and the next step; an agent that is idle is named as its own owner.
  *
  * @param {{ db: any, clock: { now: () => Date } }} board
- * @param {{ items: any[], at: number }} context - the board's items and the clock in epoch milliseconds
+ * @param {{ items: any[], at: number, retired?: any[], gone?: Set<string> }} context - the board's items, the clock in epoch milliseconds,
+ *   the list that collects retired seats, and the worktree paths Git reports gone
  * @returns {Finding[]}
  */
-function queueFaults(board, { items, at }) {
+function queueFaults(board, { items, at, retired = [], gone = new Set() }) {
   const queue = workQueue(board);
   const current = (queue.releases.find((release) => release.landed < release.total)?.items ?? queue.unreleased)
     .filter((entry) => entry.status === 'open' && !entry.waits.length);
@@ -272,23 +275,31 @@ function queueFaults(board, { items, at }) {
     .filter((entry) => entry.status === 'open' && !entry.waits.length);
   const rows = board.db.prepare(`SELECT agent_id AS id, agent_lane AS lane, agent_route AS route, agent_path AS path, agent_created_at AS created,
     (SELECT MAX(event_at) FROM event WHERE event_by = agent.agent_id) AS event_at,
+    (SELECT MAX(event_at) FROM event WHERE event_by = agent.agent_id AND event_kind IN ('claim', 'renew', 'reserve')) AS pulled_at,
     (SELECT MAX(shout_at) FROM shout WHERE shout_from = agent.agent_id) AS shout_at
     FROM agent ORDER BY agent_id`).all();
+  // Only a seat whose agent is around counts (#940): a live lease, or a move or shout in the last 30 minutes, and not
+  // a worktree Git reports gone. Every other seat is retired for these checks: listed once, never a finding.
   const agents = rows.filter((row) => row.lane !== 'coordinator').map((row) => {
     const last = Math.max(...[row.created, row.event_at, row.shout_at].filter(Boolean).map((value) => Date.parse(value)));
-    const holds = items.some((item) => (item.item_status === 'claimed' && item.item_owner === row.id)
-      || (item.item_status === 'submitted' && item.item_built_by === row.id)
+    const lease = items.some((item) => (item.item_status === 'claimed' && item.item_owner === row.id && Date.parse(item.item_lease_until ?? '') > at)
       || (item.item_review_by === row.id && Date.parse(item.item_review_until ?? '') > at));
-    return { ...row, last, active: holds || at - last < QUEUE_ACTIVE_MS };
+    const awaitsReview = items.some((item) => item.item_status === 'submitted' && item.item_built_by === row.id);
+    const recent = !gone.has(row.path) && (lease || at - last < QUEUE_ACTIVE_MS);
+    const pulled = Math.max(...[row.created, row.pulled_at].filter(Boolean).map((value) => Date.parse(value)));
+    return { ...row, last, recent, idle: recent && !lease && !awaitsReview && at - pulled >= QUEUE_ACTIVE_MS };
   });
-  const active = agents.filter((agent) => agent.active);
+  const active = agents.filter((agent) => agent.recent);
+  retired.push(...agents.filter((agent) => !agent.recent).map((agent) => ({ agent: agent.id, lane: agent.lane, since: new Date(agent.last).toISOString() })));
   const raw = new Map(items.map((item) => [item.item_id, item]));
+  // An item whose claim lapsed is CLAIM_LAPSED's to report; it never doubles as untakeable work (#940).
+  const lapsed = (entry) => raw.get(entry.id)?.item_status === 'claimed';
   const since = (id) => raw.get(id)?.item_updated_at ?? new Date(at).toISOString();
   const now = at;
   const findings = [];
 
   for (const route of ROUTES) {
-    const open = current.filter((entry) => entry.route === route);
+    const open = current.filter((entry) => entry.route === route && !lapsed(entry));
     if (!open.length || active.some((agent) => canTake(agent.route, route))) continue;
     const first = open[0];
     findings.push(finding('ROUTE_UNSERVED', null, {
@@ -301,7 +312,7 @@ function queueFaults(board, { items, at }) {
     }));
   }
 
-  for (const entry of waiting) {
+  for (const entry of waiting.filter((candidate) => !lapsed(candidate))) {
     if (active.some((agent) => agent.lane === entry.lane && canTake(agent.route, entry.route))) continue;
     findings.push(finding('ITEM_UNTAKEABLE', raw.get(entry.id) ?? null, {
       subject: `#${entry.id}`, key: `ITEM_UNTAKEABLE:item:${entry.id}`, since: since(entry.id), now,
@@ -313,7 +324,7 @@ function queueFaults(board, { items, at }) {
     }));
   }
 
-  for (const agent of agents.filter((candidate) => !candidate.active)) {
+  for (const agent of agents.filter((candidate) => candidate.idle)) {
     const work = waiting.find((entry) => entry.lane === agent.lane && canTake(agent.route, entry.route));
     if (!work) continue;
     findings.push(finding('IDLE_AGENT', null, {
@@ -567,7 +578,23 @@ export function healthLines(report) {
   if (!report.stuck.length) lines.push('nothing is stuck');
   else lines.push(`${report.stuck.length} stuck:`, ...report.stuck.map((entry) => `  ${line(entry)}`));
   if (report.waiting.length) lines.push('waiting for a later release:', ...report.waiting.map((entry) => `  ${line(entry)}`));
+  // Seats with nobody behind them get one line, never a finding or a shout (#940).
+  if (report.retired?.length) lines.push(`retired seats, not counted as agents (quiet for 30 minutes or more, or their worktree is gone): ${report.retired.map((seat) => seat.agent).join(', ')}`);
   return lines;
+}
+
+/**
+ * The worktrees of this repository whose folders are gone, as Git reports them (prunable). A path Git never
+ * registered here, such as a seat on another computer, is not judged gone by this (#940).
+ *
+ * @param {string} root
+ * @returns {Set<string>}
+ */
+function goneWorktrees(root) {
+  try {
+    const listing = execFileSync('git', ['worktree', 'list', '--porcelain'], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    return new Set(listing.split('\n\n').filter((block) => /^prunable\b/mu.test(block)).map((block) => /^worktree (.+)$/mu.exec(block)?.[1]).filter(Boolean));
+  } catch { return new Set(); }
 }
 
 /** End a reason with one full stop, keeping a clipped reason's ellipsis. */

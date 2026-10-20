@@ -164,6 +164,9 @@ export function configProblems(config) {
   if (typeof config.spec !== 'string' || !config.spec) problems.push('"spec" names a file');
   if (typeof config.practice !== 'string' || !config.practice) problems.push('"practice" names the doctrine file');
   if (typeof config.gate !== 'string') problems.push('"gate" is a shell command, like "npm test"');
+  if (config.flakes !== undefined && (!config.flakes || typeof config.flakes !== 'object' || Array.isArray(config.flakes)
+      || config.flakes.rerun !== undefined && typeof config.flakes.rerun !== 'boolean'
+      || Object.keys(config.flakes).some(key => key !== 'rerun'))) problems.push('"flakes" has only the optional boolean "rerun", off by default');
   if (!['inside', 'beside'].includes(config.worktrees)) problems.push('"worktrees" is "inside" or "beside"');
   if (config.submitGate !== undefined && config.submitGate !== 'landing') {
     problems.push('"submitGate" is "landing" when the full suite should be deferred until landing');
@@ -204,6 +207,9 @@ export function configProblems(config) {
   const timeoutMs = timeout ? Number(timeout[1]) * CHECK_TIMEOUT_MS[timeout[2]] : NaN;
   if (!timeout || timeoutMs <= 0 || !Number.isFinite(timeoutMs) || timeoutMs > MAX_CHECK_TIMEOUT_MS) {
     problems.push('"check.timeout" is a positive duration no longer than 2,147,483,647ms, like "5m"');
+  }
+  if (config.verify?.unrelatedTrunkMoves !== undefined && typeof config.verify.unrelatedTrunkMoves !== 'boolean') {
+    problems.push('"verify.unrelatedTrunkMoves" is true or false');
   }
   if (!Number.isFinite(config.verify?.reviewRatio) || config.verify.reviewRatio <= 0) {
     problems.push('"verify.reviewRatio" is a positive number, such as 3');
