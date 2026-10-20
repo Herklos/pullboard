@@ -80,6 +80,23 @@ export const RELAY_SCREEN_WORDS = Object.freeze({
     small: 'It shares every project with your account. Your boards show up here by themselves.', waiting: 'Waiting for your boards' }),
 });
 
+/** Select guidance from observed inventory and key delivery, never infer why a computer has not uploaded. */
+export function emptyBoardStep({ available = [], waitingBoards = new Map(), approvedBoards = new Set(), loaded = false, browserPaired = false, failure = '' } = {}) {
+  const pair = { command: 'pullboard relay pair', ask: 'Help me pair this browser with my boards.',
+    small: 'On the computer with the boards, run this, then open the link it prints here or scan its QR.' };
+  if (!loaded) return { title: 'Checking your linked boards', say: failure || 'Waiting for this account’s board list.', command: '', ask: '', small: '', waiting: failure || 'Checking your boards' };
+  if (approvedBoards.size) return { title: 'Finishing this pairing', say: 'Approved; waiting for the computer to send this browser its board keys.',
+    command: '', ask: '', small: 'Keep the setup command open on the computer with the boards.', waiting: failure || 'Waiting for this browser’s keys' };
+  if (waitingBoards.size) return { title: 'Waiting for the first board copy',
+    say: [...waitingBoards.values()].join(', ') + ': its first copy has not reached the relay yet.', command: 'pullboard relay status',
+    ask: 'Help me check why my board has not reached the relay.', small: 'Run this on the computer with the board to see why.', waiting: failure || 'Waiting for the first board copy' };
+  if (!available.length) return { ...RELAY_SCREEN_WORDS.share,
+    say: 'No linked boards are available for this account. ' + RELAY_SCREEN_WORDS.share.say,
+    ...(failure ? { title: 'Could not check your boards', say: failure, command: '', ask: '', small: '', waiting: 'Open this page again to retry.' } : {}) };
+  if (!browserPaired) return { ...pair, title: 'This browser is not paired', say: failure || 'Your account already has linked boards. Pair this browser to open them.', waiting: 'Waiting for this browser to be paired' };
+  return { ...pair, title: 'Linked boards, none readable here', say: failure || 'The computer has not handed this browser keys for these boards yet.', waiting: 'Waiting for keys to your linked boards' };
+}
+
 const MARK = '<svg viewBox="0 0 64 64" aria-hidden="true"><path fill="currentColor" d="M8 7h35a6 6 0 0 1 6 6v7H8a5 5 0 0 1-5-5v-3a5 5 0 0 1 5-5Z"/><rect fill="var(--accent)" width="56" height="14" x="3" y="25" rx="5"/><path fill="currentColor" d="M8 43h35a6 6 0 0 1 6 6v8H8a5 5 0 0 1-5-5v-4a5 5 0 0 1 5-5Z"/></svg>';
 const GITHUB = '<svg viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>';
 const SPEECH = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12Z"/></svg>';
@@ -101,12 +118,12 @@ export function relayScreenMarkup(name, signIn) {
       + '<div class="relay-help">' + SPEECH + '<span>' + words.help + '<small>“' + words.ask + '”</small></span><button type="button" data-copy="' + words.ask + '">Copy</button></div>'
       + '</div></section>';
   }
-  const words = RELAY_SCREEN_WORDS.share;
+  const words = emptyBoardStep();
   return '<section id="relay-screen" aria-label="Pullboard"><div class="relay-panel" data-screen="share">' + head
     + '<h1>' + words.title + '</h1><p class="relay-say">' + words.say + '</p>'
-    + '<div class="relay-box relay-command"><code><span aria-hidden="true">$ </span>' + words.command + '</code><button type="button" data-copy="' + words.command + '">Copy</button></div>'
-    + '<div class="relay-or">or</div>'
-    + '<div class="relay-box relay-agent">' + SPEECH + '<span>' + words.agent + '<small>“' + words.ask + '”</small></span><button type="button" data-copy="' + words.ask + '">Copy</button></div>'
+    + '<div class="relay-box relay-command" hidden><code></code><button type="button" data-copy="">Copy</button></div>'
+    + '<div class="relay-or" hidden>or</div>'
+    + '<div class="relay-box relay-agent" hidden>' + SPEECH + '<span>Ask your agent<small></small></span><button type="button" data-copy="">Copy</button></div>'
     + '<p class="relay-small">' + words.small + '</p>'
     + '<p class="relay-live" role="status"><i aria-hidden="true"></i><span>' + words.waiting + '</span></p>'
     + '</div></section>';
@@ -124,12 +141,26 @@ export function nothingShared({ paired, waitingBoards, failure }) {
  * @param {HTMLElement} root - The document's root element.
  * @param {string|null} name - The first screen, or null when the board can show.
  * @param {string} [message] - Existing transport guidance to display instead of the default waiting line.
+ * @param {object} [step] - Observed empty-board state; omitted while the first inventory is pending.
  */
-export function showRelayScreen(root, name, message = '') {
+export function showRelayScreen(root, name, message = '', step = emptyBoardStep()) {
   if (name) root.dataset.relayScreen = name;
   else if (root.dataset.relayScreen === 'share') delete root.dataset.relayScreen;
-  const status = root.querySelector?.('#relay-screen .relay-live span');
-  if (status) status.textContent = message || RELAY_SCREEN_WORDS.share.waiting;
+  const panel = root.querySelector?.('#relay-screen .relay-panel[data-screen="share"]');
+  if (!panel) return;
+  panel.querySelector('h1').textContent = step.title;
+  panel.querySelector('.relay-say').textContent = step.say;
+  panel.querySelector('.relay-small').textContent = step.small;
+  const command = panel.querySelector('.relay-command');
+  command.hidden = !step.command;
+  command.querySelector('code').textContent = step.command ? '$ ' + step.command : '';
+  command.querySelector('button').dataset.copy = step.command;
+  const agent = panel.querySelector('.relay-agent');
+  agent.hidden = !step.ask;
+  agent.querySelector('small').textContent = step.ask ? '“' + step.ask + '”' : '';
+  agent.querySelector('button').dataset.copy = step.ask;
+  panel.querySelector('.relay-or').hidden = !step.ask;
+  panel.querySelector('.relay-live span').textContent = message || step.waiting;
 }
 
 /** Copy a screen's sentence or command; a browser without the clipboard API copies from a selected field. */

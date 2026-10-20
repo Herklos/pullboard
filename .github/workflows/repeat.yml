@@ -57,10 +57,14 @@ jobs:
           case "$RUNS" in ''|*[!0-9]*) echo "runs must be a whole number, saw '$RUNS'"; exit 2;; esac
           [ -f "$FILE" ] || { echo "no such test file: $FILE"; exit 2; }
           pass=0; fail=0
+          mkdir -p repeat-runs
+          { echo "commit $(git rev-parse HEAD)"; echo "node $(node --version)"; echo "runner $RUNNER"; uname -a; } > repeat-runs/pins.txt
           for i in $(seq 1 "$RUNS"); do
             if [ -n "$PATTERN" ]; then set -- --test-name-pattern "$PATTERN" "$FILE"; else set -- "$FILE"; fi
             start=$(date +%s)
-            if out=$(node bin/run-tests.js "$@" 2>&1) && ! printf '%s\n' "$out" | grep -q '^not ok'; then
+            out=$(node bin/run-tests.js "$@" 2>&1) && rc=0 || rc=$?
+            printf '%s\n' "$out" > "repeat-runs/run-$i.tap"
+            if [ "$rc" -eq 0 ] && ! printf '%s\n' "$out" | grep -q '^not ok'; then
               pass=$((pass + 1)); echo "run $i: ok in $(( $(date +%s) - start ))s"
             else
               fail=$((fail + 1)); echo "::group::run $i: RED in $(( $(date +%s) - start ))s"
@@ -70,3 +74,10 @@ jobs:
           done
           echo "$FILE ${PATTERN:+[$PATTERN] }on $RUNNER node $NODE_VERSION: runs=$RUNS pass=$pass fail=$fail" | tee -a "$GITHUB_STEP_SUMMARY"
           [ "$fail" -eq 0 ]
+      - name: Keep every run's full output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: repeat-runs-${{ inputs.os }}-node${{ inputs.node }}
+          path: repeat-runs/
+          retention-days: 14
