@@ -11,26 +11,36 @@ import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { evaluationValue } from './devtools-evaluation.mjs';
 import { renderTour } from './tour-renderer.mjs';
+import { themeVariants } from '../img/theme.mjs';
 import { narrationDurations, parseVtt } from './video.mjs';
 
 const ROOT = new URL('../../', import.meta.url);
 const README = readFileSync(new URL('README.md', ROOT), 'utf8');
-const files = ['desktop.png', 'phone.png', 'shouts.png', 'tour.svg'];
+const files = ['desktop-light.png', 'desktop-dark.png', 'phone-light.png', 'phone-dark.png', 'shouts-light.png', 'shouts-dark.png', 'tour.svg', 'tour-dark.svg'];
 const shots = (name) => new URL(`docs/shots/${name}`, ROOT);
 
-/** Assert that an image is embedded in a named README section with useful alt text. */
+/**
+ * Assert that a README picture embeds a named capture in a section, with descriptive alt text and a dark twin.
+ *
+ * @param {string} section the README section heading that holds the picture
+ * @param {string} file the light capture's file name under docs/shots
+ * @param {string[]} phrases words the alt text must include
+ */
 function linkedInSection(section, file, phrases) {
   const start = README.indexOf(`## ${section}`);
   assert.notEqual(start, -1, `README has the ${section} section`);
   const next = README.indexOf('\n## ', start + 1);
   const body = README.slice(start, next < 0 ? undefined : next);
-  const match = new RegExp(`!\\[([^\\]]+)\\]\\(docs/shots/${file.replace('.', '\\.')}\\)`).exec(body);
+  const light = `docs/shots/${file.replaceAll('.', '\\.')}`;
+  const match = new RegExp(`<img src="${light}" alt="([^"]+)">`).exec(body);
   assert.ok(match, `${file} is embedded in ${section}`);
+  const dark = file === 'tour.svg' ? 'tour-dark.svg' : file.replace('-light.', '-dark.');
+  assert.ok(body.includes(`srcset="docs/shots/${dark}"`), `${file} has a dark twin in ${section}`);
   for (const phrase of phrases) assert.ok(match[1].toLowerCase().includes(phrase), `${file} alt text says ${phrase}`);
 }
 
 test('the README links the desktop board and timed tour with descriptive alt text [I11,I13]', () => {
-  linkedInSection('Pullboard View', 'desktop.png', ['open', 'claimed', 'submitted', 'accepted']);
+  linkedInSection('Pullboard View', 'desktop-light.png', ['open', 'claimed', 'submitted', 'accepted']);
   linkedInSection('Installation', 'tour.svg', ['submitted', 'rejected', 'fixed', 'accepted']);
 });
 
@@ -47,8 +57,8 @@ test('the README board shots show the stats line [I11,I13]', () => {
   assert.match(exported, /proof-stats-summary-text/, 'the exported demo renders a compact summary');
   assert.match(exported, /stats\.merged \+ ' merged · ' \+ percentage \+ ' sent back'/, 'the summary is derived from exported stats');
   assert.match(exported, /Bottleneck: ' \+ \(stage \|\| bottleneck\.message\)/, 'the summary includes the measured bottleneck');
-  linkedInSection('Pullboard View', 'desktop.png', ['stats line', 'merged work', 'sent-back share', 'bottleneck recommendation']);
-  linkedInSection('Pullboard View', 'phone.png', ['stats line', 'merged work', 'sent-back share', 'bottleneck recommendation']);
+  linkedInSection('Pullboard View', 'desktop-light.png', ['stats line', 'merged work', 'sent-back share', 'bottleneck recommendation']);
+  linkedInSection('Pullboard View', 'phone-light.png', ['stats line', 'merged work', 'sent-back share', 'bottleneck recommendation']);
 });
 
 test('the demo board stages a Shouts conversation [I11,I13]', () => {
@@ -77,7 +87,7 @@ test('the demo board declares every agent\'s model [I11,I13]', () => {
     const source = fileURLToPath(ROOT);
     const root = join(fixture, 'repo');
     mkdirSync(root);
-    for (const directory of ['src', 'bin', 'docs/shots', 'skills']) cpSync(join(source, directory), join(root, directory), { recursive: true });
+    for (const directory of ['src', 'bin', 'docs/shots', 'docs/img', 'skills']) cpSync(join(source, directory), join(root, directory), { recursive: true });
     for (const file of ['test/chrome-fixture.js', 'test/fixture-child.js', 'package.json', 'CHANGELOG.md']) cpSync(join(source, file), join(root, file));
     const shims = join(fixture, 'bin');
     mkdirSync(shims);
@@ -129,7 +139,7 @@ test("the README capture's Chrome socket path fits the Linux limit [I11,C7]", ()
 
 test('the README capture leaves no view running [I11,I13]', { timeout: 240_000 }, () => {
   const source = fileURLToPath(ROOT);
-  const images = ['desktop.png', 'phone.png', 'shouts.png'];
+  const images = ['desktop-light.png', 'desktop-dark.png', 'phone-light.png', 'phone-dark.png', 'shouts-light.png', 'shouts-dark.png'];
   const chrome = process.env.PULLBOARD_CHROME || [
     '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
     '/usr/bin/google-chrome', '/usr/bin/chromium', '/usr/bin/chromium-browser',
@@ -143,7 +153,7 @@ test('the README capture leaves no view running [I11,I13]', { timeout: 240_000 }
   try {
     const root = join(fixture, 'repo');
     mkdirSync(root);
-    for (const directory of ['bin', 'src', 'skills', 'docs/shots']) {
+    for (const directory of ['bin', 'src', 'skills', 'docs/shots', 'docs/img']) {
       cpSync(join(source, directory), join(root, directory), { recursive: true });
     }
     mkdirSync(join(root, 'test'));
@@ -214,22 +224,20 @@ test('the README capture leaves no view running [I11,I13]', { timeout: 240_000 }
 });
 
 test('the README shows the Shouts capture [I11,I13]', () => {
-  linkedInSection('Pullboard View', 'shouts.png', ['shouts', 'answered', 'heard', 'receipt', 'code reference']);
-  linkedInSection('Pullboard View', 'desktop.png', ['needs you', 'search', 'status bar']);
-  linkedInSection('Pullboard View', 'phone.png', ['phone', 'dark', 'active work', 'needs you', 'search']);
+  linkedInSection('Pullboard View', 'shouts-light.png', ['shouts', 'answered', 'heard', 'receipt', 'code reference']);
+  linkedInSection('Pullboard View', 'desktop-light.png', ['needs you', 'search', 'status bar']);
+  linkedInSection('Pullboard View', 'phone-light.png', ['phone', 'active work', 'needs you', 'search']);
   const section = README.slice(README.indexOf('## Pullboard View'), README.indexOf('## Get started'));
-  assert.match(section, /desktop\.png\)[^]*shouts\.png\)/, 'desktop and Shouts captures are together');
-  const png = readFileSync(shots('shouts.png'));
+  assert.match(section, /desktop-light\.png"[^]*shouts-light\.png"/, 'desktop and Shouts captures are together');
+  const png = readFileSync(shots('shouts-light.png'));
   assert.deepEqual([...png.subarray(0, 8)], [137, 80, 78, 71, 13, 10, 26, 10]);
   assert.equal(png.readUInt32BE(16), 1440, 'the Shouts capture is desktop width');
 });
 
 test('the demo assets exist and stay within their size budgets [I11,I13]', () => {
   for (const name of files) assert.ok(statSync(shots(name)).size > 0, `${name} exists`);
-  assert.ok(statSync(shots('desktop.png')).size < 300_000, 'desktop PNG is under 300 KB');
-  assert.ok(statSync(shots('phone.png')).size < 300_000, 'phone PNG is under 300 KB');
-  assert.ok(statSync(shots('shouts.png')).size < 300_000, 'Shouts PNG is under 300 KB');
-  assert.ok(statSync(shots('tour.svg')).size < 200_000, 'tour SVG is under 200 KB');
+  for (const name of files.filter((file) => file.endsWith('.png'))) assert.ok(statSync(shots(name)).size < 300_000, `${name} is under 300 KB`);
+  for (const name of ['tour.svg', 'tour-dark.svg']) assert.ok(statSync(shots(name)).size < 200_000, `${name} is under 200 KB`);
   const tour = readFileSync(shots('tour.svg'), 'utf8');
   assert.match(tour, /animation:light-step 16s linear infinite/, 'the SVG carries its own timed animation');
   assert.doesNotMatch(tour, /[\x00-\x08\x0b-\x1f]/, 'tour SVG contains no XML-invalid control characters');
@@ -310,9 +318,10 @@ function capturedTour() {
   return JSON.parse(metadata[1].replaceAll('&apos;', "'").replaceAll('&quot;', '"').replaceAll('&gt;', '>').replaceAll('&lt;', '<').replaceAll('&amp;', '&'));
 }
 
-/** Check the committed image as well as a fresh rendering of its real tour output. */
+/** Check both committed themes as well as a fresh rendering of the real tour output, split the way the demo writes it. */
 function cards() {
-  return [readFileSync(shots('tour.svg'), 'utf8'), renderTour(capturedTour())];
+  const rendered = themeVariants(renderTour(capturedTour()));
+  return [readFileSync(shots('tour.svg'), 'utf8'), readFileSync(shots('tour-dark.svg'), 'utf8'), rendered.light, rendered.dark];
 }
 
 test('the compact tour card holds eight ordered, single-line steps and both verdict tags [I13]', () => {
@@ -342,9 +351,13 @@ test('the card lights steps in turn and holds still for reduced motion [I13]', (
 });
 
 test('the card carries distinct actor and verdict colours for light and dark readers [I13]', () => {
-  for (const svg of cards()) {
-    assert.match(svg, /@media\(prefers-color-scheme:dark\)/);
-    for (const color of ['#101714', '#315f8f', '#6547bc', '#087546', '#e9eeeb', '#80bfff', '#c1aeff', '#61e6b1']) assert.ok(svg.includes(color), color);
+  const [light, dark, renderedLight, renderedDark] = cards();
+  assert.equal(light, renderedLight, 'tour.svg is the light card of the recorded tour');
+  assert.equal(dark, renderedDark, 'tour-dark.svg is the dark card of the recorded tour');
+  for (const color of ['#101714', '#315f8f', '#6547bc', '#087546']) assert.ok(light.includes(color), color);
+  for (const color of ['#e9eeeb', '#80bfff', '#c1aeff', '#61e6b1']) assert.ok(dark.includes(color) && !light.includes(color), color);
+  for (const svg of [light, dark]) {
+    assert.doesNotMatch(svg, /prefers-color-scheme/, 'each card holds one theme, and its picture picks the reader\'s');
     for (const [actor, color] of [['you', 'ink'], ['coordinator', 'blue'], ['builder', 'violet'], ['verifier', 'green']]) {
       assert.ok(svg.includes(`.${actor}{fill:var(--${color})}`), `${actor} has its own colour`);
     }
