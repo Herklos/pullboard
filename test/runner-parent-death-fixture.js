@@ -15,7 +15,7 @@ import { readRemoteGateHolders, waitForCondition } from './runner-fixture-state.
  * transport drops (#888: a forwarded write then waited forever for a drain from a destroyed stdout), and `epermOnce`
  * makes the worker's first real signal to one process group answer EPERM while its members are still alive (#927), so
  * the forced EPERM does not depend on how the OS answers an exited, unreaped group; the worker retries on a fresh census
- * (#888), and the launcher lingers 300 ms after TERM so the retry's group signal reaches a live launcher.
+ * (#888) before the signal can reach that group's live members.
  * `lateGroup` starts the child in the launcher's group and moves it to its own a second later, so the worker's census
  * always sees it first in the old group, as it did under load when a detached child had not yet called setsid (#888).
  */
@@ -104,7 +104,6 @@ const child = ${lateGroup
     : "spawn(process.execPath, [require.resolve('./remote-detached-child.js'), ...process.argv.slice(2)], {\n  detached: true, stdio: 'ignore', env: process.env,\n});"}
 child.unref();
 ${chatty ? "setInterval(() => process.stdout.write('launcher output\\n'), 20);" : 'setInterval(() => {}, 1_000);'}
-${epermOnce ? "process.on('SIGTERM', () => setTimeout(() => process.exit(0), 300));" : ''}
 `);
   writeFileSync(join(repo, 'remote-detached-child.js'), `const { existsSync, writeFileSync } = require('node:fs');
 const [ready, pidFile, term, release, gone] = process.argv.slice(2);
@@ -132,14 +131,11 @@ setInterval(() => {}, 1_000);
     writeFileSync(preload, `import { writeFileSync } from 'node:fs';
 const kill = process.kill.bind(process);
 let answered = false;
-const groupCalls = new Map();
 process.kill = (pid, signal) => {
-  // The second real signal to one process group answers EPERM while its members are still alive: the detached child
-  // has already received TERM and is waiting for its release, so the answer does not depend on how the OS treats an
-  // exited, unreaped group (#927). Probes with signal 0 pass through, and the first signal is never answered, so the
-  // child's TERM handler still runs.
-  if (pid < 0 && signal !== 0) groupCalls.set(pid, (groupCalls.get(pid) ?? 0) + 1);
-  if (!answered && pid < 0 && signal !== 0 && groupCalls.get(pid) === 2) {
+  // Force the worker's first real group signal to retry while that group is still alive (#945). Waiting for a second
+  // signal to the same group depended on the OS cleanup sequence: Linux can drain each group after a single TERM.
+  // Liveness probes pass through, and the retry delivers the signal so the detached child's TERM handler still runs.
+  if (!answered && pid < 0 && signal !== 0) {
     answered = true;
     writeFileSync(${JSON.stringify(epermAnswered)}, 'eperm\\n');
     throw Object.assign(new Error('kill EPERM'), { code: 'EPERM', errno: -1, syscall: 'kill' });
