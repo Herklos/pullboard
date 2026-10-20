@@ -116,6 +116,7 @@ Work
   pullboard claim <id>                  take or renew a lease; the first claim freezes the criterion
   pullboard release <id> [--note "why"]  hand it back; a review release needs a one-line reason
   pullboard submit <id>                 needs a clean tree, item check and affected tests green at HEAD (alias: done)
+                                        --infra "<why>": required when the change edits an existing test or gate file; the reviewer reads it in show
   pullboard verify <id> accept --note "what you broke or which edge you tried, and what happened"
   pullboard verify <id> reject --reason TEST_FAILURE --note "what failed" [--cause <key>]
                                         a cause is test:<file>::<title>, refusal:<CODE>, row:<id> or doctrine:<id>
