@@ -14,12 +14,18 @@ import {
 } from 'node:fs';
 import { performance } from 'node:perf_hooks';
 import { tmpdir } from 'node:os';
-import { basename, join } from 'node:path';
+import {
+  basename,
+  join,
+} from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CHECKOUT_SESSION_TOKEN_ENV } from './agent-session.js';
 import { displayAgentName } from './agent-names.js';
 import { loadConfig } from './config.js';
-import { AGENT_SESSION_IDS, AGENT_SHELL_MARKERS } from './person.js';
+import {
+  AGENT_SESSION_IDS,
+  AGENT_SHELL_MARKERS,
+} from './person.js';
 import { registerProjectAndLink } from './projects.js';
 
 /**
