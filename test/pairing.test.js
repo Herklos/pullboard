@@ -13,6 +13,7 @@ import { createPairingStore } from '../relay/pairing-store.js';
 import { createPairingHandler } from '../relay/pairing-http.js';
 import { createRelayHandler } from '../relay/service.js';
 import { Refused } from '../src/refused.js';
+import { PAIR_PACKAGE_BYTES } from '../src/relay-limits.js';
 import { relayClientFixture } from './relay-client-fixture.js';
 
 const BOARD = '0123456789abcdef0123456789abcdef';
@@ -135,7 +136,7 @@ test('[H15,H17] package validation excludes sender credentials and validates rel
     await assert.rejects(sealPairingBundle(code, invalid), { code: 'PAIR_PACKAGE' });
   }
   const oversized = bundle({ snapshot: { version: 1, tables: {
-    board_meta: [{ meta_key: 'board_id', meta_value: BOARD }], event: [{ event_id: 14 }], marker: [{ value: 'x'.repeat(14_000_000) }],
+    board_meta: [{ meta_key: 'board_id', meta_value: BOARD }], event: [{ event_id: 14 }], marker: [{ value: 'x'.repeat(PAIR_PACKAGE_BYTES + 1) }],
   } } });
   await assert.rejects(sealPairingBundle(code, oversized), { code: 'PAIR_PACKAGE_SIZE' });
   for (const invalid of ['', 'abc', 'x'.repeat(98), BOARD + '.A'.repeat(22) + '.B'.repeat(43), null]) {
@@ -194,7 +195,12 @@ test('[H15,H17] pairing HTTP authenticates repository access before publishing o
     if (req.headers.authorization !== 'Bearer receiver-session') throw new Refused('AUTH_REQUIRED', 'sign in');
   });
   const issued = createPairingCode(BOARD);
-  const sealed = await sealPairingBundle(issued.code, bundle());
+  const larger = bundle({ snapshot: { version: 1, tables: {
+    board_meta: [{ meta_key: 'board_id', meta_value: BOARD }], event: [{ event_id: 14 }], marker: [{ value: 'x'.repeat(20_000_000) }],
+  } } });
+  const sealed = await sealPairingBundle(issued.code, larger);
+  assert.ok(Buffer.byteLength(JSON.stringify({ sealed })) > 20_000_000, 'the encrypted package exceeds the former HTTP body bound');
+  assert.ok(Buffer.byteLength(sealed, 'base64url') > 19_000_000, 'the decoded package exceeds the former envelope bound');
   const base = origin + '/api/v1/pairings/' + BOARD + '/' + issued.locator;
   const publish = await fetch(base, {
     method: 'POST', headers: { authorization: 'Bearer receiver-session', 'content-type': 'application/json' },
@@ -218,7 +224,7 @@ test('[H15,H17] pairing HTTP authenticates repository access before publishing o
   const response = await consumed.json();
   assert.equal(response.sealed, sealed);
   assert.ok(!JSON.stringify(response).includes(issued.secret), 'HTTP returns opaque ciphertext only');
-  assert.deepEqual(await openPairingBundle(issued.code, response.sealed), bundle(),
+  assert.deepEqual(await openPairingBundle(issued.code, response.sealed), larger,
     'the authorized receiver can decrypt the same package after the rejected attempt');
   assert.ok(checks.every((check) => check.board === BOARD && check.write === false));
 

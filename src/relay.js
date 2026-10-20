@@ -21,6 +21,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { hostname } from 'node:os';
+import { SEALED_SNAPSHOT_BYTES as SEALED_SNAPSHOT_LIMIT } from './relay-limits.js';
 import {
   basename,
   dirname,
@@ -116,7 +117,6 @@ import {
 export { relayStorageLine };
 
 export const DEFAULT_RELAY = 'https://app.pullboard.dev';
-const SEALED_SNAPSHOT_LIMIT = 10_000_000;
 const LINK_FILES = new WeakMap();
 const STATE_FILES = new WeakMap();
 const WARNED_COMMANDS = new WeakSet();

@@ -12,4 +12,3 @@ export function relayStorageLine(value) {
   const storage = relayStorage(value);
   return storage ? `relay storage: account ${storage.account.login}, ${(storage.usedBytes / 1_000_000).toFixed(1)} MB used of ${(storage.limitBytes / 1_000_000).toFixed(1)} MB` : '';
 }
-
