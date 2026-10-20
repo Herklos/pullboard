@@ -38,7 +38,7 @@ const covered = new Set();
 const coveredRoots = new Set();
 const catalogCases = [];
 
-// Bound CLI/server/watch processes, while the existing Git fixtures remain synchronous.
+// Bound real CLI/Git/server/watch children together; each private workflow keeps its command order.
 let childSlots = 3;
 let closingCatalog = false;
 const childWaiters = [];
@@ -59,7 +59,7 @@ async function catalogChildSlot() {
   };
 }
 
-/** Keep an actual CLI child in its slot until its result includes the close event. */
+/** Keep each actual CLI or Git child in its slot until its result includes the close event. */
 async function withCatalogChild(run) {
   const release = await catalogChildSlot();
   try {
@@ -141,7 +141,11 @@ function sandbox() {
   delete env.PULLBOARD_STARTUP_TEST_PHASE_REACHED_FILE;
   delete env.PULLBOARD_STARTUP_TEST_RELEASE_FILE;
   for (const marker of SSH_SHELL_MARKERS) delete env[marker];
-  const git = (cwd, ...args) => runFixtureGit(args, { cwd, env, encoding: 'utf8', stdio: 'pipe' });
+  const git = (cwd, ...args) => withCatalogChild(async () => {
+    const result = await runFixtureChildAsync('git', args, { cwd, env, encoding: 'utf8', stdio: 'pipe' });
+    if (result.status !== 0) throw new Error(result.failure);
+    return result.stdout.trim();
+  });
   const run = (cwd, ...args) => withCatalogChild(() => runFixtureChildAsync(process.execPath, [BIN, ...args], { cwd, env, encoding: 'utf8' }));
   return { dir, env, git, run };
 }
@@ -151,7 +155,7 @@ async function project() {
   const box = sandbox();
   const repo = join(box.dir, 'repo');
   mkdirSync(repo);
-  box.git(repo, 'init', '-q', '-b', 'main');
+  await box.git(repo, 'init', '-q', '-b', 'main');
   const inheritedModel = box.env.PULLBOARD_MODEL;
   delete box.env.PULLBOARD_MODEL;
   const initialized = await json(box, repo, 'init');
@@ -172,8 +176,8 @@ async function project() {
   }, null, 2)}\n`);
   writeFileSync(join(repo, 'SPEC.md'), SPEC);
   writeFileSync(join(repo, 'DOCTRINE.md'), '');
-  box.git(repo, 'add', '-A');
-  box.git(repo, 'commit', '-q', '-m', 'chore: set up API fixture');
+  await box.git(repo, 'add', '-A');
+  await box.git(repo, 'commit', '-q', '-m', 'chore: set up API fixture');
   return { ...box, repo, initialized };
 }
 
@@ -300,17 +304,17 @@ catalogCase('[A1] command results match the catalog across roots and subcommands
   assert.deepEqual((({ rows, blueprints }) => [rows[0].status, rows.length, blueprints.length, blueprints[1].shared.length])(await json(box, repo, 'blueprint', ['add', join(box.dir, 'catalog-blueprint.json'), '--blueprint', join(box.dir, 'catalog-practice-blueprint.json')], 'add')), ['draft', 2, 2, 1], 'two blueprints in one add land as one result, a shared rule drafted once (#720)');
   mkdirSync(join(repo, 'test'));
   writeFileSync(join(repo, 'test', 'proof.test.js'), "import { test } from 'node:test';\ntest('proof [G1]', () => {});\n");
-  box.git(repo, 'add', 'SPEC.md', 'test/proof.test.js');
-  box.git(repo, 'commit', '-q', '-m', 'test: cite the fixture');
+  await box.git(repo, 'add', 'SPEC.md', 'test/proof.test.js');
+  await box.git(repo, 'commit', '-q', '-m', 'test: cite the fixture');
   const signerKey = join(box.dir, 'signer-key');
   execFileSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-f', signerKey], { stdio: 'pipe' });
-  box.git(repo, 'config', 'user.signingkey', signerKey);
+  await box.git(repo, 'config', 'user.signingkey', signerKey);
   await json(box, repo, 'spec', ['signers', 'add', '--key', `${signerKey}.pub`, '--by', 'CO'], 'signers');
-  box.git(repo, 'add', '.pullboard/signers', '.pullboard/signers.initial', '.pullboard/first-commit');
-  box.git(repo, 'commit', '-q', '-m', 'chore: opt into signed sign-offs');
+  await box.git(repo, 'add', '.pullboard/signers', '.pullboard/signers.initial', '.pullboard/first-commit');
+  await box.git(repo, 'commit', '-q', '-m', 'chore: opt into signed sign-offs');
   await json(box, repo, 'spec', ['signoff', 'G1', '--by', 'CO'], 'signoff');
-  box.git(repo, 'add', '.pullboard/signoffs.jsonl');
-  box.git(repo, 'commit', '-q', '-m', 'chore: record the fixture signoff');
+  await box.git(repo, 'add', '.pullboard/signoffs.jsonl');
+  await box.git(repo, 'commit', '-q', '-m', 'chore: record the fixture signoff');
 
   const messageFile = join(box.dir, 'commit-message.txt');
   writeFileSync(messageFile, 'chore: valid fixture\n');
@@ -322,7 +326,7 @@ catalogCase('[A1] command results match the catalog across roots and subcommands
   const review = await json(box, repo, 'worktree', ['review']);
   const reviewPath = review.path;
   const secondPath = join(box.dir, 'review-two');
-  box.git(repo, 'worktree', 'add', '-q', secondPath, '-b', 'review/two');
+  await box.git(repo, 'worktree', 'add', '-q', secondPath, '-b', 'review/two');
   await json(box, secondPath, 'join', ['review']);
 
   const added = await json(box, repo, 'add', ['coordinator', 'API item', '--specs', 'G1', '--criterion', 'the API item is verified', '--check', 'true']);
@@ -384,7 +388,7 @@ catalogCase('[A1] command results match the catalog across roots and subcommands
 catalogCase('[A1,B21,B27] a lane decision is answered by its agent through CLI JSON', async () => {
   const box = await project();
   const agent = join(box.dir, 'app-1');
-  box.git(box.repo, 'worktree', 'add', '-q', agent, '-b', 'app/one');
+  await box.git(box.repo, 'worktree', 'add', '-q', agent, '-b', 'app/one');
   const joined = await box.run(agent, 'join', 'app');
   assert.equal(joined.status, 0, joined.stderr);
 
@@ -406,7 +410,7 @@ catalogCase('[A1,B21,B27] decisions shows an agent its direct and lane asks only
   /** Create a real worktree registered to the requested lane. */
   const worktree = async (name, lane) => {
     const path = join(box.dir, name);
-    box.git(box.repo, 'worktree', 'add', '-q', path, '-b', `${lane}/${name}`);
+    await box.git(box.repo, 'worktree', 'add', '-q', path, '-b', `${lane}/${name}`);
     const joined = await box.run(path, 'join', lane);
     assert.equal(joined.status, 0, joined.stderr);
     return path;
@@ -471,11 +475,11 @@ catalogCase('[A1] refusals are one JSON document with exact public error fields'
   const box = sandbox();
   const repo = join(box.dir, 'repo');
   mkdirSync(repo);
-  box.git(repo, 'init', '-q', '-b', 'main');
+  await box.git(repo, 'init', '-q', '-b', 'main');
   await json(box, repo, 'init');
   writeFileSync(join(repo, 'pullboard.json'), `${JSON.stringify({ gate: 'true', lanes: {} }, null, 2)}\n`);
-  box.git(repo, 'add', '-A');
-  box.git(repo, 'commit', '-q', '-m', 'chore: set up refusal fixture');
+  await box.git(repo, 'add', '-A');
+  await box.git(repo, 'commit', '-q', '-m', 'chore: set up refusal fixture');
 
   const noRow = await jsonError(box, repo, 'spec', ['show', 'G99'], {
     status: 1,
@@ -724,11 +728,11 @@ catalogCase('[A1] catalog commands keep their real repository exercises', async 
     await json(source, source.repo, 'submit', [String(caused.item_id)]);
     await json(source, source.repo, 'reopen', [String(caused.item_id), '--note', 'the bar cites the wrong row', '--cause', 'row:G1']);
   }
-  const red = source.git(source.repo, 'rev-parse', 'HEAD');
+  const red = await source.git(source.repo, 'rev-parse', 'HEAD');
   mkdirSync(join(source.repo, 'app'), { recursive: true });
   writeFileSync(join(source.repo, 'app', 'fixed.txt'), 'fixed\n');
-  source.git(source.repo, 'add', 'app/fixed.txt');
-  source.git(source.repo, 'commit', '-q', '-m', 'feat(app): add the fixed file [G1]');
+  await source.git(source.repo, 'add', 'app/fixed.txt');
+  await source.git(source.repo, 'commit', '-q', '-m', 'feat(app): add the fixed file [G1]');
   const drafted = await json(source, source.repo, 'rigor', ['draft', 'row:G1', 'The fixed file exists', '--check', 'test -f app/fixed.txt', '--red', red, '--green', 'HEAD'], 'draft');
   assert.equal(drafted.drafts.length, 1);
   await json(source, source.repo, 'spec', ['approve', 'G1'], 'approve');
