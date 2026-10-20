@@ -127,3 +127,23 @@ test('a new test file needs no note [C7,V4]', (t) => {
   assert.equal(submitted.code, 0, `${submitted.out}\n${submitted.err}`);
   assert.doesNotMatch(`${submitted.out}\n${submitted.err}`, /INFRA_NOTE_REQUIRED/u);
 });
+
+test('a gate named by a quoted path or a shell separator needs a note [C7,V4]', (t) => {
+  // Each gate names a script the change then edits: a quoted path with a space, and a path followed by a separator.
+  for (const [gate, file] of [["node 'src/check gate.js'", 'src/check gate.js'], ['node src/check.js; true', 'src/check.js']]) {
+    let box = privateRepo(t);
+    put(box.root, 'pullboard.json', JSON.stringify({ gate, spec: 'SPEC.md' }));
+    put(box.root, file, 'process.exit(0);\n');
+    commitAll(box);
+    box = builderRepo(box);
+    assert.equal(box.coordinator('add', 'build', 'Gate named by a path', '--check', 'true').code, 0);
+    assert.equal(box.run('claim', '1').code, 0);
+    put(box.root, file, 'process.exit(0); // edited after the claim\n');
+    commitAll(box, 'feat(core): change the gate script [G1]');
+    const refused = box.run('submit', '1');
+    const output = `${refused.out}\n${refused.err}`;
+    assert.equal(refused.code, 1, `${gate}: the edit is refused without a note\n${output}`);
+    assert.match(output, /INFRA_NOTE_REQUIRED/u, `${gate}: the refusal is INFRA_NOTE_REQUIRED`);
+    assert.ok(output.includes(file), `${gate}: the refusal names ${file}`);
+  }
+});

@@ -12,8 +12,39 @@ const TEST_FILE = /^test\/|\.(?:test|spec)\.[cm]?js$/u;
 const GATE_FILE = /\.(?:[cm]?js|sh|json)$|\//u;
 
 /**
- * The gate files a command names, relative to the checkout. A command like "node --test test/a.test.js" names
- * test/a.test.js; a flag or a URL names nothing.
+ * The words of a shell command, as the shell reads them: quotes group a path with spaces, a backslash escapes the next
+ * character, and whitespace or a separator (;, &, |, parentheses, redirects) ends a word. A reader that splits on
+ * whitespace alone keeps "src/check.js;" and "'src/check gate.js'" as they are, and misses both (#814).
+ *
+ * @param {string} command one gate command
+ * @returns {string[]} the words, in order, without their quotes
+ */
+function shellWords(command) {
+  const words = [];
+  let word = null;
+  let quote = null;
+  for (let at = 0; at < command.length; at += 1) {
+    const character = command[at];
+    if (quote) {
+      if (character === quote) quote = null;
+      else word = (word ?? '') + character;
+    } else if (character === '"' || character === "'") {
+      quote = character;
+      word = word ?? '';
+    } else if (character === '\\' && at + 1 < command.length) {
+      word = (word ?? '') + command[++at];
+    } else if (/\s/u.test(character) || ';&|()<>'.includes(character)) {
+      if (word !== null) words.push(word);
+      word = null;
+    } else word = (word ?? '') + character;
+  }
+  if (word !== null) words.push(word);
+  return words;
+}
+
+/**
+ * The gate files the gate commands name, relative to the checkout. A flag or a URL names nothing; a word that ends in a
+ * script extension, or holds a path separator, names a file.
  *
  * @param {string[]} commands the gate commands in force
  * @returns {Set<string>}
@@ -21,8 +52,7 @@ const GATE_FILE = /\.(?:[cm]?js|sh|json)$|\//u;
 function namedByGates(commands) {
   const named = new Set();
   for (const command of commands) {
-    for (const token of String(command ?? '').split(/\s+/u)) {
-      const word = token.replace(/^["']|["']$/gu, '');
+    for (const word of shellWords(String(command ?? ''))) {
       if (word && !word.startsWith('-') && !word.includes('://') && GATE_FILE.test(word)) named.add(word.replace(/^\.\//u, ''));
     }
   }
