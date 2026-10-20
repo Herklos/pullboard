@@ -22,6 +22,8 @@ import * as store from '../src/board.js';
 import { submitFixture } from './board-submit-fixture.js';
 import { createE2eHelpers } from './e2e-helpers.js';
 import { loadDoctrine } from '../src/doctrine.js';
+import { loadConfig } from '../src/config.js';
+import { draftConflictSplits } from '../src/rigor-splits.js';
 import { conflictNote } from '../src/trunk-conflict.js';
 import { conflictNoteFiles, conflictReport } from '../src/rigor-conflicts.js';
 
@@ -412,4 +414,45 @@ test('Pullboard\'s four checks count what main has [D1, C7]', async (t) => {
     assert.deepEqual(runCheck('test-inputs', { root }).lines.map((line) => line.slice(0, line.indexOf(':'))),
       ['test/late.test.js', 'test/queued-walk.test.js'], 'a declaration below the first code line is not read, as the selection reads it');
   });
+});
+
+test('a split draft resumes after its row is reserved [D1]', async () => {
+  const box = conflictHistory();
+  const board = store.openBoard(join(box.repo, '.git/pullboard/board.sqlite'));
+  try {
+    const report = conflictReport(store.events(board));
+    const ctx = { info: { root: box.repo, isMain: true }, config: loadConfig(box.repo) };
+    const before = readFileSync(loadDoctrine(box.repo).repo.file, 'utf8');
+    let interrupted = false;
+    let calls = 0;
+    const dependencies = {
+      read: () => ({ coordinator: true, rows: store.rowDrafts(board), decisions: store.rowDecisions(board) }),
+      /** Interrupt once after the real durable reservation, before the ordinary file write. */
+      reserve: row => {
+        calls += 1;
+        const entry = store.draftSpecRow(board, { agentId: 'coordinator', row, written: true });
+        if (!interrupted) { interrupted = true; throw new Error('fixture interruption after durable reservation'); }
+        return entry;
+      },
+    };
+    await assert.rejects(draftConflictSplits(ctx, report, dependencies), /fixture interruption after durable reservation/u);
+    assert.equal(readFileSync(loadDoctrine(box.repo).repo.file, 'utf8'), before);
+    const reserved = store.rowDrafts(board);
+    assert.equal(reserved.length, 1, 'the reservation survived the interrupted file write');
+    const recovered = await draftConflictSplits(ctx, report, dependencies);
+    assert.equal(recovered.length, 1, 'a board reservation alone cannot pretend the file draft exists');
+    assert.equal(recovered[0].row.id, reserved[0].id, 'recovery keeps the exact reserved identity');
+    assert.equal(calls, 1, 'recovery does not reserve another identity');
+    const row = loadDoctrine(box.repo).repo.rows.find(row => row.id === reserved[0].id);
+    assert.equal(row.status, 'draft');
+    assert.equal(row.text, reserved[0].text, 'recovery preserves the original pending judgment and source');
+    assert.equal(row.gate, 'review');
+    assert.equal(store.rowDrafts(board).length, 1);
+    assert.deepEqual(await draftConflictSplits(ctx, report, dependencies), []);
+    const declined = box.run(box.repo, 'spec', 'decline', 'doctrine:' + row.id, '--reason', 'choose another split');
+    assert.equal(declined.code, 0, declined.out + declined.err);
+    writeFileSync(loadDoctrine(box.repo).repo.file, before);
+    await assert.rejects(draftConflictSplits(ctx, report, dependencies), error => error.code === 'STALE_ROW_DECISION', 'an interrupted retry never recreates a row with a person decision');
+    assert.equal(readFileSync(loadDoctrine(box.repo).repo.file, 'utf8'), before);
+  } finally { store.closeBoard(board); }
 });

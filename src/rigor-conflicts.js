@@ -1,5 +1,8 @@
 /** Recent merge collisions are architectural advice, separate from proof-bound Rigor causes [D1]. */
-import { conflictNote, shownPath } from './trunk-conflict.js';
+import {
+  conflictNote,
+  shownPath,
+} from './trunk-conflict.js';
 
 const WINDOW_DAYS = 14;
 const HOT_ITEMS = 2;

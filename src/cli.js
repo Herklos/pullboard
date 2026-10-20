@@ -352,7 +352,10 @@ import {
   reportView,
 } from './background-view.js';
 import { rigorDraftCommand } from './rigor-draft.js';
-import { conflictLines, conflictReport } from './rigor-conflicts.js';
+import {
+  conflictLines,
+  conflictReport,
+} from './rigor-conflicts.js';
 import { draftConflictSplits } from './rigor-splits.js';
 import { nextReview } from './next-review.js';
 import { serveApi } from './api.js';
@@ -2662,7 +2665,7 @@ function readCommands(io, { first, second, rest, values }) {
       if (first || second || rest.length) throw new Refused('USAGE', 'pullboard rigor takes no arguments; to draft a rule: pullboard rigor draft <key> "<rule>" --check "<command>" --red <commit> --green <commit>');
       const ctx = context(io);
       const report = withBoard(ctx, (board) => { const history = store.events(board); return { ...rigorReport(history, { person: store.PERSON }), ...conflictReport(history) }; });
-      if (values['draft-splits']) report.splitDrafts = await draftConflictSplits(ctx, report, { read: () => withBoard(ctx, (board) => ({ coordinator: whoAmI(ctx, board).id === COORDINATOR, rows: store.rowDrafts(board) })), reserve: row => reserveRow(ctx, row, true) });
+      if (values['draft-splits']) report.splitDrafts = await draftConflictSplits(ctx, report, { read: () => withBoard(ctx, (board) => ({ coordinator: whoAmI(ctx, board).id === COORDINATOR, rows: store.rowDrafts(board), decisions: store.rowDecisions(board) })), reserve: row => reserveRow(ctx, row, true) });
       io.result?.(report);
       for (const line of [...rigorLines(report), ...conflictLines(report)]) io.say(line);
       for (const draft of report.splitDrafts ?? []) io.say(`${draft.id}: draft split proposal; person approval required`);
