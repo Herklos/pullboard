@@ -4,10 +4,11 @@
  * text, and the lifecycle is drawn from the declaration itself (M1), refusing what it cannot place.
  */
 import assert from 'node:assert/strict';
-import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { after, test } from 'node:test';
 import { FIGURES, drawLifecycle } from '../docs/img/draw.mjs';
+import { themeVariants } from '../docs/img/theme.mjs';
 import { HELP, commandPhrases } from '../src/help.js';
 import { MACHINE } from '../src/machine.js';
 import { agentsBlock } from '../src/templates.js';
@@ -20,8 +21,49 @@ const README = readFileSync(join(ROOT, 'README.md'), 'utf8');
 const drawn = Object.keys(FIGURES).map((name) => `docs/img/${name}.svg`).sort();
 const SHOT_FIGURES = [
   { path: 'docs/shots/tour.svg', alt: 'The timed Pullboard tour shows a change submitted, rejected for a missed edge, fixed and accepted.' },
-  { path: 'docs/shots/desktop.png', alt: "The desktop board shows open, claimed, submitted and accepted work, a Needs you row for a held lane, search in the top bar, the status bar, an accepted item's review history, and a stats line with merged work, sent-back share and the bottleneck recommendation." },
+  { path: 'docs/shots/desktop-light.png', alt: "The desktop board shows open, claimed, submitted and accepted work, a Needs you row for a held lane, search in the top bar, the status bar, an accepted item's review history, and a stats line with merged work, sent-back share and the bottleneck recommendation." },
 ];
+
+/**
+ * The dark file a README picture pairs with its light file: a PNG's `-light` becomes `-dark`, and an SVG gains `-dark`.
+ *
+ * @param {string} light the light file's path under the repo
+ * @returns {string} the dark file's path
+ */
+function darkTwin(light) {
+  return light.endsWith('-light.png') ? light.replace(/-light\.png$/u, '-dark.png') : light.replace(/\.svg$/u, '-dark.svg');
+}
+
+/**
+ * The markup a README figure uses: a picture whose dark source GitHub shows to dark readers, then the light image.
+ *
+ * @param {string} light the light file's path under the repo
+ * @param {string} alt the figure's alt text, as the README writes it
+ * @returns {string} the picture markup, exactly as the README holds it
+ */
+function figureMarkup(light, alt) {
+  return `<picture>\n  <source media="(prefers-color-scheme: dark)" srcset="${darkTwin(light)}">\n  <img src="${light}" alt="${alt}">\n</picture>`;
+}
+
+/**
+ * Every local image the README shows: its light file, the dark file its picture gives (null when none),
+ * and its alt text. Pictures come first, then images written as plain Markdown, which have no dark file.
+ *
+ * @param {string} markdown the README text
+ * @returns {{ light: string, dark: string | null, alt: string }[]}
+ */
+function localImages(markdown) {
+  const pictures = [...markdown.matchAll(/<picture>([\s\S]*?)<\/picture>/gu)].map(([, body]) => {
+    const img = /<img\b[^>]*>/u.exec(body)?.[0] ?? '';
+    return {
+      light: /\ssrc="([^"]+)"/u.exec(img)?.[1] ?? '',
+      dark: /<source\b[^>]*media="\(prefers-color-scheme: dark\)"[^>]*srcset="([^"]+)"/u.exec(body)?.[1] ?? null,
+      alt: /\salt="([^"]*)"/u.exec(img)?.[1] ?? '',
+    };
+  });
+  const bare = [...markdown.replace(/<picture>[\s\S]*?<\/picture>/gu, '').matchAll(/!\[([^\]]*)\]\(([^)\s]+)\)/gu)].map(([, alt, light]) => ({ light, dark: null, alt }));
+  return [...pictures, ...bare].filter(({ light }) => light.startsWith('docs/'));
+}
 
 test("Pullboard's doctrine carries its four checks [D1,D3]", () => {
   const box = e2e.project();
@@ -145,15 +187,28 @@ function unbalanced(xml) {
 }
 
 test('the README links every figure draw.mjs draws, each committed exactly as drawn [I10]', () => {
-  const links = [...README.matchAll(/!\[([^\]]*)\]\((docs\/img\/[^)\s]+)\)/g)].map(([, alt, path]) => ({ alt, path }));
+  const links = localImages(README).filter(({ light }) => light.startsWith('docs/img/') && light.endsWith('.svg') && light !== 'docs/img/logo.svg').map(({ alt, light }) => ({ alt, path: light }));
   assert.deepEqual(links.map((link) => link.path).sort(), drawn, 'the README links each drawn figure once, and nothing else under docs/img');
   for (const { alt, path } of links) assert.ok(alt.trim().length >= 40, `${path} has alt text that says what it shows`);
-  assert.ok(README.includes('![An agent asks its coordinator. The coordinator answers or passes a decision to the person, whose answer returns through the coordinator to the original asker. Agents send decision requests to their coordinator first.](docs/img/chain.svg)'), 'the chain figure says decision requests go through the coordinator');
-  for (const { alt, path } of SHOT_FIGURES) assert.ok(README.includes(`![${alt}](${path})`), `${path} and its alt text remain in the README`);
-  const committed = readdirSync(join(ROOT, 'docs', 'img')).filter((file) => file.endsWith('.svg') && !['logo.svg', 'logo-dark.svg'].includes(file)).map((file) => `docs/img/${file}`).sort();
+  assert.ok(README.includes(figureMarkup('docs/img/chain.svg', 'An agent asks its coordinator. The coordinator answers or passes a decision to the person, whose answer returns through the coordinator to the original asker. Agents send decision requests to their coordinator first.')), 'the chain figure says decision requests go through the coordinator');
+  for (const { alt, path } of SHOT_FIGURES) assert.ok(README.includes(figureMarkup(path, alt)), `${path} and its alt text remain in the README`);
+  const committed = readdirSync(join(ROOT, 'docs', 'img')).filter((file) => file.endsWith('.svg') && !file.endsWith('-dark.svg') && file !== 'logo.svg').map((file) => `docs/img/${file}`).sort();
   assert.deepEqual(committed, drawn, 'docs/img holds exactly the figures draw.mjs draws');
   for (const [name, draw] of Object.entries(FIGURES)) {
-    assert.ok(readFileSync(join(ROOT, 'docs', 'img', `${name}.svg`), 'utf8') === draw(), `docs/img/${name}.svg differs from what draw.mjs draws: run node docs/img/draw.mjs`);
+    const { light, dark } = themeVariants(draw());
+    assert.ok(readFileSync(join(ROOT, 'docs', 'img', `${name}.svg`), 'utf8') === light, `docs/img/${name}.svg differs from what draw.mjs draws: run node docs/img/draw.mjs`);
+    assert.ok(readFileSync(join(ROOT, 'docs', 'img', `${name}-dark.svg`), 'utf8') === dark, `docs/img/${name}-dark.svg differs from what draw.mjs draws: run node docs/img/draw.mjs`);
+  }
+});
+
+test('every local README image has a dark file that a picture gives the reader, and both files exist [I10,I11,I13]', () => {
+  const images = localImages(README);
+  assert.ok(images.length >= 15, `the README shows ${images.length} local images; expected at least the 15 pictures`);
+  for (const { light, dark } of images) {
+    assert.ok(dark, `${light} is inside a picture with a dark source, so it follows the reader's theme; an image with one theme fails here`);
+    assert.equal(dark, darkTwin(light), `${light} pairs with ${darkTwin(light)}`);
+    assert.ok(existsSync(join(ROOT, light)), `${light} is committed`);
+    assert.ok(existsSync(join(ROOT, dark)), `${dark} is committed`);
   }
 });
 
@@ -253,12 +308,12 @@ test('README pins its approved Philosophy, Key concepts and Why structure [I10,I
   const nextTopLevel = README.indexOf('\n## ', philosophy + 1);
   assert.ok(philosophy >= 0 && philosophy < concepts && concepts < whyStart && whyStart < nextTopLevel, 'Philosophy contains Key concepts and Why before the next top-level section');
   const approvedOpening = "**Accumulated judgement for agents.** Agents are good at tasks and bad at projects: every new session starts without what you decided, so you become the glue. The agents scale; your judgement doesn't. Pullboard is a structural approach to orchestrating agents coherently over long-term builds, so you can trust your agentic workforce to fill in the blanks the way you would, without re-prompting them.";
-  const openingWithFigure = `${approvedOpening}\n\n![How it holds. Your decision becomes a bar each piece of work is frozen against; a second agent checks the exact commit; the board keeps what passed, what failed and why; the next agent starts from there.](docs/img/holds.svg)\n\n**Vibe code a real product.**`;
+  const openingWithFigure = `${approvedOpening}\n\n${figureMarkup('docs/img/holds.svg', 'How it holds. Your decision becomes a bar each piece of work is frozen against; a second agent checks the exact commit; the board keeps what passed, what failed and why; the next agent starts from there.')}\n\n**Vibe code a real product.**`;
   assert.ok(README.includes(openingWithFigure), 'the approved opening and holds figure sit directly before the unchanged lead');
   assert.equal(README.split(approvedOpening).length - 1, 1, 'the approved opening appears exactly once');
   assert.doesNotMatch(`${approvedOpening} ${FIGURES.holds()}`, /\b(?:memory|remember)\b/iu, 'the opening and its figure avoid those terms');
   const section = README.slice(philosophy, nextTopLevel);
-  assert.ok(section.includes('### Why\n\nPast the demo, the same things break.\n\n![Where vibe coding breaks, and what holds instead.'), 'Why opens with the approved line, then the figure of what breaks and what holds');
+  assert.ok(section.includes('### Why\n\nPast the demo, the same things break.\n\n<picture>\n  <source media="(prefers-color-scheme: dark)" srcset="docs/img/why-dark.svg">\n  <img src="docs/img/why.svg" alt="Where vibe coding breaks, and what holds instead.'), 'Why opens with the approved line, then the figure of what breaks and what holds');
   for (const text of [
     'You do not explain twice. You rule the agents. Hierarchy is enforced. Judgement is yours. Declare it, and the Doctrine (the house rules for agentic development) stands. **You speak the constraints, agents fill in the blanks.** The Spec is canon. Then code. Then proof.',
     'Five primitives. Everything else is built on them.',
@@ -304,7 +359,7 @@ test('the README starts setup with your agent [I1]', () => {
   assert.ok(setup.includes('Your agent installs Pullboard, runs `pullboard init` and commits the setup.'), 'the agent does the setup work');
   assert.ok(setup.includes('You approve your requirements and answer its questions.'), 'the person supplies decisions');
   assert.ok(setup.includes('in the view it opens'), 'the agent opens the view for those decisions');
-  assert.ok(setup.includes("![Starting with an agent. You ask your agent to install Pullboard and set it up for what you're building. It runs the install and pullboard init, commits the setup, then walks you through your requirements and questions in the view it opens for you.](docs/img/agent-start.svg)"), 'the figure describes the complete agent path');
+  assert.ok(setup.includes(figureMarkup('docs/img/agent-start.svg', "Starting with an agent. You ask your agent to install Pullboard and set it up for what you're building. It runs the install and pullboard init, commits the setup, then walks you through your requirements and questions in the view it opens for you.")), 'the figure describes the complete agent path');
   assert.ok(setup.indexOf('You can also run it yourself.') > promptAt, 'running setup yourself is the second path');
   assert.ok(setup.includes('`init` writes your spec, doctrine and agent instructions, and installs the hooks and the board. Commit what it wrote, then open Claude Code in the repo and say what to build. That agent becomes your coordinator.'), 'the manual explanation remains unchanged');
 });
@@ -335,6 +390,9 @@ test('README is concise and skimmable without removing its instructions or figur
     const nestedHeading = /^(#{1,6})\s/u.exec(opening);
     if (nestedHeading) {
       assert.ok(nestedHeading[1].length > heading[1].length, `${proseLines[index]} only opens with a nested heading`);
+    } else if (opening === '<picture>') {
+      const img = lines.slice(next, next + 4).find((line) => line.includes('<img')) ?? '';
+      assert.match(img, /\salt="[^"]+[.!?]"/u, `${proseLines[index]} opens with a descriptive figure`);
     } else if (opening.startsWith('![')) {
       assert.match(opening, /^!\[[^\]]+[.!?]\]\(/u, `${proseLines[index]} opens with a descriptive figure`);
     } else if (opening.startsWith('```')) {
@@ -354,6 +412,7 @@ test('README is concise and skimmable without removing its instructions or figur
   let paragraph = [];
   let inCode = false;
   let inCenteredHeader = false;
+  let inPicture = false;
   const flush = () => {
     if (paragraph.length) paragraphs.push(paragraph.join(' '));
     paragraph = [];
@@ -367,6 +426,11 @@ test('README is concise and skimmable without removing its instructions or figur
       inCenteredHeader = true;
     } else if (inCenteredHeader) {
       if (line === '</p>') inCenteredHeader = false;
+    } else if (!inCode && line === '<picture>') {
+      flush();
+      inPicture = true;
+    } else if (inPicture) {
+      if (line === '</picture>') inPicture = false;
     } else if (inCode || !line.trim() || /^#{1,6}\s|^!\[|^\|/u.test(line)) {
       flush();
     } else if (/^\s*[-*]\s/u.test(line)) {

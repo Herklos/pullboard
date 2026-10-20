@@ -269,6 +269,7 @@ export const NEXT_STEPS = Object.freeze({
   GATE_SLOT_LEASE_REQUIRED: 'start the child test process with the live gate lease',
   GATE_SLOT_MARKER_INVALID: 'restart the child with gateSlotEnvironment(lease)',
   GATE_SLOT_TOKEN_REQUIRED: 'restart the child with gateSlotEnvironment(lease)',
+  INFRA_NOTE_REQUIRED: 'run pullboard submit <id> --infra "<why>" with the reason the edit to an existing test or gate file is needed',
   SHORT_SLOT_FULL_SUITE: 'run the whole suite outside the short check, where it queues for an ordinary gate slot; short slots are only for runs that name their test files',
   GIT_GRAFTS: 'ask the coordinator to remove the git graft file: pullboard shout coordinator "please remove .git/info/grafts"',
   HEAD_NOT_NEW: 'commit the rework, then pullboard submit <id>',

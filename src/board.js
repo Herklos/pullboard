@@ -37,6 +37,7 @@ import {
   IN_STATE,
   MOVES,
   STATES,
+  SUBMITTED_CONFLICT_ENGINE,
   UNKNOWN_MOVE,
   VERIFIER_STANDING_ENGINE,
   effectiveGuards,
@@ -73,6 +74,7 @@ import {
   conflictDetail,
   conflictNote,
   conflictProblem,
+  returnedHeadNotice,
 } from './trunk-conflict.js';
 import {
   HEALTH_SENTINEL_ENGINE,
@@ -1625,7 +1627,9 @@ export function reopen(board, id, { agentId, note = '', conflict, cause }) {
       checks: {
         joined: null,
         [IN_STATE]: (found) => new Refused('NOT_SUBMITTED', `item #${id} is ${current(board, found).item_status}, not submitted`),
-        coordinatorOnly: () => onlyCoordinator(agentId, 'reopens submissions'),
+        // Any joined seat returns a submitted head that no longer merges, with Git's files and trunk (#807).
+        coordinatorOnly: (found) => (forMerge && found.item_status === 'submitted' && currentEngine >= SUBMITTED_CONFLICT_ENGINE && listAgents(board).some((agent) => agent.agent_id === agentId)
+          ? null : onlyCoordinator(agentId, 'reopens submissions')),
         noteGiven: () => (forMerge || note.trim() ? null : new Refused('NOTE_REQUIRED', 'say why the criterion needs correction: --note "why"')),
         causeWellFormed: () => causeProblem(cause),
         notMerged: (found) => found.item_status !== 'verified' || !found.item_merged_commit
@@ -1668,6 +1672,7 @@ export function reopen(board, id, { agentId, note = '', conflict, cause }) {
     const returned = forMerge ? { supersedes, ...conflictDetail(conflict) } : supersedes ? { supersedes, landingFailure } : {};
     logEvent(board, agentId, 'reopen', id, { commit: submittedCommit, note: note.trim() || conflictNote(conflict), judgment: null,
       ...(cause !== undefined && cause !== null ? { cause } : {}), ...returned });
+    if (forMerge && supersedes === undefined && item.item_built_by) persistShout(board, { from: agentId, to: item.item_built_by, text: returnedHeadNotice(id, submittedCommit, conflict) });
     postRigorNotices(board, board.lastEvent);
     return { id: item.item_id, commit: submittedCommit, ...returned };
   });
