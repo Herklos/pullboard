@@ -369,7 +369,16 @@ async function openOnPhone(t, { box, link, heldPage, currentMarker }, { holdStat
   await chrome.navigate(box.origin + '/#board=' + link.board + '&key=' + readFileSync(box.keyFile, 'utf8').trim());
   // Budget: the owner's explicit first-readable-board bar is three seconds, independent of historical streaming.
   // The product bar is the page's own firstBoardPaint < 3000 ms; this wait only has to outlast a loaded runner (#953).
-  await chrome.waitFor('Number.isFinite(window.__phoneTiming?.firstBoardPaint) && typeof transport !== "undefined" && !!transport?.historyProgress', 30_000, 'bounded current board paints before all history'); // budget: hang ceiling for observing the paint under suite load; the frozen #903 3000ms first-readable-board bar is asserted on the page-measured firstBoardPaint.
+  try {
+    await chrome.waitFor('Number.isFinite(window.__phoneTiming?.firstBoardPaint) && typeof transport !== "undefined" && !!transport?.historyProgress', 30_000, 'bounded current board paints before all history'); // budget: hang ceiling for observing the paint under suite load; the frozen #903 3000ms first-readable-board bar is asserted on the page-measured firstBoardPaint.
+  } catch (error) {
+    // Record what the page itself reached, so a miss reads as a page measurement rather than a runner timeout (#953).
+    const page = await chrome.evaluate(`({ ...window.__phoneTiming, sinceNavigationMs: performance.now(), readyState: document.readyState,
+      transport: typeof transport, chain: Boolean(document.querySelector('#chain')), loading: document.body?.classList.contains('loading') })`).catch(() => null);
+    t.diagnostic(JSON.stringify({ phonePageAtTimeout: page }));
+    error.message += '; the page reached ' + JSON.stringify(page);
+    throw error;
+  }
   const first = await chrome.evaluate(`({ ...__phoneTiming, phone: document.documentElement.dataset.relayDevice, progress: transport.historyProgress('${link.board}') })`);
   return { chrome, first };
 }
@@ -447,6 +456,7 @@ test("the phone's first-paint budget is judged by the page, not by a loaded test
     for (let run = 0; run < 5; run++) {
       const { chrome, first } = await openOnPhone(t, board);
       paints.push(first.firstBoardPaint);
+      t.diagnostic(JSON.stringify({ run: run + 1, firstBoardPaintMs: Math.round(first.firstBoardPaint) }));
       await chrome.close();
     }
   } finally { load.stop(); }
