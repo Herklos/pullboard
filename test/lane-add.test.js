@@ -31,9 +31,9 @@ test('lane add creates a lane and init proposes lanes from the layout [I1,I2,L1]
   const box = project(t, ['packages/web/src', 'packages/api', 'docs']);
   const init = box.run('init');
   assert.equal(init.status, 0, init.stderr);
-  assert.match(init.stdout, /^proposed lanes, not written until the person accepts: api owns packages\/api\/; web owns packages\/web\/$/mu);
-  assert.match(init.stdout, /^ask the person; to accept, run: pullboard lane add api --owns packages\/api\/ && pullboard lane add web --owns packages\/web\/$/mu);
-  assert.deepEqual(Object.keys(box.lanes()), ['review'], 'init writes no proposed lane before the person accepts');
+  assert.match(init.stdout, /^proposed lanes: api owns packages\/api\/; web owns packages\/web\/$/mu);
+  assert.match(init.stdout, /^add them from the main checkout, then tell the person which lanes you made: pullboard lane add api --owns packages\/api\/ && pullboard lane add web --owns packages\/web\/$/mu);
+  assert.deepEqual(Object.keys(box.lanes()), ['review'], 'init itself writes no proposed lane; the agent adds it with the printed command');
   const rerun = box.run('init', '--json');
   assert.equal(rerun.status, 0, rerun.stderr);
   assert.deepEqual(JSON.parse(rerun.stdout).proposedLanes, [
@@ -82,17 +82,29 @@ test('lane add creates a lane and init proposes lanes from the layout [I1,I2,L1]
   const apps = project(t, ['apps/mobile', 'apps/site']);
   const appsInit = apps.run('init');
   assert.equal(appsInit.status, 0, appsInit.stderr);
-  assert.match(appsInit.stdout, /^proposed lanes, not written until the person accepts: mobile owns apps\/mobile\/; site owns apps\/site\/$/mu);
+  assert.match(appsInit.stdout, /^proposed lanes: mobile owns apps\/mobile\/; site owns apps\/site\/$/mu);
   assert.deepEqual(Object.keys(apps.lanes()), ['review']);
 
   // Any other layout gets one app lane.
   const plain = project(t, ['src', 'test']);
   const plainInit = plain.run('init');
   assert.equal(plainInit.status, 0, plainInit.stderr);
-  assert.match(plainInit.stdout, /^proposed lanes, not written until the person accepts: app owns src\/ test\/$/mu);
-  assert.match(plainInit.stdout, /^ask the person; to accept, run: pullboard lane add app --owns src\/,test\/$/mu);
+  assert.match(plainInit.stdout, /^proposed lanes: app owns src\/ test\/$/mu);
+  assert.match(plainInit.stdout, /^add them from the main checkout, then tell the person which lanes you made: pullboard lane add app --owns src\/,test\/$/mu);
   assert.deepEqual(Object.keys(plain.lanes()), ['review']);
   const accepted = plain.run('lane', 'add', 'app', '--owns', 'src/,test/');
   assert.equal(accepted.status, 0, accepted.stderr);
   assert.deepEqual(plain.lanes().app, { owns: ['src/', 'test/'] });
+});
+
+test('init lets the agent add the first lane and tell the person, never stop to ask [I1,I2,L1]', (t) => {
+  const box = project(t, ['server', 'test']);
+  const init = box.run('init');
+  assert.equal(init.status, 0, init.stderr);
+  const lanes = init.stdout.split('\n').filter((line) => /lane/u.test(line));
+  assert.ok(lanes.some((line) => /^add them from the main checkout, then tell the person which lanes you made: pullboard lane add app --owns server\/,test\/$/u.test(line)), lanes.join('\n'));
+  assert.equal(lanes.some((line) => /ask the person|until the person accepts|to accept, run/u.test(line)), false, 'no line tells the agent to wait for the person before the first lane');
+  const added = box.run('lane', 'add', 'app', '--owns', 'server/,test/');
+  assert.equal(added.status, 0, 'the agent in the main checkout can run the printed command itself: ' + added.stderr);
+  assert.deepEqual(box.lanes().app.owns, ['server/', 'test/']);
 });
