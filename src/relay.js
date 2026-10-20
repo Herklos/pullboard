@@ -87,6 +87,7 @@ import { terminalQr } from './qr.js';
 import { Refused } from './refused.js';
 import { refusalFromReceipt } from './recorded-refusal.js';
 import { relaySenderProblem } from './relay-sender.js';
+import { relayNotices } from './relay-notices.js';
 import {
   readRelayMachine,
   removeRecordedDevice,
@@ -119,7 +120,6 @@ export { relayStorageLine };
 export const DEFAULT_RELAY = 'https://app.pullboard.dev';
 const LINK_FILES = new WeakMap();
 const STATE_FILES = new WeakMap();
-const WARNED_COMMANDS = new WeakSet();
 const KEY_WARNED_COMMANDS = new WeakSet();
 const BASELINE_ATTEMPTS = new WeakMap();
 const BASELINE_NOTICES = new WeakSet();
@@ -342,15 +342,6 @@ async function locked(file, work) {
   } finally { rmSync(lock, { recursive: true, force: true }); }
 }
 
-/** Surface retention notices on the very command that receives them, without exposing credentials. */
-function notices(document, io) {
-  const warnings = [document.warning, document.state?.warning, ...(document.warnings ?? [])].filter(Boolean);
-  for (const warning of warnings) if (warning.code === 'BOARD_INACTIVE' && !WARNED_COMMANDS.has(io)) {
-    WARNED_COMMANDS.add(io);
-    io.err(`pullboard: [BOARD_INACTIVE] ${warning.daysLeft} days left before this relay board is deleted; ${warning.next || 'make a board move before the deadline to keep it'}`);
-  }
-}
-
 /**
  * Name how a relay request failed before any response, from the error's own fields only.
  * Why: a bare "did not answer" hid whether a request timed out, was refused or lost its socket,
@@ -410,7 +401,7 @@ async function rawRequest(state, path, { method = 'GET', body, allowMissing = fa
     error.httpStatus = response.status;
     throw error;
   }
-  notices(document, io);
+  relayNotices(document, io);
   // Only off can forget a link after a supported API reports that the board is gone.
   if (allowMissing && method === 'DELETE' && response.status === 404 && document.version === 1) return { alreadyDeleted: true };
   if (!response.ok) {
