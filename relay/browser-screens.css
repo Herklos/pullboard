@@ -5,6 +5,7 @@
  * the view's tokens, so the theme the person picked applies here too.
  */
 #relay-screen { display: none; }
+#relay-screen [hidden] { display: none !important; }
 :root[data-relay-screen] body > :not(#relay-screen) { display: none !important; }
 :root[data-relay-screen="sign-in"] #relay-screen, :root[data-relay-screen="share"] #relay-screen {
   display: grid; place-items: center; min-height: 100vh; min-height: 100dvh; padding: 32px 20px; background: var(--ground);
