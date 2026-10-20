@@ -37,6 +37,7 @@ import {
   IN_STATE,
   MOVES,
   STATES,
+  SUBMITTED_CONFLICT_ENGINE,
   UNKNOWN_MOVE,
   VERIFIER_STANDING_ENGINE,
   effectiveGuards,
@@ -73,11 +74,13 @@ import {
   conflictDetail,
   conflictNote,
   conflictProblem,
+  returnedHeadNotice,
 } from './trunk-conflict.js';
 import {
   HEALTH_SENTINEL_ENGINE,
+  deliverHealthNotices,
   healthFindingIdentity,
-  healthFindingNotice,
+  healthTargets,
   normalizedHealthFindings,
 } from './health-receipts.js';
 import { factReference } from './fact-reference.js';
@@ -95,6 +98,11 @@ import {
 } from './landing-exceptions.js';
 import { parseSpec } from './spec.js';
 import { invariantEvidence } from './submit-invariants.js';
+import { landingBatches } from './landing-batch-history.js';
+import {
+  NATIVE_FLAKE_ENGINE,
+  carriesFlakeDiagnostics,
+} from './flake-engine.js';
 import { preserveInvariantEvidence } from './submit-invariants.js';
 import { validateLandingBatch } from './submit-invariants.js';
 import { validateLandingRevision } from './submit-invariants.js';
@@ -103,6 +111,7 @@ import { SUBMISSION_PROOF_ENGINE } from './submit-invariants.js';
 export { landingFlakes, landingWaiverCovers, landingWaiverKind };
 export { acceptCheck } from './check-accept.js';
 export { proposeSentinel, decideSentinel, beginSentinelRun, finishSentinelRun } from './sentinels.js';
+export { flakeLedger, recordFlakeObservation } from './flakes.js';
 
 /** The seat readers live in seats.js; the board re-exports them so `store.*` callers keep one import. */
 export { agentAt, agentCreator, listAgents, nextSeatId, seatEnrolled, seatLineage, withVerifierStanding } from './seats.js';
@@ -1625,7 +1634,9 @@ export function reopen(board, id, { agentId, note = '', conflict, cause }) {
       checks: {
         joined: null,
         [IN_STATE]: (found) => new Refused('NOT_SUBMITTED', `item #${id} is ${current(board, found).item_status}, not submitted`),
-        coordinatorOnly: () => onlyCoordinator(agentId, 'reopens submissions'),
+        // Any joined seat returns a submitted head that no longer merges, with Git's files and trunk (#807).
+        coordinatorOnly: (found) => (forMerge && found.item_status === 'submitted' && currentEngine >= SUBMITTED_CONFLICT_ENGINE && listAgents(board).some((agent) => agent.agent_id === agentId)
+          ? null : onlyCoordinator(agentId, 'reopens submissions')),
         noteGiven: () => (forMerge || note.trim() ? null : new Refused('NOTE_REQUIRED', 'say why the criterion needs correction: --note "why"')),
         causeWellFormed: () => causeProblem(cause),
         notMerged: (found) => found.item_status !== 'verified' || !found.item_merged_commit
@@ -1668,6 +1679,7 @@ export function reopen(board, id, { agentId, note = '', conflict, cause }) {
     const returned = forMerge ? { supersedes, ...conflictDetail(conflict) } : supersedes ? { supersedes, landingFailure } : {};
     logEvent(board, agentId, 'reopen', id, { commit: submittedCommit, note: note.trim() || conflictNote(conflict), judgment: null,
       ...(cause !== undefined && cause !== null ? { cause } : {}), ...returned });
+    if (forMerge && supersedes === undefined && item.item_built_by) persistShout(board, { from: agentId, to: item.item_built_by, text: returnedHeadNotice(id, submittedCommit, conflict) });
     postRigorNotices(board, board.lastEvent);
     return { id: item.item_id, commit: submittedCommit, ...returned };
   });
@@ -1959,20 +1971,17 @@ export function recordHealthFindings(board, { agentId, observedRevision, finding
     if (!added.length && !resolved.length) return { added: [], resolved: [] };
     const agents = listAgents(board);
     const lanes = [...new Set(agents.map(agent => agent.agent_lane))];
+    const engine = board.executionEngineVersion ?? ENGINE_VERSION;
     /** Deliver through ordinary feed/inbox records without registering a synthetic worktree seat. */
-    const notify = (finding, cleared) => {
-      const owner = finding.owner;
-      const targets = new Set([COORDINATOR]);
-      if (owner && (owner === PERSON || lanes.includes(owner) || agents.some(agent => agent.agent_id === owner))) targets.add(owner);
-      for (const to of targets) insertShout(board, { from: 'sentinel', to, text: healthFindingNotice(finding, cleared), lanes });
+    const log = (finding, cleared) => {
       const item = finding.item === null ? null : itemById(board, finding.item);
       logEvent(board, 'sentinel', cleared ? 'health-resolved' : 'health-failure', finding.item, {
         key: finding.key, cause: `refusal:${finding.cause}`, since: finding.since, subject: finding.subject,
-        owner, commit: item?.item_commit ?? null, engine: HEALTH_SENTINEL_ENGINE,
+        owner: finding.owner, commit: item?.item_commit ?? null, engine: HEALTH_SENTINEL_ENGINE,
       });
     };
-    for (const finding of resolved) notify(finding, true);
-    for (const finding of added) notify(finding, false);
+    deliverHealthNotices({ resolved, added, engine, log, coordinator: COORDINATOR, shout: (to, text) => insertShout(board, { from: 'sentinel', to, text, lanes }),
+      targets: finding => healthTargets(finding, { engine, coordinator: COORDINATOR, person: PERSON, lanes, agents }) });
     logEvent(board, agentId, 'health-scan', null, { active, engine: HEALTH_SENTINEL_ENGINE });
     return { added: added.map(finding => finding.key), resolved: resolved.map(finding => finding.key) };
   });
@@ -2650,35 +2659,16 @@ export function recentShouts(board, limit = 40) {
   return board.db.prepare('SELECT * FROM shout ORDER BY shout_id DESC LIMIT ?').all(limit);
 }
 
-/**
- * Counts for the status line and the ledger's summary: items by status, verdicts by decision.
- *
- * @param {any} board
- * @returns {{ items: Record<string, number>, accepted: number, rejected: number }}
- */
-export function stats(board) {
-  const items = { open: 0, claimed: 0, submitted: 0, verified: 0, withdrawn: 0 };
-  for (const item of listItems(board, { all: true })) items[item.item_status] += 1;
-  const verdicts = board.db
-    .prepare('SELECT verdict_decision AS decision, COUNT(*) AS total FROM verdict GROUP BY verdict_decision')
-    .all();
-  const count = (decision) => verdicts.find((row) => row.decision === decision)?.total ?? 0;
-  return { items, accepted: count('ACCEPT'), rejected: count('REJECT') };
-}
+export { stats } from './board-stats.js';
 
-/** Read the latest append-only snapshot of each landing batch [B3,R3,R2]. */
-export function landingBatches(board) {
-  const batches = new Map();
-  for (const row of board.db.prepare("SELECT event_detail FROM event WHERE event_kind = 'landing_batch' ORDER BY event_id").all()) {
-    const { batch } = JSON.parse(row.event_detail);
-    batches.set(batch.id, batch);
-  }
-  return [...batches.values()];
-}
+export { landingBatches };
 
 /** Append one coordinator-owned batch revision without changing the board schema [B3,R3]. */
 export function recordLandingBatch(board, { agentId, batch, revision = 0 }) {
   coordinatorOnly(agentId, 'records landing batches');
+  if (carriesFlakeDiagnostics(batch) && (board.executionEngineVersion ?? ENGINE_VERSION) < NATIVE_FLAKE_ENGINE) {
+    throw new Refused('ENGINE_VERSION', `typed landing diagnostics require engine ${NATIVE_FLAKE_ENGINE}; upgrade Pullboard`);
+  }
   const evidence = (board.executionEngineVersion ?? ENGINE_VERSION) >= SUBMISSION_PROOF_ENGINE ? invariantEvidence(batch?.invariantEvidence) : undefined;
   validateLandingBatch(batch, revision);
   if ((board.executionEngineVersion ?? ENGINE_VERSION) >= VERDICT_REVIEW_ENGINE

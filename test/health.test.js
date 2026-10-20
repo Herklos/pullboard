@@ -5,7 +5,7 @@
 import { submitFixture } from './board-submit-fixture.js';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { test } from 'node:test';
@@ -14,6 +14,9 @@ import { pathToFileURL } from 'node:url';
 import * as store from '../src/board.js';
 import { main } from '../src/cli.js';
 import { boardHealth } from '../src/health.js';
+import { scanHealthSentinel } from '../src/health-sentinel.js';
+import { loadConfig } from '../src/config.js';
+import { gateRuns } from '../src/gate-control.js';
 import { JSON_SHAPES } from '../src/json.js';
 import { runFixtureChild, runFixtureGit } from './fixture-child.js';
 
@@ -275,7 +278,9 @@ test('health on a healthy board says nothing is stuck [A6]', async (t) => {
   assert.equal(healthy.code, 0, healthy.stdout);
   const report = JSON.parse(healthy.stdout);
   assert.deepEqual(report.stuck, [], `a moving board has nothing stuck: ${report.stuck.map((entry) => entry.key).join(', ')}`);
-  assert.equal((await cli(box.root, ['health'])).stdout, 'nothing is stuck\n');
+  // Seats with no worktree or recent activity are listed once as retired, never as stuck (#940).
+  const retired = report.retired.map((seat) => seat.agent).join(', ');
+  assert.equal((await cli(box.root, ['health'])).stdout, `nothing is stuck\n${retired ? `retired seats, not counted as agents (quiet for 30 minutes or more, or their worktree is gone): ${retired}\n` : ''}`);
   assert.deepEqual(boardDigest(box.file), before, 'health changes nothing on a healthy board');
 });
 
@@ -337,4 +342,200 @@ test('item history survives garbage collection mid-read [A6]', () => {
   const child = runFixtureChild(process.execPath, ['--expose-gc', '--no-warnings', '--input-type=module', '-e', script], { encoding: 'utf8' });
   assert.equal(child.status, 0, `reading item history must not lose its statement to garbage collection: ${child.stderr}`);
   assert.equal(child.stdout, '50', 'every item with events has a history entry');
+});
+
+test('health names a route with open work and no agent [N2,B13]', async (t) => {
+  const box = repo(t);
+  const { board, at } = boardAt(box);
+  at(HOUR / 12);
+  store.register(board, { lane: 'coordinator', path: box.root });
+  const light = store.register(board, { lane: 'core', route: 'light', path: join(box.dir, 'core-light') });
+  const waiting = store.addItem(board, { by: 'coordinator', lane: 'core', title: 'Mid work', route: 'mid',
+    criterion: 'The mid work is done when its test passes.', check: 'true', brief: 'Files:\n- src/mid.js\nTest:\n- the mid work runs' });
+  store.closeBoard(board);
+  const result = await cli(box.root, ['health', '--json']);
+  assert.equal(result.code, 1, `a queue fault is stuck work: ${result.stderr}`);
+  const report = JSON.parse(result.stdout);
+  const route = report.stuck.find((entry) => entry.key === 'ROUTE_UNSERVED:route:mid');
+  assert.ok(route, `health names the route nobody serves: ${result.stdout}`);
+  assert.deepEqual(route.owner, { role: 'coordinator', who: 'coordinator' }, 'the coordinator starts an agent on the route');
+  assert.ok(route.why.includes(`#${waiting}`), `the finding names the waiting item: ${route.why}`);
+  assert.equal(route.command, 'pullboard worktree core --route mid', `the command starts an agent on the route: ${route.command}`);
+  assert.ok(route.next.includes('pullboard worktree core --route mid') && route.next.includes('PULLBOARD_MODEL'), `the next step names the worktree command and the model: ${route.next}`);
+  assert.ok(!route.command.includes('pullboard join'), 'join from the main checkout would enroll the coordinator, not start an agent');
+  assert.ok(!report.stuck.some((entry) => entry.owner?.who === light && entry.key.startsWith('ROUTE_UNSERVED')), 'the light agent is not named for a mid route');
+});
+
+test('health names a rank inversion [N2,B13]', async (t) => {
+  const box = repo(t);
+  const { board, at } = boardAt(box);
+  at(HOUR / 12);
+  store.register(board, { lane: 'coordinator', path: box.root });
+  const builder = store.register(board, { lane: 'core', path: join(box.dir, 'core-1') });
+  const earlier = store.addItem(board, { by: 'coordinator', lane: 'core', title: 'Earlier work' });
+  const later = store.addItem(board, { by: 'coordinator', lane: 'core', title: 'Later work' });
+  store.claim(board, later, { agentId: builder, lane: 'core', leaseMs: 2 * HOUR, freeze });
+  store.closeBoard(board);
+  const result = await cli(box.root, ['health', '--json']);
+  const report = JSON.parse(result.stdout);
+  const inversion = report.stuck.find((entry) => entry.key === `RANK_INVERSION:item:${later}`);
+  assert.ok(inversion, `health names the claim that ranks behind a free item: ${result.stdout}`);
+  assert.deepEqual(inversion.owner, { role: 'builder', who: builder }, 'the holder owns its own rank inversion');
+  assert.ok(inversion.why.includes(`#${earlier}`), `the finding names the free item ahead: ${inversion.why}`);
+  assert.ok(inversion.next.includes(`claim #${earlier}`), `the next step claims it: ${inversion.next}`);
+});
+
+test('every printed next step runs as pasted through main() [N2,B13]', async (t) => {
+  // Each next step health prints runs from the directory a person would use: the worktree commands from
+  // the main checkout, and the agent steps from that agent's own worktree (#798).
+  const box = repo(t);
+  const brief = { criterion: 'The item is done when its test passes.', check: 'true', brief: 'Files:\n- src/mid.js\nTest:\n- the mid work runs' };
+  const { board, at } = boardAt(box);
+  at(40 * HOUR);
+  store.register(board, { lane: 'coordinator', path: box.root });
+  const idlePath = join(box.dir, 'core-idle');
+  box.git(['worktree', 'add', '-q', idlePath, '-b', 'core-idle']);
+  // A mid seat that is around can serve mid work but not the strong item, so every kind of finding appears (#940).
+  const idle = store.register(board, { lane: 'core', route: 'mid', path: idlePath });
+  at(HOUR / 12);
+  // The idle seat's agent is around (it shouted five minutes ago) but has pulled nothing for 40 hours (#940).
+  store.shout(board, { from: idle, to: 'coordinator', text: 'still here', lanes: ['core'] });
+  const holderPath = join(box.dir, 'core-holder');
+  box.git(['worktree', 'add', '-q', holderPath, '-b', 'core-holder']);
+  const holder = store.register(board, { lane: 'core', route: 'mid', path: holderPath });
+  store.addItem(board, { by: 'coordinator', lane: 'core', title: 'Earlier mid', route: 'mid', ...brief });
+  const later = store.addItem(board, { by: 'coordinator', lane: 'core', title: 'Later mid', route: 'mid', ...brief });
+  const strong = store.addItem(board, { by: 'coordinator', lane: 'core', title: 'Strong work' });
+  store.claim(board, later, { agentId: holder, lane: 'core', leaseMs: 2 * HOUR, freeze });
+  store.closeBoard(board);
+
+  const before = await cli(box.root, ['health', '--json']);
+  const printed = JSON.parse(before.stdout).stuck.filter((entry) => entry.command);
+  const keys = printed.map((entry) => entry.key);
+  for (const key of [`ROUTE_UNSERVED:route:strong`, `ITEM_UNTAKEABLE:item:${strong}`, `IDLE_AGENT:agent:${idle}`, `RANK_INVERSION:item:${later}`]) {
+    assert.ok(keys.includes(key), `health prints a next step for ${key}: ${keys.join(', ')}`);
+  }
+  const folders = { [idle]: idlePath, [holder]: holderPath };
+  const saved = process.env.PULLBOARD_MODEL;
+  process.env.PULLBOARD_MODEL = 'claude-haiku-5-5';
+  try {
+    for (const entry of printed) {
+      assert.ok(!entry.command.startsWith('pullboard join'), `${entry.key} never runs join: ${entry.command}`);
+      const argv = entry.command.match(/"[^"]*"|\S+/gu).slice(1).map((token) => token.replace(/^"|"$/gu, ''));
+      const ran = await cli(folders[entry.owner.who] ?? box.root, argv);
+      assert.equal(ran.code, 0, `${entry.key} runs as printed: pullboard ${argv.join(' ')}: ${ran.stderr}${ran.stdout}`);
+    }
+  } finally {
+    if (saved === undefined) delete process.env.PULLBOARD_MODEL; else process.env.PULLBOARD_MODEL = saved;
+  }
+  const after = JSON.parse((await cli(box.root, ['health', '--json'])).stdout);
+  assert.ok(!after.stuck.some((entry) => entry.key === 'ROUTE_UNSERVED:route:strong'), 'the worktree the next step starts serves the strong route');
+  assert.ok(!after.stuck.some((entry) => entry.key === `RANK_INVERSION:item:${later}`), 'the release the next step names clears the rank inversion');
+});
+
+/** Commit a pullboard.json whose gate, and optional positive control, the next gate run reads. */
+function commitPolicy(box, policy) {
+  writeFileSync(join(box.root, 'pullboard.json'), `${JSON.stringify({ gate: 'true', lanes: { core: { owns: ['src/'] }, docs: { owns: ['docs/'] }, review: { owns: [] } }, ...policy }, null, 2)}\n`);
+  box.git(['add', 'pullboard.json']);
+  box.git(['commit', '-q', '-m', 'chore: gate policy']);
+}
+
+/** Health at the real clock, since a gate run records the moment it actually ran. */
+async function healthNow(cwd) {
+  let stdout = '';
+  const code = await main(['health', '--json'], {
+    cwd, stdout: { isTTY: false, write: (text) => { stdout += text; } }, stderr: { write: () => {} },
+  });
+  return { code, report: JSON.parse(stdout) };
+}
+
+test('health reports a gate whose positive control fails [C7,D1]', async (t) => {
+  const box = repo(t);
+  commitPolicy(box, { gate: 'true', positiveControl: 'false' });
+  const ran = await cli(box.root, ['gate']);
+  assert.equal(ran.code, 0, 'the gate itself is green, so only its known-good case betrays it');
+  const { code, report } = await healthNow(box.root);
+  assert.equal(code, 1, 'a failing positive control is stuck work, not green');
+  const alarm = report.stuck.find((entry) => entry.cause === 'GATE_CONTROL_FAILED');
+  assert.ok(alarm, 'health names the gate whose positive control failed');
+  assert.equal(alarm.subject, 'gate');
+  assert.match(alarm.why, /positive control/u);
+  assert.equal(alarm.detail.positiveControl, 'false');
+  assert.equal(alarm.detail.runs.at(-1).control, false, 'the finding carries the last run and its control result');
+});
+
+test('health reports a gate that refused every run [C7,D1]', async (t) => {
+  const box = repo(t);
+  commitPolicy(box, { gate: 'false' });
+  for (let run = 1; run <= 2; run += 1) assert.equal((await cli(box.root, ['gate'])).code, 1, `run ${run} is refused`);
+  assert.equal((await healthNow(box.root)).report.stuck.some((entry) => entry.cause === 'GATE_REFUSED_EVERY_RUN'), false, 'two refusals are not yet an alarm');
+  assert.equal((await cli(box.root, ['gate'])).code, 1, 'run 3 is refused');
+  const { code, report } = await healthNow(box.root);
+  assert.equal(code, 1);
+  const alarm = report.stuck.find((entry) => entry.cause === 'GATE_REFUSED_EVERY_RUN');
+  assert.ok(alarm, 'health names a gate that refused every run in its window');
+  assert.equal(alarm.subject, 'gate');
+  assert.deepEqual(alarm.detail.runs.map((run) => run.green), [false, false, false], 'the finding lists the last runs, all refused');
+});
+
+test('a positive control inherits the gate slot it runs under [C7,D1]', async (t) => {
+  const box = repo(t);
+  const resources = pathToFileURL(resolve('src/resources.js')).href;
+  // The control asks whether it inherited the gate's admission; a child that does not is refused and reads red.
+  const probe = `node --input-type=module -e "const { inheritedGateSlot } = await import('${resources}'); process.exit(inheritedGateSlot({ root: process.cwd() }) ? 0 : 1)"`;
+  commitPolicy(box, { gate: 'true', positiveControl: probe });
+  const { runGate } = await import('../src/gate.js');
+  const config = JSON.parse(readFileSync(join(box.root, 'pullboard.json'), 'utf8'));
+  const gate = await runGate(box.root, config, { trustStamp: false });
+  assert.equal(gate.isGreen, true, 'the gate itself is green');
+  const run = gateRuns(box.root).at(-1);
+  assert.equal(run.control, true, 'the positive control saw the inherited gate slot and passed');
+  assert.ok(run.controlLog && existsSync(run.controlLog), 'the control keeps its raw output in the gate evidence');
+  assert.ok(run.controlProfile && existsSync(run.controlProfile), 'the control keeps its timing profile in the gate evidence');
+});
+
+/** A board with `gone` seats quiet for three days and `live` seats that shouted five minutes ago beside open core work. */
+function seatedBoard(t, { gone, live }) {
+  const box = repo(t);
+  const { board, at } = boardAt(box);
+  at(72 * HOUR);
+  store.register(board, { lane: 'coordinator', path: box.root });
+  for (let n = 0; n < gone; n += 1) store.register(board, { lane: 'core', path: join(box.dir, `gone-${n}`) });
+  const seats = Array.from({ length: live }, (_, n) => {
+    const path = join(box.dir, `live-${n}`);
+    mkdirSync(path);
+    return store.register(board, { lane: 'core', path });
+  });
+  store.addItem(board, { by: 'coordinator', lane: 'core', title: 'Open core work', criterion: 'The work is done when its test passes.' });
+  at(5 * 60_000);
+  for (const seat of seats) store.shout(board, { from: seat, to: 'coordinator', text: 'still here', lanes: ['core'] });
+  at(0);
+  /** Run one real sentinel scan and record it, returning the sentinel's shouts. */
+  const scan = () => {
+    store.recordHealthFindings(board, { agentId: 'coordinator', ...scanHealthSentinel(box.file, { root: box.root, config: loadConfig(box.root), now: new Date(NOW) }) });
+    return store.allShouts(board).filter((notice) => notice.shout_from === 'sentinel');
+  };
+  t.after(() => store.closeBoard(board));
+  return { box, board, seats, scan };
+}
+
+test('health never reports a long-gone seat as an idle agent [A6,N2]', async (t) => {
+  const { box, seats: [active], scan } = seatedBoard(t, { gone: 500, live: 1 });
+  const shouts = scan();
+  assert.ok(shouts.length <= 1, `at most one shout, for the active seat: ${shouts.map((notice) => notice.shout_text.slice(0, 80)).join(' | ')}`);
+  assert.ok(shouts.every((notice) => notice.shout_to === active && notice.shout_text.includes(`${active} idle beside work it could take`)), 'the one shout is the active seat hearing it is idle');
+  const report = JSON.parse((await cli(box.root, ['health', '--json'])).stdout);
+  assert.deepEqual(report.stuck.filter((entry) => entry.cause === 'IDLE_AGENT').map((entry) => entry.subject), [active], 'only the active seat is an idle agent');
+  assert.equal(report.retired.length, 500, 'the quiet seats are listed once as retired');
+  const text = await cli(box.root, ['health']);
+  assert.equal(text.stdout.split('\n').filter((line) => line.startsWith('retired seats')).length, 1, 'retired seats get one line');
+});
+
+test('one health run sends at most ten stuck shouts and names how many it held back [A6,N2]', (t) => {
+  const { seats, scan } = seatedBoard(t, { gone: 0, live: 12 });
+  const shouts = scan();
+  assert.equal(shouts.length, 11, 'ten notices and one that names the rest');
+  assert.match(shouts.at(-1).shout_text, /^Health: 2 more notices from this run were held back/u);
+  assert.equal(shouts.at(-1).shout_to, 'coordinator');
+  assert.equal(seats.length, 12);
 });

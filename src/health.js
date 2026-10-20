@@ -6,6 +6,7 @@
  * It reads the board through a read-only SQLite connection and asks git only questions that leave
  * every checkout alone: merge-tree writes a tree object and never an index or a working tree.
  */
+import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import {
   COORDINATOR,
@@ -15,16 +16,22 @@ import {
   mainCheckout,
   tryGit,
 } from './git.js';
+import { gateControlFindings } from './gate-control.js';
 import {
   boardBusyError,
+  buildOrder,
+  canTake,
+  listItems,
   openBoardReadOnly,
   PERSON,
+  ROUTES,
   roadmap,
   rowDecisions,
   unverifiedSubmissions,
 } from './board.js';
 import { staleRowDecisions } from './row-decision-state.js';
 import { localReleaseRank } from './release-queue.js';
+import { workQueue } from './queue.js';
 import { trunkRef } from './trusted-policy.js';
 
 /** Each threshold's pullboard.json key under "health" and its default. */
@@ -77,6 +84,8 @@ export function healthReport({ db, root, config, now }) {
   const limits = healthThresholds(config);
   const asOf = now.toISOString();
   const report = { asOf, thresholds: { stuck: limits.stuck, holds: limits.holds, release: limits.release }, stuck: [], waiting: [] };
+  // Gate alarms read the git directory, so they report even before a board exists (U41).
+  report.stuck.push(...gateControlFindings(root, config ?? {}, now));
   if (!db) return report;
   const at = now.getTime();
   const age = (iso) => at - Date.parse(iso);
@@ -235,9 +244,119 @@ export function healthReport({ db, root, config, now }) {
     }));
   }
 
+  report.retired = [];
+  for (const fault of queueFaults(board, { items, at, retired: report.retired, gone: goneWorktrees(root) })) report.stuck.push(fault);
+
   const overdue = releaseOverdue(db, root, at, limits.ms.release, history);
   if (overdue) found(report.stuck, overdue);
   return report;
+}
+
+/** An agent with no claim, review or event for this long is idle, not active; its own submitted work awaits review, so it is not idle (N2). */
+const QUEUE_ACTIVE_MS = 30 * 60_000;
+
+/**
+ * The queue faults the board can see: a route with open current work that no active agent can take,
+ * an open item no active agent in its lane can take, an idle agent beside work it could take, and a
+ * claim that ranks behind a free item its holder could take (N2, B13). The queue (workQueue) and the
+ * board's buildOrder supply the order, so health and pullboard queue cannot disagree. Each finding
+ * names the item and the next step; an agent that is idle is named as its own owner.
+ *
+ * @param {{ db: any, clock: { now: () => Date } }} board
+ * @param {{ items: any[], at: number, retired?: any[], gone?: Set<string> }} context - the board's items, the clock in epoch milliseconds,
+ *   the list that collects retired seats, and the worktree paths Git reports gone
+ * @returns {Finding[]}
+ */
+function queueFaults(board, { items, at, retired = [], gone = new Set() }) {
+  const queue = workQueue(board);
+  const current = (queue.releases.find((release) => release.landed < release.total)?.items ?? queue.unreleased)
+    .filter((entry) => entry.status === 'open' && !entry.waits.length);
+  const waiting = [...queue.releases.flatMap((release) => release.items), ...queue.unreleased]
+    .filter((entry) => entry.status === 'open' && !entry.waits.length);
+  const rows = board.db.prepare(`SELECT agent_id AS id, agent_lane AS lane, agent_route AS route, agent_path AS path, agent_created_at AS created,
+    (SELECT MAX(event_at) FROM event WHERE event_by = agent.agent_id) AS event_at,
+    (SELECT MAX(event_at) FROM event WHERE event_by = agent.agent_id AND event_kind IN ('claim', 'renew', 'reserve')) AS pulled_at,
+    (SELECT MAX(shout_at) FROM shout WHERE shout_from = agent.agent_id) AS shout_at
+    FROM agent ORDER BY agent_id`).all();
+  // Only a seat whose agent is around counts (#940): a live lease, or a move or shout in the last 30 minutes, and not
+  // a worktree Git reports gone. Every other seat is retired for these checks: listed once, never a finding.
+  const agents = rows.filter((row) => row.lane !== 'coordinator').map((row) => {
+    const last = Math.max(...[row.created, row.event_at, row.shout_at].filter(Boolean).map((value) => Date.parse(value)));
+    const lease = items.some((item) => (item.item_status === 'claimed' && item.item_owner === row.id && Date.parse(item.item_lease_until ?? '') > at)
+      || (item.item_review_by === row.id && Date.parse(item.item_review_until ?? '') > at));
+    const awaitsReview = items.some((item) => item.item_status === 'submitted' && item.item_built_by === row.id);
+    const recent = !gone.has(row.path) && (lease || at - last < QUEUE_ACTIVE_MS);
+    const pulled = Math.max(...[row.created, row.pulled_at].filter(Boolean).map((value) => Date.parse(value)));
+    return { ...row, last, recent, idle: recent && !lease && !awaitsReview && at - pulled >= QUEUE_ACTIVE_MS };
+  });
+  const active = agents.filter((agent) => agent.recent);
+  retired.push(...agents.filter((agent) => !agent.recent).map((agent) => ({ agent: agent.id, lane: agent.lane, since: new Date(agent.last).toISOString() })));
+  const raw = new Map(items.map((item) => [item.item_id, item]));
+  // An item whose claim lapsed is CLAIM_LAPSED's to report; it never doubles as untakeable work (#940).
+  const lapsed = (entry) => raw.get(entry.id)?.item_status === 'claimed';
+  const since = (id) => raw.get(id)?.item_updated_at ?? new Date(at).toISOString();
+  const now = at;
+  const findings = [];
+
+  for (const route of ROUTES) {
+    const open = current.filter((entry) => entry.route === route && !lapsed(entry));
+    if (!open.length || active.some((agent) => canTake(agent.route, route))) continue;
+    const first = open[0];
+    findings.push(finding('ROUTE_UNSERVED', null, {
+      subject: `${route} route`, key: `ROUTE_UNSERVED:route:${route}`, since: since(first.id), now,
+      title: 'route has no active agent',
+      why: `${open.length} open ${route} ${open.length === 1 ? 'item waits' : 'items wait'}, starting with #${first.id}, and no active agent can take ${route} work`,
+      next: `start an agent on the ${route} route: in a shell with PULLBOARD_MODEL set, run pullboard worktree ${first.lane} --route ${route}`,
+      command: `pullboard worktree ${first.lane} --route ${route}`,
+      owner: { role: 'coordinator', who: COORDINATOR }, detail: { route, items: open.map((entry) => entry.id) },
+    }));
+  }
+
+  for (const entry of waiting.filter((candidate) => !lapsed(candidate))) {
+    if (active.some((agent) => agent.lane === entry.lane && canTake(agent.route, entry.route))) continue;
+    findings.push(finding('ITEM_UNTAKEABLE', raw.get(entry.id) ?? null, {
+      subject: `#${entry.id}`, key: `ITEM_UNTAKEABLE:item:${entry.id}`, since: since(entry.id), now,
+      title: 'nobody can take it',
+      why: `no active agent in the ${entry.lane} lane can take a ${entry.route} item, so #${entry.id} waits: ${entry.title}`,
+      next: `start an agent in the ${entry.lane} lane on the ${entry.route} route: in a shell with PULLBOARD_MODEL set, run pullboard worktree ${entry.lane} --route ${entry.route}`,
+      command: `pullboard worktree ${entry.lane} --route ${entry.route}`,
+      owner: { role: 'coordinator', who: COORDINATOR }, detail: { lane: entry.lane, route: entry.route },
+    }));
+  }
+
+  for (const agent of agents.filter((candidate) => candidate.idle)) {
+    const work = waiting.find((entry) => entry.lane === agent.lane && canTake(agent.route, entry.route));
+    if (!work) continue;
+    findings.push(finding('IDLE_AGENT', null, {
+      subject: agent.id, key: `IDLE_AGENT:agent:${agent.id}`, since: new Date(agent.last).toISOString(), now,
+      title: 'idle beside work it could take',
+      why: `${agent.id} has held no claim or review and pulled nothing for 30 minutes, while #${work.id} waits in ${agent.lane} and it could take it`,
+      next: `run pullboard next in ${agent.path}`, command: 'pullboard next',
+      owner: { role: 'builder', who: agent.id }, detail: { lane: agent.lane, route: agent.route, item: work.id },
+    }));
+  }
+
+  const compare = buildOrder(board);
+  // A lapsed claim is CLAIM_LAPSED's to report; only a live claim can rank behind free work.
+  for (const claim of items.filter((item) => item.item_status === 'claimed' && Date.parse(item.item_lease_until ?? '') > at)) {
+    const holder = agents.find((agent) => agent.id === claim.item_owner);
+    if (!holder) continue;
+    const ahead = waiting.filter((entry) => entry.lane === holder.lane && canTake(holder.route, entry.route))
+      .map((entry) => raw.get(entry.id))
+      .filter((item) => item && compare(item, claim) < 0)
+      .sort(compare);
+    if (!ahead.length) continue;
+    const first = ahead[0];
+    findings.push(finding('RANK_INVERSION', claim, {
+      subject: `#${claim.item_id}`, key: `RANK_INVERSION:item:${claim.item_id}`, since: since(claim.item_id), now,
+      title: 'a free item ranks ahead',
+      why: `${holder.id} claimed #${claim.item_id} while #${first.item_id} ranks ahead in the ${holder.lane} lane and sits free`,
+      next: `release #${claim.item_id} with pullboard release ${claim.item_id}, then claim #${first.item_id}`,
+      command: `pullboard release ${claim.item_id}`,
+      owner: { role: 'builder', who: holder.id }, detail: { holder: holder.id, ahead: first.item_id },
+    }));
+  }
+  return findings;
 }
 
 /**
@@ -459,7 +578,23 @@ export function healthLines(report) {
   if (!report.stuck.length) lines.push('nothing is stuck');
   else lines.push(`${report.stuck.length} stuck:`, ...report.stuck.map((entry) => `  ${line(entry)}`));
   if (report.waiting.length) lines.push('waiting for a later release:', ...report.waiting.map((entry) => `  ${line(entry)}`));
+  // Seats with nobody behind them get one line, never a finding or a shout (#940).
+  if (report.retired?.length) lines.push(`retired seats, not counted as agents (quiet for 30 minutes or more, or their worktree is gone): ${report.retired.map((seat) => seat.agent).join(', ')}`);
   return lines;
+}
+
+/**
+ * The worktrees of this repository whose folders are gone, as Git reports them (prunable). A path Git never
+ * registered here, such as a seat on another computer, is not judged gone by this (#940).
+ *
+ * @param {string} root
+ * @returns {Set<string>}
+ */
+function goneWorktrees(root) {
+  try {
+    const listing = execFileSync('git', ['worktree', 'list', '--porcelain'], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    return new Set(listing.split('\n\n').filter((block) => /^prunable\b/mu.test(block)).map((block) => /^worktree (.+)$/mu.exec(block)?.[1]).filter(Boolean));
+  } catch { return new Set(); }
 }
 
 /** End a reason with one full stop, keeping a clipped reason's ellipsis. */

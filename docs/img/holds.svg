@@ -26,25 +26,7 @@ text { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', 
 .check .t1 { fill: #4d2d00; } .check .t2 { fill: #7d4e00; }
 .done rect { fill: #dafbe1; stroke: #4ac26b; }
 .done .t1 { fill: #044f1e; } .done .t2 { fill: #116329; }
-@media (prefers-color-scheme: dark) {
-  text { fill: #f0f6fc; }
-  .card { fill: #0d1117; stroke: #3d444d; }
-  .aside, .t2, .label, .code { fill: #9198a1; }
-  .edge { stroke: #6e7681; }
-  .edge.back { stroke: #f0883e; }
-  .tip { fill: #6e7681; }
-  .tip.back, .label.back { fill: #f0883e; }
-  .frame { stroke: #3d444d; }
-  .plain rect { fill: #151b23; stroke: #3d444d; }
-  .person rect { fill: #0c2d6b; stroke: #1f6feb; }
-  .person .t1 { fill: #cae8ff; } .person .t2 { fill: #a5d6ff; }
-  .agent rect { fill: #271052; stroke: #8957e5; }
-  .agent .t1 { fill: #ecdeff; } .agent .t2 { fill: #d2a8ff; }
-  .check rect { fill: #272115; stroke: #9e6a03; }
-  .check .t1 { fill: #f8e3a1; } .check .t2 { fill: #e3b341; }
-  .done rect { fill: #04260f; stroke: #238636; }
-  .done .t1 { fill: #aff5b4; } .done .t2 { fill: #7ee787; }
-}
+
 </style>
 <defs>
 <marker id="tip" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto"><path class="tip" d="M0 1 L9 5 L0 9 z"/></marker>
@@ -60,9 +42,7 @@ text{font-family:system-ui,-apple-system,"Segoe UI",sans-serif}
 .ln{stroke:#65746b;stroke-width:1.5;fill:none}.ln.d{stroke-dasharray:5 4}.hd{fill:#65746b}
 .pill{fill:#fff;stroke:#dce5df}.pt{font-size:11px;fill:#4f5b55}
 .cap{font-size:12.5px;fill:#4f5b55}
-@media(prefers-color-scheme:dark){.card{fill:#111714;stroke:#34443a}.title,.h{fill:#e9eeeb}.sub,.m,.pt,.cap{fill:#b6c3bc}.zone{stroke:#3a4a40}.zl{fill:#9cafa3}
-.you{fill:#14243a;stroke:#3f6a96}.plain{fill:#111714;stroke:#3a4a40}.rows{fill:#231d3a;stroke:#6b57b8}.lay{fill:#18201c;stroke:#3a4a40}.ver{fill:#163829;stroke:#2f7a55}.bld{fill:#2e2614;stroke:#8a6f2c}.youL{fill:#14243a;stroke:#3f6a96}.youL2{fill:#101b2b;stroke:#3f6a96;stroke-dasharray:3 2}.bldL{fill:#2e2614;stroke:#8a6f2c}.chkL{fill:#231d3a;stroke:#6b57b8}.key{fill:#9cafa3}.chk{fill:#231d3a;stroke:#6b57b8}
-.ln{stroke:#9cafa3}.hd{fill:#9cafa3}.pill{fill:#111714;stroke:#34443a}}
+
 </style>
 <defs>
 <linearGradient id="grow" x1="0" x2="1"><stop offset="0" stop-color="#087546" stop-opacity="0.08"/><stop offset="1" stop-color="#087546" stop-opacity="0.85"/></linearGradient>

@@ -187,6 +187,9 @@ Receipts
                                         when that queue is empty, the action says none waiting or waits for open work
   pullboard ledger                      markdown: what was built, by whom, verified by whom
   pullboard log [id]                    every move, in order
+  pullboard flakes                      recorded failures, their first and last sightings, counts and repair status
+  pullboard flakes rerun on|off          coordinator: opt into one diagnostic pair per failed test; off by default
+                                        commit pullboard.json to apply; a passing diagnostic never turns the original red green
   pullboard rigor                       failure causes that repeated: on 2 items, or 1 item at 2 commits;
                                         each with its items and whether it reads as work, product or both
   pullboard rigor draft <key> "<rule>" --check "<command>" --red <commit> --green <commit> [--section <letter>]
@@ -251,12 +254,16 @@ const ADD_EXAMPLE = ['pullboard lane add web --owns src/web', 'pullboard spec dr
   'pullboard add web "Upload page" --specs G1'].join('\n');
 
 const HELP_EXAMPLES = {
+  'spec approve': 'pullboard spec approve G1',
+  'spec decline': 'pullboard spec decline G1 --reason "The requirement needs revision"',
+  'sentinel propose': 'pullboard sentinel propose "Run the checks" --check "npm test" --every hourly --owner web',
   tour: 'pullboard tour', init: 'pullboard init --blueprint web-app', worktree: 'pullboard worktree web --model "my-model"',
   join: 'pullboard join web --model "my-model"', resume: 'pullboard resume',
   add: ADD_EXAMPLE, list: 'pullboard list web', show: 'pullboard show 12',
   claim: 'pullboard claim 12', submit: 'pullboard submit 12', 'next --verify': 'pullboard next --verify',
   fact: 'pullboard fact 12 measurement "The check passes in 8 seconds"',
   why: 'pullboard why 12',
+  flakes: 'pullboard flakes', 'flakes rerun': 'pullboard flakes rerun on',
   verify: 'pullboard verify 12 accept --note "removed the fix; the test failed"',
   watch: 'pullboard watch --to web', answer: 'pullboard answer 12 "done"', pass: 'pullboard pass 12 "please decide"',
   status: 'pullboard status', view: 'pullboard view', digest: 'pullboard digest --out briefing.md', mcp: 'pullboard mcp', stats: 'pullboard stats --since 2026-10-08', log: 'pullboard log 12', ledger: 'pullboard ledger',
@@ -303,6 +310,8 @@ const HELP_ALIASES = {
   'spec check': { usage: 'pullboard spec check', source: 'spec check' },
   'spec view': { usage: 'pullboard spec view [--out file]', source: 'spec view' },
   'spec show': { usage: 'pullboard spec show <id>', source: 'spec show', onlyFlags: [] },
+  'spec approve': { usage: 'pullboard spec approve <ids>', source: 'spec approve', onlyFlags: [] },
+  'spec decline': { usage: 'pullboard spec decline <ids> --reason "why"', source: 'spec approve', onlyFlags: ['--reason'] },
   'spec unmet': { usage: 'pullboard spec unmet [--must]', source: 'spec show', onlyFlags: ['--must'] },
   'spec signoff': { usage: 'pullboard spec signoff <ids> [--by <principal>] [--note "..."] [--note-file <file>]', source: 'spec show', onlyFlags: ['--by', '--note', '--note-file'], extraFlags: ['--note-file <file>'] },
   'spec signers': { usage: 'pullboard spec signers add [--key <path>] [--by <principal>]', source: 'spec signers add' },
@@ -357,8 +366,10 @@ function commandHelpRows(fullHelp, commandNames) {
     ...Object.keys(HELP_ALIASES),
     ...Object.keys(HELP_EXAMPLES).filter((name) => /^[a-z][a-z0-9-]*(?: [a-z][a-z0-9-]*)*$/u.test(name)),
     ...rows.map((row) => commandWords(row.usage)[0]).filter(Boolean),
+    // Every printed subcommand phrase (milestone items, relay devices) is a name too, so its help exists [N2].
+    ...lines.filter((line) => line.startsWith('  pullboard ')).flatMap((line) => usagePhrases(line.trim())).filter((phrase) => phrase.includes(' ')),
   ])];
-  return Object.fromEntries(names.map((name) => {
+  const entries = Object.fromEntries(names.map((name) => {
     const parts = name.split(' ');
     const alias = HELP_ALIASES[name];
     const matches = alias?.source ? rows.filter((row) => row.usage === alias.source || row.usage.startsWith(`${alias.source} `)) : alias ? [] : rows.filter((row) => {
@@ -382,6 +393,7 @@ function commandHelpRows(fullHelp, commandNames) {
     const example = exampleFor(name, usages[0]);
     return [name, Object.freeze({ usages, flags, example, notes: HELP_NOTES[name] ?? [] })];
   }));
+  return { ...entries, ...settingFormHelp(entries) };
 }
 
 /** Render the short first-run overview, with command names grouped by when a person needs them. */
@@ -397,7 +409,22 @@ function overviewHelp(groups, firstRun = false) {
   return lines.join('\n');
 }
 
-/** Build help from the actual command declarations, preserving the printed overview and full list. */
+/** The settings forms settingsCommand dispatches with a value; each gets its own help, from this list (N2). */
+export const SETTING_FORMS = Object.freeze(['gateSlots', 'browserSlots', 'gate.shortSlots']);
+
+/** Help for each settings form the printed usage did not already name, so each form is covered (N2). */
+function settingFormHelp(commands) {
+  return Object.fromEntries(SETTING_FORMS.filter((form) => !commands[`settings ${form}`]).map((form) => [`settings ${form}`, Object.freeze({
+    usages: [`pullboard settings ${form} <n>`], flags: [], example: `pullboard settings ${form} 2`, notes: [],
+  })]));
+}
+
+/**
+ * Build help from the actual command declarations, preserving the printed overview and full list.
+ *
+ * @param {string[]} [commandNames]
+ * @returns {Readonly<object>}
+ */
 export function buildHelp(commandNames = []) {
   return Object.freeze({
     overview: overviewHelp(HELP_GROUPS),
@@ -471,7 +498,7 @@ export function commandPhrases(help = HELP) {
     if (line.startsWith('  pullboard ')) for (const phrase of usagePhrases(line.trim())) phrases.add(phrase);
   }
   for (const [name, declaration] of Object.entries(help.commands)) {
-    if (/^[a-z][a-z0-9-]*(?: [a-z][a-z0-9-]*)*$/u.test(name)) phrases.add(name);
+    phrases.add(name);
     for (const usage of declaration.usages) for (const phrase of usagePhrases(usage)) phrases.add(phrase);
   }
   return [...phrases].sort((left, right) => right.length - left.length || left.localeCompare(right));

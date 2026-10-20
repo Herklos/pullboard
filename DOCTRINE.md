@@ -9,6 +9,7 @@ Statuses: approved = in force · draft = proposed · wont = considered and decli
 - W2 [approved, must] Headers: type(scope): subject [ids], 72 characters, no emojis. A body only for a non-obvious why, three sentences at most. | gate: commit-msg hook, review
 - W3 [approved, must] Spec ids go in commits, code headers and test names, never in words meant for people. | gate: review
 - W4 [approved, must] A refusal names its rule as a code and says the next step. | gate: review
+- W5 [draft, must] Tracked files and commit bodies never quote the owner or report what they said, chose or wanted, and never name private infrastructure: machine names, hostnames, LAN addresses or home paths. A commit is a subject line, then at most `Pullboard-Item: #N`. | gate: review
 
 ## C · Code
 - C1 [approved, must] Plain JavaScript ES modules; no build step. | gate: package test
@@ -17,7 +18,7 @@ Statuses: approved = in force · draft = proposed · wont = considered and decli
 - C4 [approved, must] Refusals throw Refused(code, message); nothing else exits the process except the bin. | gate: review
 - C5 [approved, must] Text from files or users is escaped before it reaches a page. | gate: test/view.test.js
 - C6 [draft, aim] Functions under 60 lines and files under 1,000. | gate: review
-- C9 [approved, must] Source and test files stay under 1500 lines; existing excess can only fall. Why: bounded files keep changes and reviews manageable. | gate: check node bin/checks/file-size.js | count: 107
+- C9 [approved, must] Source and test files stay under 1500 lines; existing excess can only fall. Why: bounded files keep changes and reviews manageable. | gate: check node bin/checks/file-size.js | count: 82
 - C8 [approved, must] No bare empty catch hides a failure; existing cases can only fall. Why: failures need handling or an explicit reason to ignore them. | gate: check node bin/checks/empty-catch.js | count: 13
 
 ## T · Tests

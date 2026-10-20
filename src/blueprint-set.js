@@ -207,7 +207,7 @@ export async function landEach(list, add) {
  * @returns {string[]}
  */
 export function initBlueprintLines(added, laneNotes) {
-  const proposed = added.proposedLanes.length ? ` in the ${added.proposedLanes.map((lane) => lane.name).join(' and ')} lane, proposed above and not written until the person accepts` : '';
+  const proposed = added.proposedLanes.length ? ` in the ${added.proposedLanes.map((lane) => lane.name).join(' and ')} lane, proposed above; add it with the command printed there` : '';
   return [`added the ${added.blueprint.title} blueprint: ${added.rows.length} ${added.rows.length === 1 ? 'row waits' : 'rows wait'} for your approval in SPEC.md (${added.section}), `
     + `${added.items.length} starter ${added.items.length === 1 ? 'item' : 'items'} filed${proposed}${added.gate ? `, gate set to ${added.gate}` : ''}`,
   ...laneNotes.map((note) => `  ${note}`),

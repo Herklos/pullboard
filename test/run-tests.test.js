@@ -275,8 +275,11 @@ if (process.argv[1] === process.env.PULLBOARD_C7_RUNNER_PATH) {
     if (!failed && signal === 'SIGTERM' && pidFile && existsSync(pidFile) && Number(readFileSync(pidFile, 'utf8').trim()) === Number(pid)) {
       failed = true;
       writeFileSync(process.env.PULLBOARD_C7_SIGNAL_FAILURE, 'injected');
+      const gone = process.env.PULLBOARD_C7_SIGNAL_GONE;
+      // #850: the child is really gone (killed and reaped) before the kill answers, as under load.
+      if (gone) for (const end = Date.now() + 3000; Date.now() < end && (() => { try { return original(pid, 'SIGKILL') ?? true; } catch { return false; } })();) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
       const error = new Error('injected one-shot signal failure');
-      error.code = 'EPERM';
+      error.code = gone || 'EPERM';
       throw error;
     }
     return original(pid, signal);
@@ -1055,6 +1058,22 @@ test('a landing run stops at the first failing file [C7,V4]', async t => {
     }
   });
 });
+
+for (const code of ['EPERM', 'ESRCH']) {
+  test(`a landing cleanup kill that answers ${code} for a child already gone counts as gone and is logged [C7]`, async t => {
+    const held = makeLandingStopFixture(t);
+    const env = { ...process.env, PULLBOARD_MACHINE_HOME: join(held.root, 'machine'), PULLBOARD_LANDING_RUN: '1', PULLBOARD_C7_SIGNAL_GONE: code,
+      PULLBOARD_C7_RUNNER_PATH: held.runner, PULLBOARD_C7_SIGNAL_FAILURE: join(held.root, 'signal-failure'),
+      NODE_OPTIONS: [process.env.NODE_OPTIONS, `--import=${pathToFileURL(installLandingSignalFailureShim(held)).href}`].filter(Boolean).join(' ') };
+    for (const [key, path] of Object.entries(held)) if (typeof path === 'string' && !['root', 'runner'].includes(key)) env['PULLBOARD_C7_' + key.replace(/[A-Z]/gu, c => '_' + c).toUpperCase()] = path;
+    for (const key of ['PULLBOARD_GATE_SLOT_HELD', 'PULLBOARD_GATE_SLOT_POOL', 'PULLBOARD_GATE_SLOT_TOKEN', 'PULLBOARD_BROWSER_SLOT_HELD']) delete env[key];
+    const result = runFixtureChild(process.execPath, [held.runner, '--test-concurrency=2'], { cwd: held.root, env, encoding: 'utf8', timeout: 30000 });
+    const output = `${result.context}\n${result.stdout ?? ''}\n${result.stderr ?? ''}`;
+    assert.ok(existsSync(join(held.root, 'signal-failure')), 'the cleanup kill answered as injected\n' + output);
+    assert.match(output, new RegExp(`run-tests: kill \\d+ answered ${code}; that process is gone or no longer ours, so it counts as gone`, 'u'));
+    assert.doesNotMatch(output, /drained after cleanup error/u, 'a gone child is never a cleanup error');
+  });
+}
 
 /** Build a copied production runner with tracked, ignored, and untracked test files. */
 function makeTrackedSelectionFixture(t) {
