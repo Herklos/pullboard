@@ -24,6 +24,7 @@ import { createE2eHelpers } from './e2e-helpers.js';
 import { loadDoctrine } from '../src/doctrine.js';
 import { loadConfig } from '../src/config.js';
 import { draftConflictSplits } from '../src/rigor-splits.js';
+import { proposeDoctrine } from '../src/doctrine-rulings.js';
 import { conflictNote } from '../src/trunk-conflict.js';
 import { conflictNoteFiles, conflictReport } from '../src/rigor-conflicts.js';
 
@@ -454,5 +455,30 @@ test('a split draft resumes after its row is reserved [D1]', async () => {
     writeFileSync(loadDoctrine(box.repo).repo.file, before);
     await assert.rejects(draftConflictSplits(ctx, report, dependencies), error => error.code === 'STALE_ROW_DECISION', 'an interrupted retry never recreates a row with a person decision');
     assert.equal(readFileSync(loadDoctrine(box.repo).repo.file, 'utf8'), before);
+  } finally { store.closeBoard(board); }
+});
+
+
+test('concurrent split proposals keep one reserved row [D1]', async () => {
+  const box = conflictHistory();
+  const board = store.openBoard(join(box.repo, '.git/pullboard/board.sqlite'));
+  try {
+    const report = conflictReport(store.events(board));
+    const ctx = { info: { root: box.repo, isMain: true }, config: loadConfig(box.repo) };
+    const dependencies = {
+      read: () => ({ coordinator: true, rows: store.rowDrafts(board), decisions: store.rowDecisions(board) }),
+      reserve: row => store.draftSpecRow(board, { agentId: 'coordinator', row, written: true }),
+    };
+    // The first await leaves an actual reservation; the second call recovers it before the first writes.
+    await Promise.all([draftConflictSplits(ctx, report, dependencies), draftConflictSplits(ctx, report, dependencies)]);
+    const doctrine = loadDoctrine(box.repo);
+    assert.deepEqual(doctrine.repo.problems, [], 'concurrent identical writes never duplicate a row id');
+    const proposed = doctrine.repo.rows.filter(row => row.text.includes('Source: conflict-split:'));
+    assert.equal(proposed.length, 1);
+    assert.equal(proposed[0].status, 'draft');
+    assert.equal(store.rowDrafts(board).length, 1);
+    const before = readFileSync(doctrine.repo.file, 'utf8');
+    assert.throws(() => proposeDoctrine({ ...ctx, doctrine }, { source: 'fixture', gate: 'review' }, 'Different judgment', { id: proposed[0].id }), error => error.code === 'ROW_DRAFT');
+    assert.equal(readFileSync(doctrine.repo.file, 'utf8'), before, 'a fixed-id retry cannot overwrite a different judgment');
   } finally { store.closeBoard(board); }
 });
