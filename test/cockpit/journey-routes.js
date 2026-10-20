@@ -51,7 +51,7 @@ export async function journeyForwardHeaders(chrome, asked, condition, pauses) {
  *
  * @param {string} url - The paused request's URL.
  * @param {number} pausedAt - When it paused (performance.now()).
- * @param {number[]} commits - Main-frame commits seen after the harness's first navigation (performance.now()).
+ * @param {number[]} commits - The main-frame commits that answered the harness's own navigations, one each (performance.now()).
  */
 export function journeyNavigationOrphan(url, pausedAt, commits) {
   return new URL(url).pathname.startsWith('/api/') && commits.some((committedAt) => committedAt > pausedAt);
@@ -73,10 +73,15 @@ export async function routeJourneyOrigins(chrome, site, view, slow = null, pause
   const commits = [];
   const tasks = [];
   let navigatedAt = -Infinity;
+  // Each harness navigation arms one commit; a commit the page makes on its own never counts (#935 review).
+  let awaitingCommit = false;
   const listener = ({ data }) => {
     const message = JSON.parse(String(data));
     // A main-frame commit after the harness navigated replaces the document whose paused reads Chrome then retires.
-    if (message.method === 'Page.frameNavigated' && !message.params.frame?.parentId && Number.isFinite(navigatedAt)) commits.push(performance.now());
+    if (message.method === 'Page.frameNavigated' && !message.params.frame?.parentId && awaitingCommit) {
+      awaitingCommit = false;
+      commits.push(performance.now());
+    }
     if (message.method !== 'Fetch.requestPaused') return;
     const pausedAt = performance.now();
     tasks.push((async () => {
@@ -143,7 +148,7 @@ export async function routeJourneyOrigins(chrome, site, view, slow = null, pause
     await Promise.all(tasks);
     await chrome.send('Fetch.disable');
     for (const entry of retired) {
-      if (journeyNavigationOrphan(entry.url, entry.pausedAt, commits)) { if (orphaned.length < 64) orphaned.push(entry.kind); }
+      if (journeyNavigationOrphan(entry.url, entry.pausedAt, commits)) orphaned.push(entry.kind);
       else failures.push(entry.failure);
     }
     assert.deepEqual(failures, [], `owned hosted and loopback HTTP routes finish without cancelling event streams (orphaned by navigation: ${JSON.stringify(orphaned)})`);
@@ -151,6 +156,7 @@ export async function routeJourneyOrigins(chrome, site, view, slow = null, pause
   /** Navigate the page, marking the moment so requests already paused for the old document are known as orphaned. */
   stop.navigate = async (url) => {
     navigatedAt = performance.now();
+    awaitingCommit = true;
     await chrome.send('Page.navigate', { url });
   };
   return stop;
