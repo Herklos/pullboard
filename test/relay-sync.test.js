@@ -58,7 +58,7 @@ async function assertUploadedLater(box, texts) {
   assert.equal(box.moveAcks.length, 0, 'the moves went up inside the baseline, not as ordered moves');
 }
 
-describe('relay failures never fail a local move', { concurrency: true }, () => {
+describe('relay failures never fail a local move [B26,H16,H17]', { concurrency: true }, () => {
 for (const [name, setup] of [['a paused link', pausedLink], ['a link whose first upload is uncertain', uncertainLink]]) {
   test(`a timing-out relay never fails a move on ${name}, and the move rides the later baseline [B26,H16,H17]`, async t => {
     const box = await setup(t);
