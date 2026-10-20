@@ -438,7 +438,8 @@ globalThis.fetch = function tracedFetch(input, init) {
       res.end(JSON.stringify({ version: 1, error: { code: rejectSnapshotWrites.code, message: rejectSnapshotWrites.message } }));
       return;
     }
-    if (beforeSnapshotWrite && req.method === 'PUT' && /\/api\/v1\/boards\/[0-9a-f]{32}\/state$/.test(req.url ?? '')) {
+    // The next snapshot starts with an API1 state write or, for paged snapshots, the API2 upload session (#903).
+    if (beforeSnapshotWrite && (snapshotWrite || (req.method === 'POST' && /^\/api\/v2\/boards\/[0-9a-f]{32}\/uploads$/u.test(req.url ?? '')))) {
       const before = beforeSnapshotWrite;
       beforeSnapshotWrite = null;
       await before(req.headers);
