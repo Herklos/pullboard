@@ -40,6 +40,7 @@ import {
   isClean,
   untracked,
 } from './git.js';
+import { recordGateRun } from './gate-control.js';
 import { secretsIn } from './hooks.js';
 import { Refused } from './refused.js';
 import { missingGate } from './gate-config.js';
@@ -560,9 +561,26 @@ function fullGateRun(root, config, trustStamp = false, { waitMs = 0, log = gitPa
   const run = runProfiledShell(root, config.gate, { waitMs, pipefail: true, profileFile: `${log}.profile.json`, gateLease, landing, stages, waivers });
   const { isGreen, output, seconds, profile, profilePath } = run;
   writeFileSync(log, output);
+  // The environment refusing a run says nothing about the gate, so only a real result is recorded (U41).
+  if (!run.sandboxBlocked) recordGateRun(root, gateRunRecord(root, config, isGreen));
   refuseSandboxBlocked(run);
   if (isGreen && before !== null && committedTree(root) === before) writeFileSync(gitPath(root, STAMP), `${before}\n`);
   return { isGreen, isCached: false, output, seconds, log, profile, profilePath, ...(run.executionRoot ? { executionRoot: run.executionRoot } : {}), ...(stages ? { stages: run.stages } : {}) };
+}
+
+/**
+ * The record one real gate run leaves for health: its result, and the positive control's result when the project
+ * declares one, so a gate that stops passing its known-good case shows up without a person reading the log.
+ *
+ * @param {string} root
+ * @param {{ gate: string, positiveControl?: string }} config
+ * @param {boolean} isGreen whether the gate itself passed
+ * @returns {{ at: string, green: boolean, control: boolean | null, gate: string, positiveControl: string | null }}
+ */
+function gateRunRecord(root, config, isGreen) {
+  const positiveControl = config.positiveControl?.trim() ? config.positiveControl : null;
+  const control = positiveControl ? runShell(root, positiveControl).isGreen : null;
+  return { at: new Date().toISOString(), green: isGreen, control, gate: config.gate, positiveControl };
 }
 
 /** Quote a fixed executable or selected path without permitting shell expansion. */

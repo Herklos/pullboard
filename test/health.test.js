@@ -299,3 +299,48 @@ test('item history survives garbage collection mid-read [A6]', () => {
   assert.equal(child.status, 0, `reading item history must not lose its statement to garbage collection: ${child.stderr}`);
   assert.equal(child.stdout, '50', 'every item with events has a history entry');
 });
+
+/** Commit a pullboard.json whose gate, and optional positive control, the next gate run reads. */
+function commitPolicy(box, policy) {
+  writeFileSync(join(box.root, 'pullboard.json'), `${JSON.stringify({ gate: 'true', lanes: { core: { owns: ['src/'] }, docs: { owns: ['docs/'] }, review: { owns: [] } }, ...policy }, null, 2)}\n`);
+  box.git(['add', 'pullboard.json']);
+  box.git(['commit', '-q', '-m', 'chore: gate policy']);
+}
+
+/** Health at the real clock, since a gate run records the moment it actually ran. */
+async function healthNow(cwd) {
+  let stdout = '';
+  const code = await main(['health', '--json'], {
+    cwd, stdout: { isTTY: false, write: (text) => { stdout += text; } }, stderr: { write: () => {} },
+  });
+  return { code, report: JSON.parse(stdout) };
+}
+
+test('health reports a gate whose positive control fails [C7,D1]', async (t) => {
+  const box = repo(t);
+  commitPolicy(box, { gate: 'true', positiveControl: 'false' });
+  const ran = await cli(box.root, ['gate']);
+  assert.equal(ran.code, 0, 'the gate itself is green, so only its known-good case betrays it');
+  const { code, report } = await healthNow(box.root);
+  assert.equal(code, 1, 'a failing positive control is stuck work, not green');
+  const alarm = report.stuck.find((entry) => entry.cause === 'GATE_CONTROL_FAILED');
+  assert.ok(alarm, 'health names the gate whose positive control failed');
+  assert.equal(alarm.subject, 'gate');
+  assert.match(alarm.why, /positive control/u);
+  assert.equal(alarm.detail.positiveControl, 'false');
+  assert.equal(alarm.detail.runs.at(-1).control, false, 'the finding carries the last run and its control result');
+});
+
+test('health reports a gate that refused every run [C7,D1]', async (t) => {
+  const box = repo(t);
+  commitPolicy(box, { gate: 'false' });
+  for (let run = 1; run <= 2; run += 1) assert.equal((await cli(box.root, ['gate'])).code, 1, `run ${run} is refused`);
+  assert.equal((await healthNow(box.root)).report.stuck.some((entry) => entry.cause === 'GATE_REFUSED_EVERY_RUN'), false, 'two refusals are not yet an alarm');
+  assert.equal((await cli(box.root, ['gate'])).code, 1, 'run 3 is refused');
+  const { code, report } = await healthNow(box.root);
+  assert.equal(code, 1);
+  const alarm = report.stuck.find((entry) => entry.cause === 'GATE_REFUSED_EVERY_RUN');
+  assert.ok(alarm, 'health names a gate that refused every run in its window');
+  assert.equal(alarm.subject, 'gate');
+  assert.deepEqual(alarm.detail.runs.map((run) => run.green), [false, false, false], 'the finding lists the last runs, all refused');
+});
