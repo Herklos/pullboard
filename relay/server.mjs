@@ -62,6 +62,11 @@ async function startRelay() {
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
     throw new Refused('RELAY_PORT', 'set PORT to an available TCP port from 1 to 65535 and restart the service');
   }
+  const quotaSetting = process.env.PULLBOARD_ACCOUNT_STORAGE_BYTES;
+  const accountStorageBytes = quotaSetting === undefined ? undefined : Number(quotaSetting);
+  if (quotaSetting !== undefined && (!/^[1-9][0-9]*$/u.test(quotaSetting) || !Number.isSafeInteger(accountStorageBytes))) {
+    throw new Refused('RELAY_CONFIG', 'Set PULLBOARD_ACCOUNT_STORAGE_BYTES to a positive whole-byte account quota, then restart the relay.');
+  }
   const privateKey = (process.env.GITHUB_APP_PRIVATE_KEY || '').replaceAll('\\n', '\n');
   try { prepareStorage(data); }
   catch (error) {
@@ -87,6 +92,7 @@ async function startRelay() {
     backupsDirectory: join(data, 'backups'),
     auth,
     publicOrigin,
+    accountStorageBytes,
   });
   /** Route readiness, GitHub authentication and opaque board relay requests. */
   async function handleRequest(req, res) {
