@@ -451,6 +451,11 @@ function moveMessage(move, result) {
   return move.args.off ? 'released the ' + move.args.lane + ' lane' : 'holding the ' + move.args.lane + ' lane: ' + move.args.reason;
 }
 
+/** One blueprint fit proposal: its decision, its new text or reason, and where it came from. */
+function fitRow(f) {
+  return '<div class="fit-row" data-fit="' + esc(f.target) + '"><div class="meta"><b>' + esc(f.target) + '</b><span class="chip">' + esc(f.decision) + '</span><span class="chip">unverified draft, recorded as ' + esc(f.recordedAs) + '</span></div>' + (f.text ? '<div>' + esc(f.text) + '</div>' : '') + (f.reason ? '<div>Reason: ' + esc(f.reason) + '</div>' : '') + '<div class="muted">Blueprint source: ' + esc(f.blueprint.name + ' v' + f.blueprint.version + ' ' + (f.kind === 'item' ? 'starter' : f.kind) + ' ' + f.key + ': ' + f.source) + '</div></div>';
+}
+
 /** Render escaped decision feedback beside the affected Spec row (B26, N26). */
 function specFeedback(feedback) {
   return '<div class="spec-feedback ' + feedback.tone + '" role="status">' + esc(feedback.text) + '</div>';
@@ -1095,15 +1100,17 @@ async function startPage() {
   if (hosted.local && !relayPairing) {
     if (localProblem) localNote('problem', { detail: localProblem });
     else local = await connectLocal();
-    if (local === 'away') return;
-    if (local === 'unreachable' && !hosted.relaySession) { hideRelayNotice(); return; }
+    if (local === 'away') { document.body.classList.remove('loading'); return; }
+    if (local === 'unreachable' && !hosted.relaySession) { document.body.classList.remove('loading'); hideRelayNotice(); return; }
   }
   if (hosted.local && local === 'local') transportModule = null;
   else if (configuredTransportModule) {
     // Signed out, a pairing link waits for sign-in, which its own state asks for.
-    try { await loadTransport(); } catch (error) { if (!hosted.local || hosted.relaySession) throw error; localNote('signed-out'); return; }
+    try { await loadTransport(); } catch (error) { if (!hosted.local || hosted.relaySession) throw error; document.body.classList.remove('loading'); localNote('signed-out'); return; }
   }
+  // The page shows its screen only once the remote list has answered or failed, so the mark holds until then (#932).
   await refresh();
+  document.body.classList.remove('loading');
 }
 startPage().catch((error) => {
   document.body.classList.remove('loading');

@@ -1,3 +1,4 @@
+/** @pullboard-test-loads src/serve.js */
 /** View projection refuses migrations from linked source and borrows staged boards without owning them [A5,A6,A2]. */
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
