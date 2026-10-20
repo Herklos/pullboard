@@ -8,6 +8,8 @@ import { mkdirSync } from 'node:fs';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createE2eHelpers } from './e2e-helpers.js';
+import { nextReview } from '../src/next-review.js';
+import { Refused } from '../src/refused.js';
 
 const HOUR = 60 * 60 * 1000;
 const REVIEW_LEASE = 1_000;
@@ -207,4 +209,38 @@ test('next --verify skips a head that does not merge [C7,V4]', (t) => {
   assert.equal(next.item.item_id, clean, 'the reviewer gets the head that merges, though the conflicting one is older');
   assert.equal(json(box.run(box.repo, 'show', String(conflicted), '--json')).item_status, 'open');
   assert.equal(json(box.run(box.repo, 'show', String(clean), '--json')).item_review_by !== null, true, 'the clean head is reserved for review');
+});
+
+/** Drive nextReview over a board with one submitted head that conflicts, recording each ordered operation. */
+async function refusedReturn(t, reopen) {
+  const { board, agents } = fixture(t);
+  const id = submitted(board, { builder: agents.alphaBuilder, title: 'Conflicting head' });
+  const operations = [];
+  const ordered = async (operation, args) => {
+    operations.push(operation);
+    if (operation === 'reopen') return await reopen(board, id);
+    return store.reserveNextReview(board, args[0]);
+  };
+  const ctx = { info: { root: '/fixture' }, io: { err: () => {} }, config: { reviewLeaseMs: REVIEW_LEASE, verify: { policy: 'any' } } };
+  const me = { id: agents.betaReviewer, lane: 'review' };
+  const trunkMerge = () => ({ commit: 'a'.repeat(40), files: ['web/list.html'] });
+  const run = () => nextReview(ctx, board, me, {}, { ordered, idArg: Number, trunkMerge });
+  return { board, id, operations, run };
+}
+
+test('a refused return of a conflicting head is never followed by reserving it [C7,V4]', async (t) => {
+  const { board, id, operations, run } = await refusedReturn(t, () => { throw new Refused('RELAY_BUSY', 'the relay is busy'); });
+  await assert.rejects(run, (error) => error.code === 'RELAY_BUSY', 'the refusal reaches the reviewer');
+  assert.deepEqual(operations, ['reopen'], 'nothing is reserved after the return failed');
+  assert.equal(store.itemById(board, id).item_review_by, null, 'the conflicting head is not reserved');
+});
+
+test('a return refused because the head already left review is a race, not a stop [C7,V4]', async (t) => {
+  const { board, id, operations, run } = await refusedReturn(t, (raced, item) => {
+    store.reopen(raced, item, { agentId: 'coordinator', note: 'another seat returned it first' });
+    throw new Refused('NOT_SUBMITTED', `item #${item} is open, not submitted`);
+  });
+  await run();
+  assert.deepEqual(operations, ['reopen', 'reserveNextReview'], 'the loop goes on to the next review');
+  assert.equal(store.itemById(board, id).item_status, 'open');
 });

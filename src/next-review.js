@@ -9,6 +9,7 @@ import { shownPath } from './trunk-conflict.js';
 /**
  * Return each submitted head that conflicts with the trunk to its builder, recorded as a conflict reopen (#807).
  * Git decides, in memory, exactly as landing does; a board with no recorded trunk keeps today's offers.
+ * A refused return throws unless the head already left review, so a known conflict is never offered.
  *
  * @param {string} root
  * @param {any} board
@@ -25,7 +26,12 @@ export async function returnUnmergeable(root, board, me, { ordered, trunkMerge }
     try {
       await ordered('reopen', [item.item_id, { agentId: me.id, conflict: { files: merge.files, trunk: merge.commit } }]);
       returned.push({ id: item.item_id, files: merge.files });
-    } catch (error) { if (!(error instanceof Refused)) throw error; }
+    } catch (error) {
+      // Only a race is forgiven: another move already took the head out of review. A head still waiting
+      // when its return was refused would otherwise be the next one offered.
+      const now = store.itemById(board, item.item_id);
+      if (!(error instanceof Refused) || (now.item_status === 'submitted' && now.item_commit === item.item_commit)) throw error;
+    }
   }
   return returned;
 }
