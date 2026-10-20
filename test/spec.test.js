@@ -1048,15 +1048,28 @@ function answerCommandCase(t, separateGitDir) {
 }
 
 test('spec check fails when an approved row names a missing gate [S4]', (t) => {
-  // An approved must-row whose gate file is gone fails spec check and names both the row and the file (#809).
-  const source = `${SPEC}- G9 [approved, must] A rule keeps its proof. | gate: test/proof-gone.test.js\n`;
-  const box = specBox(t, { specSource: source });
-  const text = box.run('check');
-  assert.equal(text.status, 1, text.stdout + text.stderr);
-  assert.match(text.stdout + text.stderr, /G9 error: gate file test\/proof-gone\.test\.js does not exist/u);
+  // A gate file that was committed and then removed is a lost test: an approved must-row fails spec check and
+  // names the row, the file and the removal (#809).
+  const box = specBox(t, { specSource: SPEC });
   mkdirSync(join(box.root, 'test'));
   writeFileSync(join(box.root, 'test/proof-gone.test.js'), 'export {};\n');
-  assert.equal(box.run('check').status, 0, 'the same row passes once its file exists');
+  box.git('add', '-A');
+  box.git('commit', '-q', '-m', 'test: the proof');
+  box.git('rm', '-q', 'test/proof-gone.test.js');
+  box.git('commit', '-q', '-m', 'test: remove the proof');
+  writeFileSync(join(box.root, box.specName), `${SPEC}- G9 [approved, must] A rule keeps its proof. | gate: test/proof-gone.test.js\n`);
+  const text = box.run('check');
+  assert.equal(text.status, 1, text.stdout + text.stderr);
+  assert.match(text.stdout + text.stderr, /G9 error: gate file test\/proof-gone\.test\.js was removed from the repository/u);
+});
+
+test('a gate test that was never written only warns, so a new project passes [S4]', (t) => {
+  // A gate file that was never committed is a test not written yet: a warning, so the README's example still fits (#809).
+  const source = `${SPEC}- G9 [approved, must] A rule keeps its proof. | gate: test/never-written.test.js\n`;
+  const box = specBox(t, { specSource: source });
+  const text = box.run('check');
+  assert.equal(text.status, 0, text.stdout + text.stderr);
+  assert.match(text.stdout + text.stderr, /G9 warning: gate file test\/never-written\.test\.js does not exist yet/u);
 });
 
 test('a draft row with a missing gate file only warns [S4]', (t) => {

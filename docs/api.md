@@ -467,7 +467,7 @@ HTTP refusals use the same versioned error envelope above: 400 for malformed cal
 
 ## Spec gates
 
-`pullboard spec check` fails when an approved must-row names a gate file the repo does not have, and it names the row and the file. A row of any other status that names a missing file only warns, so a draft can name a file it will create. The pre-commit hook refuses a commit that deletes or renames a file an approved must-row names, unless the same commit points that row at its new home.
+`pullboard spec check` fails when an approved must-row names a gate file that was committed and is gone now (a lost test), and it names the row, the file and the removal. A gate file that was never committed only warns that its test is not written yet, so a new project's example spec still passes, and every other row only warns. The pre-commit hook refuses a commit that deletes or renames a file an approved must-row names, unless the same commit points that row at its new home.
 
 ## SSH spec sign-offs
 

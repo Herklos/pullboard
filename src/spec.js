@@ -264,9 +264,23 @@ export function gateFiles(gate) {
 }
 
 /**
- * Findings for each row whose gate names a file the repo does not have (#809). An approved must-row is
- * an error, so spec check fails and names the row and the file; every other row only warns, so a draft
- * can name a file it will create.
+ * The commit that last held a file anywhere in the repository's history, or '' when no commit ever did (#809).
+ * A file that was committed and is gone now is a lost test; one never committed is a test not written yet.
+ *
+ * @param {string} root
+ * @param {string} file
+ * @returns {string}
+ */
+function lastCommitOf(root, file) {
+  const result = spawnSync('git', ['log', '--all', '-n', '1', '--format=%h', '--', file], { cwd: root, encoding: 'utf8', env: cleanGitEnvironment() });
+  return result.status === 0 ? result.stdout.trim() : '';
+}
+
+/**
+ * Findings for each row whose gate names a file the repo does not have (#809). An approved must-row whose file
+ * was committed and is gone is an error that names the removal, so spec check fails; a file never committed is
+ * a warning that the test is not written yet, so a new project's README example still fits. Every other row
+ * only warns.
  *
  * @param {any} spec - a parsed spec
  * @param {string} root - the repo root the gate paths resolve against
@@ -277,8 +291,12 @@ export function missingGateFindings(spec, root) {
   for (const row of spec.rows) {
     for (const file of gateFiles(row.gate)) {
       if (existsSync(join(root, file))) continue;
-      const level = row.status === 'approved' && row.tier === 'must' ? 'error' : 'warning';
-      findings.push({ level, line: row.line, id: row.id, message: `gate file ${file} does not exist; name the file that proves the row` });
+      const lost = lastCommitOf(root, file);
+      if (row.status === 'approved' && row.tier === 'must' && lost) {
+        findings.push({ level: 'error', line: row.line, id: row.id, message: `gate file ${file} was removed from the repository (last in ${lost}); restore it or point the row at its new home` });
+      } else {
+        findings.push({ level: 'warning', line: row.line, id: row.id, message: `gate file ${file} does not exist yet; write the test it names` });
+      }
     }
   }
   return findings;
