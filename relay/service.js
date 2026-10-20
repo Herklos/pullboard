@@ -13,9 +13,10 @@ import { createPairingStore } from './pairing-store.js';
 import { createPairingHandler } from './pairing-http.js';
 import { createRelayBrowserHandler } from './browser-page.js';
 import { VERIFIER_STANDING_ENGINE } from '../src/machine.js';
+import { SEALED_SNAPSHOT_BYTES, SNAPSHOT_BODY_BYTES } from '../src/relay-limits.js';
 
-const SNAPSHOT_BODY = 14_000_000;
-const STORED_BYTES = 10_000_000;
+const SNAPSHOT_BODY = SNAPSHOT_BODY_BYTES;
+const STORED_BYTES = SEALED_SNAPSHOT_BYTES;
 
 /** Validate a board identity before deriving its private, internal database path. */
 function identity(id) {

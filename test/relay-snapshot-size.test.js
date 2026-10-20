@@ -8,12 +8,12 @@ import { test } from 'node:test';
 import * as store from '../src/board.js';
 import { decodeBoardKey, seal, unseal } from '../src/seal.js';
 import { ENGINE_VERSION } from '../src/machine.js';
+import { SEALED_SNAPSHOT_BYTES as RELAY_LIMIT, SNAPSHOT_BODY_BYTES as BODY_LIMIT } from '../src/relay-limits.js';
 import { presentationDigest, relaySnapshot } from '../src/relay-presentation.js';
 import { relayClientFixture } from './relay-client-fixture.js';
 import { findChromeExecutable, startChrome } from './relay-browser-fixture.js';
 
-const RELAY_LIMIT = 10_000_000;
-const BODY_LIMIT = 14_000_000;
+const LEGACY_BODY_THRESHOLD = 14_000_000;
 
 /** Preserve every SQLite value while normalizing row prototypes for JSON transport comparisons. */
 function plainRows(rows) { return rows.map(row => ({ ...row })); }
@@ -44,6 +44,36 @@ async function sealedSnapshot(box, document, sequence, compressed) {
   const plaintext = compressed ? gzipSync(json) : json;
   return Buffer.from(await seal(key, plaintext, { boardId: state.board, kind: 'snapshot', sequence })).toString('base64url');
 }
+
+test('a 20 MB sealed snapshot syncs to the relay and reads back whole [H5,H15,H17]', { timeout: 180_000 }, async t => {
+  const box = await relayClientFixture(t);
+  await box.link();
+  const local = store.openBoard(join(box.root, '.git/pullboard/board.sqlite'));
+  try {
+    store.shout(local, { from: 'coordinator', to: 'all', text: 'LARGE_SEALED_SNAPSHOT_' + randomBytes(14_000_000).toString('base64url'), lanes: [box.lane] });
+  } finally { store.closeBoard(local); }
+
+  const state = JSON.parse(readFileSync(box.linkFile, 'utf8'));
+  const sealed = await sealedSnapshot(box, relaySnapshot(box.root), state.sequence, true);
+  const sealedBytes = Buffer.from(sealed, 'base64url');
+  assert.ok(sealedBytes.byteLength > 20_000_000, 'the gzip snapshot exceeds 20,000,000 decoded bytes');
+  assert.ok(sealedBytes.byteLength < RELAY_LIMIT, 'the gzip snapshot remains within the shared decoded limit');
+  const requestBody = JSON.stringify({ sequence: state.sequence, sealed });
+  assert.ok(Buffer.byteLength(requestBody) < BODY_LIMIT, 'the base64 request fits the shared HTTP body limit');
+
+  const path = box.origin + '/api/v1/boards/' + state.board + '/state';
+  const headers = { authorization: 'Bearer ' + state.token, 'x-pullboard-engine': String(ENGINE_VERSION), 'content-type': 'application/json' };
+  const upload = await fetch(path, { method: 'PUT', headers, body: requestBody });
+  const accepted = await upload.json();
+  assert.equal(upload.status, 200, 'the real local relay accepts the >20 MB sealed snapshot: ' + JSON.stringify(accepted));
+  assert.equal(accepted.state.sealed, sealed, 'the accepted response preserves every sealed byte');
+
+  const read = await fetch(path, { headers: { authorization: headers.authorization, 'x-pullboard-engine': headers['x-pullboard-engine'] } });
+  assert.equal(read.status, 200, 'the real local relay serves the stored large snapshot');
+  const returned = await read.json();
+  assert.equal(returned.state.sealed, sealed, 'a readback returns the exact sealed snapshot bytes');
+  assert.deepEqual(Buffer.from(returned.state.sealed, 'base64url'), sealedBytes);
+});
 
 test('a large board syncs to the relay compressed [H5,H15,H17]', {
   skip: !findChromeExecutable() && 'Chrome is not installed',
@@ -108,9 +138,9 @@ test('a large board syncs to the relay compressed [H5,H15,H17]', {
     }
   } finally { store.closeBoard(native); }
   const before = relaySnapshot(box.root);
-  assert.ok(Buffer.byteLength(JSON.stringify(before)) > BODY_LIMIT, 'the uncompressed snapshot exceeds the unchanged relay body limit');
+  assert.ok(Buffer.byteLength(JSON.stringify(before)) > LEGACY_BODY_THRESHOLD, 'the legacy uncompressed snapshot exceeds the former body bound');
   const uncompressedSealed = await sealedSnapshot(box, before, JSON.parse(readFileSync(box.linkFile, 'utf8')).sequence, false);
-  assert.ok(Buffer.from(uncompressedSealed, 'base64url').byteLength > BODY_LIMIT, 'the actual legacy sealed snapshot exceeds the relay body limit before base64 framing');
+  assert.ok(Buffer.from(uncompressedSealed, 'base64url').byteLength > LEGACY_BODY_THRESHOLD, 'the uncompressed legacy seal exceeds the former body bound');
 
   assert.equal((await box.cli('status')).code, 0, 'the local CLI publishes a compressed pending snapshot');
   assert.equal((await box.cli('add', box.lane, 'advance compressed snapshot')).code, 0, 'an acknowledged move advances the relay snapshot cursor');
@@ -120,7 +150,7 @@ test('a large board syncs to the relay compressed [H5,H15,H17]', {
   const uploadBody = JSON.parse(snapshotRequest.request.toString('utf8'));
   const sealedBytes = Buffer.from(uploadBody.sealed, 'base64url');
   assert.ok(sealedBytes.byteLength < RELAY_LIMIT, 'the opaque compressed snapshot fits the decoded journal limit');
-  assert.ok(snapshotRequest.request.byteLength < BODY_LIMIT, 'the base64 transport body fits the unchanged request limit');
+  assert.ok(snapshotRequest.request.byteLength < BODY_LIMIT, 'the base64 transport body fits the shared request limit');
   const boardKey = decodeBoardKey(readFileSync(box.keyFile, 'utf8').trim());
   const plaintext = await unseal(boardKey, sealedBytes, { boardId: JSON.parse(readFileSync(box.linkFile, 'utf8')).board, kind: 'snapshot', sequence: uploadBody.sequence });
   assert.deepEqual(plainTables(JSON.parse(gunzipSync(plaintext).toString('utf8')).tables), plainTables(expected.tables),
@@ -171,15 +201,13 @@ test('a large board syncs to the relay compressed [H5,H15,H17]', {
 
   // A valid but still-too-large gzip checkpoint remains pending and is named by both CLI readers.
   const oversizedDocument = relaySnapshot(box.root);
-  const randomTitle = 'OVERSIZE_SNAPSHOT_340_' + randomBytes(5_050_000).toString('base64');
-  const itemId = oversizedDocument.tables.item[0].item_id;
-  oversizedDocument.tables.item.find(row => row.item_id === itemId).item_title = randomTitle;
-  oversizedDocument.presentation.state.items.find(row => row.id === itemId).title = randomTitle;
+  const randomTitle = 'OVERSIZE_SNAPSHOT_340_' + randomBytes(RELAY_LIMIT).toString('base64');
+  oversizedDocument.tables.board_meta.push({ meta_key: 'oversize_test_payload', meta_value: randomTitle });
   const oversizedGzip = await sealedSnapshot(box, oversizedDocument, sourceState.sequence, true);
   const oversizedBytes = Buffer.from(oversizedGzip, 'base64url').byteLength;
-  assert.ok(oversizedBytes > RELAY_LIMIT, 'the compressed sealed snapshot still exceeds the relay journal limit');
+  assert.ok(oversizedBytes > RELAY_LIMIT, 'the compressed sealed snapshot exceeds the shared relay limit');
   assert.ok(Buffer.byteLength(JSON.stringify({ sequence: sourceState.sequence, sealed: oversizedGzip })) < BODY_LIMIT,
-    'the oversized sealed snapshot remains below the unchanged HTTP body limit');
+    'the oversized sealed snapshot remains below the shared HTTP body limit');
   const link = JSON.parse(readFileSync(box.linkFile, 'utf8'));
   const localDigest = presentationDigest(relaySnapshot(box.root).presentation);
   link.checkpoint = { sequence: sourceState.sequence, sealed: oversizedGzip };
@@ -187,11 +215,12 @@ test('a large board syncs to the relay compressed [H5,H15,H17]', {
   writeFileSync(box.linkFile, JSON.stringify(link), { mode: 0o600 });
 
   const status = await textCommand(box, 'status');
-  assert.match(status.stdout, new RegExp(`relay snapshot for ${sourceState.board}: sealed snapshot \\d+\\.\\d MB over the relay limit 10\\.0 MB`));
+  const displayedLimit = (RELAY_LIMIT / 1_000_000).toFixed(1).replace('.', '\\.');
+  assert.match(status.stdout, new RegExp(`relay snapshot for ${sourceState.board}: sealed snapshot \\d+\\.\\d MB over the relay limit ${displayedLimit} MB`));
   const doctor = await textCommand(box, 'doctor');
   assert.equal(doctor.code, 1);
   const doctorJSON = await box.cli('doctor');
   assert.equal(doctorJSON.code, 1);
   assert.ok(doctorJSON.document.problems.some(problem => problem.code === 'RELAY_SNAPSHOT_LIMIT'), 'doctor JSON names the stable oversize rule');
-  assert.match(doctor.stdout, new RegExp(`relay snapshot for ${sourceState.board}: sealed snapshot \\d+\\.\\d MB over the relay limit 10\\.0 MB`));
+  assert.match(doctor.stdout, new RegExp(`relay snapshot for ${sourceState.board}: sealed snapshot \\d+\\.\\d MB over the relay limit ${displayedLimit} MB`));
 });

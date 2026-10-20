@@ -5,6 +5,7 @@ import { preparePersonRequest, validatePersonRequest } from './person-request.js
 import { snapshotState, presentationState } from './model.js';
 import { ENGINE_VERSION } from './engine.js';
 import { Refused } from './refused.js';
+import { SNAPSHOT_BODY_BYTES } from './relay-limits.js';
 import { enqueueStream, followStream } from './browser-stream.js';
 import { emptyBoardStep, homeLineDismissed, homeScreenLine, noticeLines, rememberOwnedRequestId, showRelayScreen, storedOwnedRequestState } from './browser-notice.js';
 import { registerApp, requestPairingPersistence } from './install.js';
@@ -50,7 +51,7 @@ function takePairing() {
 
 /** Decode canonical sealed transport bytes without putting their value in an error. */
 function transportBytes(value) {
-  if (typeof value !== 'string' || !/^[A-Za-z0-9_-]+$/.test(value) || value.length > 14000000) throw new Error('The sealed board response is invalid. Refresh this board.');
+  if (typeof value !== 'string' || !/^[A-Za-z0-9_-]+$/.test(value) || value.length > SNAPSHOT_BODY_BYTES) throw new Error('The sealed board response is invalid. Refresh this board.');
   const binary = atob(value.replaceAll('-', '+').replaceAll('_', '/') + '='.repeat((4 - value.length % 4) % 4));
   return Uint8Array.from(binary, character => character.charCodeAt(0));
 }

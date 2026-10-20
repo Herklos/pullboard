@@ -3,6 +3,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { closeSync, lstatSync, mkdirSync, openSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { Refused } from '../src/refused.js';
+import { SEALED_SNAPSHOT_BYTES } from '../src/relay-limits.js';
 
 const FORMAT = 3;
 const DEFAULT_BYTES = 100_000;
@@ -21,7 +22,7 @@ function identity(value) {
 export function createRelayJournal({ directory, boardId, maxBytes = DEFAULT_BYTES, now = () => new Date() }) {
   const id = identity(boardId);
   if (typeof directory !== 'string' || !directory.trim() || typeof now !== 'function') throw new Refused('RELAY_CONFIG', 'configure a private journal directory and clock');
-  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > 10_000_000) throw new Refused('RELAY_CONFIG', 'bound each opaque upload between one and ten million bytes');
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > SEALED_SNAPSHOT_BYTES) throw new Refused('RELAY_CONFIG', 'bound each opaque upload to the shared snapshot limit');
   const root = resolve(directory);
   mkdirSync(root, { recursive: true, mode: 0o700 });
   const parent = lstatSync(root);
