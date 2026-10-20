@@ -248,6 +248,24 @@ test('a change to one test file selects only what reads it [V4,C7]', (t) => {
   assert.match(selection.reason, /test\/guess\.test\.js/u, 'the fallback names the file that cannot be read');
 });
 
+test('a computed import through a helper call is not read from the literal it passes [V4,C7]', (t) => {
+  for (const loader of [
+    "function pick(fallback) { return process.env.CASE_MODULE || fallback; }\nawait import(new URL(pick('../src/api.js'), import.meta.url).href);\n",
+    "const helpers = { pick: (fallback) => process.env.CASE_MODULE || fallback };\nawait import(new URL(helpers.pick('../src/api.js'), import.meta.url).href);\n",
+  ]) {
+    const box = graph(t);
+    box.put('src/b.js', 'export const value = 1;\n');
+    // What pick returns is decided at run time, so its literal argument does not bound what the loader reads.
+    box.put('test/loader.test.js', loader);
+    const base = box.commit();
+    box.put('src/b.js', 'export const value = 2;\n');
+    const commit = box.commit();
+    const selection = selectAffectedTests(box.root, { base, commit, changed: ['src/b.js'] });
+    assert.equal(selection.full, true, `a helper call's result is unresolved, so the selection falls back to the whole suite: ${loader}`);
+    assert.match(selection.reason, /test\/loader\.test\.js/u);
+  }
+});
+
 test('a computed import with an environment fallback reads every candidate, not one literal [V4,C7]', (t) => {
   const box = graph(t);
   box.put('src/b.js', 'export const value = 1;\n');

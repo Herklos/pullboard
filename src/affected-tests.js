@@ -24,6 +24,9 @@ function declaredLoads(source) {
     .filter(path => MODULE.test(path) && !path.startsWith('../') && !path.startsWith('/'));
 }
 
+/** Calls whose result is a path built from their arguments, so a literal passed to them still bounds the target. */
+const PATH_CALLS = new Set(['join', 'resolve', 'URL', 'fileURLToPath', 'pathToFileURL']);
+
 /**
  * Whether a computed import's argument leaves its target open: a fallback (||, ??) or a ternary, an environment
  * variable, a template interpolation, or a bare variable that picks the file. A variable that only supplies the
@@ -41,7 +44,9 @@ function unresolvedBranch(argument) {
   for (const match of bare.matchAll(/[A-Za-z_$][\w$]*/gu)) {
     const before = bare[match.index - 1] ?? '';
     const after = bare.slice(match.index + match[0].length).trimStart()[0] ?? '';
-    if (before === '.' || after === '(' || after === '.' || match[0] === 'new') continue;
+    // Only known path builders may be called: what any other call returns is decided at run time (#803).
+    if (after === '(') { if (PATH_CALLS.has(match[0])) continue; return true; }
+    if (before === '.' || after === '.' || match[0] === 'new') continue;
     return true;
   }
   return false;
