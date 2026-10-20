@@ -38,7 +38,9 @@ import {
   refuseNextIdle,
 } from './next-steps.js';
 import { reviewerStartup } from './next-steps.js';
+import { judgeTrunkMove } from './verdict-trunk.js';
 import * as gateReceipt from './gate-receipt.js';
+import * as itemSessions from './item-sessions.js';
 import * as seatCheckout from './seat-checkout.js';
 import { submitPreflight } from './submit-preflight.js';
 import * as store from './board.js';
@@ -77,6 +79,7 @@ import {
 import {
   AGENT_SESSION_IDS,
   agentSessionDigest,
+  personCommand,
   requirePersonChannel,
   personShout,
 } from './person.js';
@@ -962,6 +965,9 @@ async function reserveRow(ctx, row, written) {
 }
 
 /** Dispatch a board mutation locally, or seal it before any linked replica applies it. */
+/** Note the session behind a claim or submit (#921): its ledger must be writable before the move, and record after it. */
+async function withItemSession(info, operation, args, move) { const noted = operation === 'claim' || operation === 'submit'; if (noted) itemSessions.requireLedger(info); const result = await move(); if (noted) itemSessions.recordItemSession(info, args[0], operation); return result; }
+
 async function ordered(ctx, board, operation, args) {
   // Every engine-27 registration records the seat that made it: the coordinator from the main
   // checkout, the joined agent from its worktree, or `machine` for a join no seat made (#579).
@@ -971,8 +977,8 @@ async function ordered(ctx, board, operation, args) {
   }
   const command = ['add', 'edit', 'merged'].includes(ctx.io.relayCommand?.cliOperation) ? ctx.io.relayCommand : undefined;
   /** Dispatch while this session holds the checkout, including long-running next/run loops. */
-  const execute = () => relayLinked(ctx.info.root) || relayRecovered(ctx.info.root)
-    ? relayOperation(ctx.info.root, operation, args, ctx.io, command, () => store[operation](board, ...args)) : store[operation](board, ...args);
+  const execute = () => withItemSession(ctx.info, operation, args, () => relayLinked(ctx.info.root) || relayRecovered(ctx.info.root)
+    ? relayOperation(ctx.info.root, operation, args, ctx.io, command, () => store[operation](board, ...args)) : store[operation](board, ...args));
   const digest = agentSessionDigest();
   const boardOnly = CHECKOUT_BOARD_ONLY.get(ctx.io);
   const boardOnlyOperation = (boardOnly === 'shout' && operation === 'shout') || (boardOnly === 'fact' && operation === 'appendFact');
@@ -2976,6 +2982,7 @@ async function verifyHere(ctx, id, { second, values }) {
       return await ordered(ctx, board, 'verify', recovered.args);
     }
     const item = store.getItem(board, id);
+    itemSessions.refuseSelfSession(ctx.info, item);
     const reReview = item.item_status === 'verified' && !item.item_merged_commit;
     const stale = reReview ? verdictProjector(root, board).state(item) : null;
     if (item.item_status !== 'submitted' && !stale) {
@@ -2993,6 +3000,7 @@ async function verifyHere(ctx, id, { second, values }) {
     let digest = 'missing';
     let check;
     let review;
+    let unaffectedMove = '';
     try {
       digest = freezer(ctx, { board })(item).digest;
     } catch (error) {
@@ -3028,7 +3036,11 @@ async function verifyHere(ctx, id, { second, values }) {
       const receipt = store.events(board, { itemId: id }).filter(event => event.event_kind === 'submit').map(event => JSON.parse(event.event_detail)).find(event => event.commit === commit);
       submissionPaths(root, item, commit, { mainCommit: receipt?.policyCommit, dependencies: dependencySnapshots(board.db, item) });
       const currentTrunk = requireTrunkMerge(root, checkedCommit); // Re-read after the frozen check, before accepting.
-      if (currentTrunk.commit !== trunk.commit) throw new Refused('VERDICT_TRUNK_MOVED', `main moved from ${trunk.commit} to ${currentTrunk.commit} during review; merge the latest main and re-review the clean composition`);
+      // With verify.unrelatedTrunkMoves on, a move through commits that touch nothing this review read keeps its verdict (#928).
+      const judged = currentTrunk.commit === trunk.commit || ctx.config.verify.unrelatedTrunkMoves !== true ? null
+        : await judgeTrunkMove(root, { from: trunk.commit, to: currentTrunk.commit, item, checkedCommit, check: frozenCheck(item) });
+      if (currentTrunk.commit !== trunk.commit && (!judged || judged.overlap)) throw new Refused('VERDICT_TRUNK_MOVED', `main moved from ${trunk.commit} to ${currentTrunk.commit} during review${judged ? `, and the move reaches this review through ${judged.overlap}` : ''}; merge the latest main and re-review the clean composition`);
+      if (judged) unaffectedMove = `\nmain moved during this review through ${judged.moved.map((sha) => sha.slice(0, 12)).join(', ')}, judged unaffected: none of them changes this item's files or a file its check and affected tests read`;
       if (headCommit(root) !== head || (reReview && (!isClean(root) || untracked(root).length))) {
         throw new Refused('NOT_AT_COMMIT', 'the reviewed checkout moved during its check; restore the clean reviewed HEAD and retry verification');
       }
@@ -3040,7 +3052,7 @@ async function verifyHere(ctx, id, { second, values }) {
       agentId: me.id,
       decision,
       reason: values.reason,
-      note: textArg(ctx.io, values, 'note') ?? '',
+      note: (textArg(ctx.io, values, 'note') ?? '') + unaffectedMove,
       ...(decision === 'REJECT' && values.cause !== undefined ? { cause: values.cause } : {}),
       head,
       digest,
@@ -4019,7 +4031,7 @@ async function specCommand(io, { first, second, rest, values }) {
     });
   }
   if (first === 'answer') {
-    requirePersonChannel(io.personChannel);
+    requirePersonChannel(io.personChannel, process.env, { command: personCommand(primaryCheckoutRoot(ctx.info) ?? ctx.info.root, ['spec', 'answer', second, rest.join(' ')]) });
     return withBoard(ctx, async (board) => {
       const me = whoAmI(ctx, board);
       if (!ctx.info.isMain || me.id !== COORDINATOR) throw new Refused('B26_PERSON_APPROVAL', 'only the person answers a pending question, from the main checkout or the view', 'ask the person to answer it in pullboard view, or in their own terminal at the main checkout');

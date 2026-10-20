@@ -14,6 +14,8 @@ import { pathToFileURL } from 'node:url';
 import * as store from '../src/board.js';
 import { main } from '../src/cli.js';
 import { boardHealth } from '../src/health.js';
+import { scanHealthSentinel } from '../src/health-sentinel.js';
+import { loadConfig } from '../src/config.js';
 import { gateRuns } from '../src/gate-control.js';
 import { JSON_SHAPES } from '../src/json.js';
 import { runFixtureChild, runFixtureGit } from './fixture-child.js';
@@ -276,7 +278,9 @@ test('health on a healthy board says nothing is stuck [A6]', async (t) => {
   assert.equal(healthy.code, 0, healthy.stdout);
   const report = JSON.parse(healthy.stdout);
   assert.deepEqual(report.stuck, [], `a moving board has nothing stuck: ${report.stuck.map((entry) => entry.key).join(', ')}`);
-  assert.equal((await cli(box.root, ['health'])).stdout, 'nothing is stuck\n');
+  // Seats with no worktree or recent activity are listed once as retired, never as stuck (#940).
+  const retired = report.retired.map((seat) => seat.agent).join(', ');
+  assert.equal((await cli(box.root, ['health'])).stdout, `nothing is stuck\n${retired ? `retired seats, not counted as agents (quiet for 30 minutes or more, or their worktree is gone): ${retired}\n` : ''}`);
   assert.deepEqual(boardDigest(box.file), before, 'health changes nothing on a healthy board');
 });
 
@@ -391,8 +395,11 @@ test('every printed next step runs as pasted through main() [N2,B13]', async (t)
   store.register(board, { lane: 'coordinator', path: box.root });
   const idlePath = join(box.dir, 'core-idle');
   box.git(['worktree', 'add', '-q', idlePath, '-b', 'core-idle']);
-  const idle = store.register(board, { lane: 'core', route: 'strong', path: idlePath });
+  // A mid seat that is around can serve mid work but not the strong item, so every kind of finding appears (#940).
+  const idle = store.register(board, { lane: 'core', route: 'mid', path: idlePath });
   at(HOUR / 12);
+  // The idle seat's agent is around (it shouted five minutes ago) but has pulled nothing for 40 hours (#940).
+  store.shout(board, { from: idle, to: 'coordinator', text: 'still here', lanes: ['core'] });
   const holderPath = join(box.dir, 'core-holder');
   box.git(['worktree', 'add', '-q', holderPath, '-b', 'core-holder']);
   const holder = store.register(board, { lane: 'core', route: 'mid', path: holderPath });
@@ -485,4 +492,50 @@ test('a positive control inherits the gate slot it runs under [C7,D1]', async (t
   assert.equal(run.control, true, 'the positive control saw the inherited gate slot and passed');
   assert.ok(run.controlLog && existsSync(run.controlLog), 'the control keeps its raw output in the gate evidence');
   assert.ok(run.controlProfile && existsSync(run.controlProfile), 'the control keeps its timing profile in the gate evidence');
+});
+
+/** A board with `gone` seats quiet for three days and `live` seats that shouted five minutes ago beside open core work. */
+function seatedBoard(t, { gone, live }) {
+  const box = repo(t);
+  const { board, at } = boardAt(box);
+  at(72 * HOUR);
+  store.register(board, { lane: 'coordinator', path: box.root });
+  for (let n = 0; n < gone; n += 1) store.register(board, { lane: 'core', path: join(box.dir, `gone-${n}`) });
+  const seats = Array.from({ length: live }, (_, n) => {
+    const path = join(box.dir, `live-${n}`);
+    mkdirSync(path);
+    return store.register(board, { lane: 'core', path });
+  });
+  store.addItem(board, { by: 'coordinator', lane: 'core', title: 'Open core work', criterion: 'The work is done when its test passes.' });
+  at(5 * 60_000);
+  for (const seat of seats) store.shout(board, { from: seat, to: 'coordinator', text: 'still here', lanes: ['core'] });
+  at(0);
+  /** Run one real sentinel scan and record it, returning the sentinel's shouts. */
+  const scan = () => {
+    store.recordHealthFindings(board, { agentId: 'coordinator', ...scanHealthSentinel(box.file, { root: box.root, config: loadConfig(box.root), now: new Date(NOW) }) });
+    return store.allShouts(board).filter((notice) => notice.shout_from === 'sentinel');
+  };
+  t.after(() => store.closeBoard(board));
+  return { box, board, seats, scan };
+}
+
+test('health never reports a long-gone seat as an idle agent [A6,N2]', async (t) => {
+  const { box, seats: [active], scan } = seatedBoard(t, { gone: 500, live: 1 });
+  const shouts = scan();
+  assert.ok(shouts.length <= 1, `at most one shout, for the active seat: ${shouts.map((notice) => notice.shout_text.slice(0, 80)).join(' | ')}`);
+  assert.ok(shouts.every((notice) => notice.shout_to === active && notice.shout_text.includes(`${active} idle beside work it could take`)), 'the one shout is the active seat hearing it is idle');
+  const report = JSON.parse((await cli(box.root, ['health', '--json'])).stdout);
+  assert.deepEqual(report.stuck.filter((entry) => entry.cause === 'IDLE_AGENT').map((entry) => entry.subject), [active], 'only the active seat is an idle agent');
+  assert.equal(report.retired.length, 500, 'the quiet seats are listed once as retired');
+  const text = await cli(box.root, ['health']);
+  assert.equal(text.stdout.split('\n').filter((line) => line.startsWith('retired seats')).length, 1, 'retired seats get one line');
+});
+
+test('one health run sends at most ten stuck shouts and names how many it held back [A6,N2]', (t) => {
+  const { seats, scan } = seatedBoard(t, { gone: 0, live: 12 });
+  const shouts = scan();
+  assert.equal(shouts.length, 11, 'ten notices and one that names the rest');
+  assert.match(shouts.at(-1).shout_text, /^Health: 2 more notices from this run were held back/u);
+  assert.equal(shouts.at(-1).shout_to, 'coordinator');
+  assert.equal(seats.length, 12);
 });

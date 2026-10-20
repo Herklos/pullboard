@@ -11,6 +11,7 @@ import { pathToFileURL } from 'node:url';
 import { test } from 'node:test';
 import { standardDoctrine } from '../src/doctrine.js';
 import { AGENT_SHELL_MARKERS, SSH_SHELL_MARKERS } from '../src/person.js';
+import { requireRelayOnChannel } from '../src/person.js';
 import { RECORDED_GENERIC_NEXT } from '../src/recorded-refusal.js';
 import {
   citedIds,
@@ -355,7 +356,7 @@ test('the check command is part of the frozen bar; items without one keep their 
  * A real repo and board with an isolated registry, so JSON exercises the command's lint and history
  * checks rather than just serializing the parser. Its files may use the configured names.
  */
-function specBox(t, { specName = 'SPEC.md', practiceName = 'PRACTICE.md', practice, specSource = SPEC, freshInit = false } = {}) {
+function specBox(t, { specName = 'SPEC.md', practiceName = 'PRACTICE.md', practice, specSource = SPEC, freshInit = false, separateGitDir = false } = {}) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'pullboard-spec-json-')));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const bin = join(root, '.bin');
@@ -377,7 +378,10 @@ function specBox(t, { specName = 'SPEC.md', practiceName = 'PRACTICE.md', practi
   const git = (...args) => runFixtureGit(args, { cwd: root, env, stdio: 'pipe', encoding: 'utf8' });
   const command = (...args) => runFixtureChild(process.execPath, [resolve(import.meta.dirname, '../bin/pullboard.js'), ...args], { cwd: root, env, encoding: 'utf8' });
   const run = (...args) => command('spec', ...args);
-  git('init', '-q', '-b', 'main');
+  // A --separate-git-dir repository keeps its Git metadata in another folder (#915).
+  const metadata = separateGitDir ? realpathSync(mkdtempSync(join(tmpdir(), 'pullboard-spec-git-'))) : null;
+  if (metadata) t.after(() => rmSync(metadata, { recursive: true, force: true }));
+  git('init', '-q', '-b', 'main', ...(metadata ? ['--separate-git-dir', join(metadata, 'repo.git')] : []));
   git('config', 'user.name', 'Test Agent');
   git('config', 'user.email', 'agent@example.com');
   const init = spawnSync(process.execPath, [resolve(import.meta.dirname, '../bin/pullboard.js'), 'init'], { cwd: root, env, encoding: 'utf8' });
@@ -1016,3 +1020,27 @@ test('a changed approved draft needs a new decision before apply [S1,I1,P6]', t 
   const applied = JSON.parse(runIn(box, box.root, ['resume', '--json']).stdout);
   assert.doesNotMatch(applied.next, /spec apply|approve A1/u);
 });
+
+test('a spec answer refused in an agent shell gives the person the exact command to paste [S1,B26]', async (t) => {
+  for (const separateGitDir of [false, true]) await t.test(separateGitDir ? 'Git metadata in a separate folder' : 'a plain repository', (t) => answerCommandCase(t, separateGitDir));
+  assert.throws(() => requireRelayOnChannel('terminal', { CLAUDECODE: '1' }), (error) => error.code === 'B26_PERSON_CHANNEL' && /run pullboard view/u.test(error.message),
+    'relay on keeps its own refusal in an agent shell');
+});
+
+/** Refuse a spec answer in an agent shell, then paste the returned command as the person would. */
+function answerCommandCase(t, separateGitDir) {
+  const box = specBox(t, { specSource: QUESTION_SPEC, separateGitDir });
+  const before = readFileSync(join(box.root, box.specName), 'utf8');
+  const refused = runIn(box, box.root, ['spec', 'answer', 'B2', "Redis on the host's port", '--json'], { ...box.env, CLAUDECODE: '1' });
+  assert.notEqual(refused.status, 0, 'an agent shell never records a person answer');
+  const error = JSON.parse(refused.stdout).error;
+  assert.equal(error.code, 'B26_PERSON_CHANNEL');
+  assert.match(error.message, /relay the command below to the person verbatim/u);
+  const pasted = error.next.slice(error.next.lastIndexOf(': cd ') + 2);
+  assert.equal(pasted, `cd ${box.root} && pullboard spec answer B2 'Redis on the host'\\''s port'`, 'the id and the proposed choice, quoted, with no placeholder');
+  assert.equal(readFileSync(join(box.root, box.specName), 'utf8'), before);
+  // The person pastes it into their own terminal and it is recorded.
+  const person = runFixtureChild('/bin/sh', ['-c', pasted.replace(/^cd \S+ && pullboard/u, `cd '${box.root}' && "${process.execPath}" "${resolve(import.meta.dirname, '../bin/pullboard.js')}"`) + ' --json'], { cwd: box.root, env: box.env, encoding: 'utf8' });
+  assert.equal(person.status, 0, person.stdout + person.stderr);
+  assert.equal(JSON.parse(person.stdout).decisions[0].answer, "Redis on the host's port");
+}
