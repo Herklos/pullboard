@@ -338,3 +338,89 @@ test('item history survives garbage collection mid-read [A6]', () => {
   assert.equal(child.status, 0, `reading item history must not lose its statement to garbage collection: ${child.stderr}`);
   assert.equal(child.stdout, '50', 'every item with events has a history entry');
 });
+
+test('health names a route with open work and no agent [N2,B13]', async (t) => {
+  const box = repo(t);
+  const { board, at } = boardAt(box);
+  at(HOUR / 12);
+  store.register(board, { lane: 'coordinator', path: box.root });
+  const light = store.register(board, { lane: 'core', route: 'light', path: join(box.dir, 'core-light') });
+  const waiting = store.addItem(board, { by: 'coordinator', lane: 'core', title: 'Mid work', route: 'mid',
+    criterion: 'The mid work is done when its test passes.', check: 'true', brief: 'Files:\n- src/mid.js\nTest:\n- the mid work runs' });
+  store.closeBoard(board);
+  const result = await cli(box.root, ['health', '--json']);
+  assert.equal(result.code, 1, `a queue fault is stuck work: ${result.stderr}`);
+  const report = JSON.parse(result.stdout);
+  const route = report.stuck.find((entry) => entry.key === 'ROUTE_UNSERVED:route:mid');
+  assert.ok(route, `health names the route nobody serves: ${result.stdout}`);
+  assert.deepEqual(route.owner, { role: 'coordinator', who: 'coordinator' }, 'the coordinator starts an agent on the route');
+  assert.ok(route.why.includes(`#${waiting}`), `the finding names the waiting item: ${route.why}`);
+  assert.equal(route.command, 'pullboard worktree core --route mid', `the command starts an agent on the route: ${route.command}`);
+  assert.ok(route.next.includes('pullboard worktree core --route mid') && route.next.includes('PULLBOARD_MODEL'), `the next step names the worktree command and the model: ${route.next}`);
+  assert.ok(!route.command.includes('pullboard join'), 'join from the main checkout would enroll the coordinator, not start an agent');
+  assert.ok(!report.stuck.some((entry) => entry.owner?.who === light && entry.key.startsWith('ROUTE_UNSERVED')), 'the light agent is not named for a mid route');
+});
+
+test('health names a rank inversion [N2,B13]', async (t) => {
+  const box = repo(t);
+  const { board, at } = boardAt(box);
+  at(HOUR / 12);
+  store.register(board, { lane: 'coordinator', path: box.root });
+  const builder = store.register(board, { lane: 'core', path: join(box.dir, 'core-1') });
+  const earlier = store.addItem(board, { by: 'coordinator', lane: 'core', title: 'Earlier work' });
+  const later = store.addItem(board, { by: 'coordinator', lane: 'core', title: 'Later work' });
+  store.claim(board, later, { agentId: builder, lane: 'core', leaseMs: 2 * HOUR, freeze });
+  store.closeBoard(board);
+  const result = await cli(box.root, ['health', '--json']);
+  const report = JSON.parse(result.stdout);
+  const inversion = report.stuck.find((entry) => entry.key === `RANK_INVERSION:item:${later}`);
+  assert.ok(inversion, `health names the claim that ranks behind a free item: ${result.stdout}`);
+  assert.deepEqual(inversion.owner, { role: 'builder', who: builder }, 'the holder owns its own rank inversion');
+  assert.ok(inversion.why.includes(`#${earlier}`), `the finding names the free item ahead: ${inversion.why}`);
+  assert.ok(inversion.next.includes(`claim #${earlier}`), `the next step claims it: ${inversion.next}`);
+});
+
+test('every printed next step runs as pasted through main() [N2,B13]', async (t) => {
+  // Each next step health prints runs from the directory a person would use: the worktree commands from
+  // the main checkout, and the agent steps from that agent's own worktree (#798).
+  const box = repo(t);
+  const brief = { criterion: 'The item is done when its test passes.', check: 'true', brief: 'Files:\n- src/mid.js\nTest:\n- the mid work runs' };
+  const { board, at } = boardAt(box);
+  at(40 * HOUR);
+  store.register(board, { lane: 'coordinator', path: box.root });
+  const idlePath = join(box.dir, 'core-idle');
+  box.git(['worktree', 'add', '-q', idlePath, '-b', 'core-idle']);
+  const idle = store.register(board, { lane: 'core', route: 'strong', path: idlePath });
+  at(HOUR / 12);
+  const holderPath = join(box.dir, 'core-holder');
+  box.git(['worktree', 'add', '-q', holderPath, '-b', 'core-holder']);
+  const holder = store.register(board, { lane: 'core', route: 'mid', path: holderPath });
+  store.addItem(board, { by: 'coordinator', lane: 'core', title: 'Earlier mid', route: 'mid', ...brief });
+  const later = store.addItem(board, { by: 'coordinator', lane: 'core', title: 'Later mid', route: 'mid', ...brief });
+  const strong = store.addItem(board, { by: 'coordinator', lane: 'core', title: 'Strong work' });
+  store.claim(board, later, { agentId: holder, lane: 'core', leaseMs: 2 * HOUR, freeze });
+  store.closeBoard(board);
+
+  const before = await cli(box.root, ['health', '--json']);
+  const printed = JSON.parse(before.stdout).stuck.filter((entry) => entry.command);
+  const keys = printed.map((entry) => entry.key);
+  for (const key of [`ROUTE_UNSERVED:route:strong`, `ITEM_UNTAKEABLE:item:${strong}`, `IDLE_AGENT:agent:${idle}`, `RANK_INVERSION:item:${later}`]) {
+    assert.ok(keys.includes(key), `health prints a next step for ${key}: ${keys.join(', ')}`);
+  }
+  const folders = { [idle]: idlePath, [holder]: holderPath };
+  const saved = process.env.PULLBOARD_MODEL;
+  process.env.PULLBOARD_MODEL = 'claude-haiku-5-5';
+  try {
+    for (const entry of printed) {
+      assert.ok(!entry.command.startsWith('pullboard join'), `${entry.key} never runs join: ${entry.command}`);
+      const argv = entry.command.match(/"[^"]*"|\S+/gu).slice(1).map((token) => token.replace(/^"|"$/gu, ''));
+      const ran = await cli(folders[entry.owner.who] ?? box.root, argv);
+      assert.equal(ran.code, 0, `${entry.key} runs as printed: pullboard ${argv.join(' ')}: ${ran.stderr}${ran.stdout}`);
+    }
+  } finally {
+    if (saved === undefined) delete process.env.PULLBOARD_MODEL; else process.env.PULLBOARD_MODEL = saved;
+  }
+  const after = JSON.parse((await cli(box.root, ['health', '--json'])).stdout);
+  assert.ok(!after.stuck.some((entry) => entry.key === 'ROUTE_UNSERVED:route:strong'), 'the worktree the next step starts serves the strong route');
+  assert.ok(!after.stuck.some((entry) => entry.key === `RANK_INVERSION:item:${later}`), 'the release the next step names clears the rank inversion');
+});

@@ -44,13 +44,15 @@ function fixture(t) {
   const file = join(root, '.git/pullboard/board.sqlite');
   const board = store.openBoard(file, clock);
   store.register(board, { lane: 'coordinator', path: root });
-  const builders = [1, 2, 3].map(index => store.register(board, { lane: 'core', path: join(directory, `core-${index}`) }));
+  // Seats join as a test first uses them, so no test carries an idle seat it never meant to have.
+  const builders = [];
+  const seat = index => (builders[index] ??= store.register(board, { lane: 'core', path: join(directory, `core-${index + 1}`) }));
   const config = loadConfig(root);
   const freeze = item => frozenCriterion(loadSpec(root, config), item, loadDoctrine(root, config));
   /** Make a genuine claim whose expiry the injected offset can advance past. */
   const claimed = index => {
     const id = store.addItem(board, { by: 'coordinator', lane: 'core', title: `Stuck fixture ${index}`, specIds: ['A6'], criterion: 'The fixture remains readable.' });
-    store.claim(board, id, { agentId: builders[index], lane: 'core', leaseMs: HOUR, freeze });
+    store.claim(board, id, { agentId: seat(index), lane: 'core', leaseMs: HOUR, freeze });
     return id;
   };
   /** Read the real health snapshot and apply it through authenticated, versioned replay. */
@@ -67,7 +69,7 @@ function fixture(t) {
     store.closeBoard(board); rmSync(directory, { recursive: true, force: true });
     for (const [key, value] of Object.entries(original)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
   });
-  return { root, file, board, builders, clock, claimed, scan, freeze, config, settings };
+  return { root, file, board, builders, seat, clock, claimed, scan, freeze, config, settings };
 }
 
 test('a new stuck finding reaches the coordinator and owner once [A6]', t => {
@@ -102,6 +104,24 @@ test('a new stuck finding reaches the coordinator and owner once [A6]', t => {
   assert.equal(box.scan(), null);
   assert.equal(store.events(box.board).filter(event => event.event_kind === 'health-failure').length, 1);
   assert.equal(store.events(box.board).filter(event => event.event_kind === 'health-resolved').length, 1);
+});
+
+test('an idle seat beside work it could take is noticed once and resolves when it takes work [A6,N2]', t => {
+  const box = fixture(t);
+  const id = box.claimed(0);
+  const idle = box.seat(1);
+  box.clock.offset += 2 * HOUR;
+  const idleKey = `IDLE_AGENT:agent:${idle}`;
+  assert.deepEqual(box.scan().added.sort(), [`CLAIM_LAPSED:item:${id}`, idleKey].sort());
+  const idleNotices = store.allShouts(box.board).filter(notice => notice.shout_text.includes('IDLE_AGENT'));
+  assert.deepEqual(idleNotices.map(notice => notice.shout_to).sort(), ['coordinator', idle].sort(), 'the idle seat and the coordinator each hear it once');
+  const before = exportBoard(box.board);
+  for (let index = 0; index < 3; index += 1) assert.equal(box.scan(), null);
+  assert.deepEqual(exportBoard(box.board), before, 'a persisting idle seat creates no repeated events or shouts');
+  store.claim(box.board, id, { agentId: idle, lane: 'core', leaseMs: HOUR, freeze: box.freeze });
+  assert.ok(box.scan().resolved.includes(idleKey), 'taking the work resolves the idle finding');
+  assert.equal(box.scan(), null);
+  assert.equal(store.events(box.board).filter(event => event.event_kind === 'health-failure' && JSON.stringify(event).includes(idleKey)).length, 1);
 });
 
 test('a stuck cause that recurs is noticed by rigor [A6,D1]', t => {
