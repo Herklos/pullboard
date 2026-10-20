@@ -113,17 +113,17 @@ export async function enrollPhone(documentAt) {
   throw new Refused('DEVICE_PAIR_EXPIRED', 'Keep the Mac setup command open and run pullboard relay on --all for a fresh code.');
 }
 
-/** Fetch only the signed-in account's grants and authenticate their context with the stored private key. */
-export async function deviceBoardKeys(documentAt) {
+/** Distinguish an enrolled browser with no grants from one that has never been paired to this account. */
+export async function deviceBoardKeyState(documentAt) {
   let device;
   try { device = await deviceStorage(); }
-  catch (error) { if (error.code === 'DEVICE_STORAGE') return {}; throw error; }
-  if (!device) return {};
+  catch (error) { if (error.code === 'DEVICE_STORAGE') return { keys: {}, paired: false, failure: error.message }; throw error; }
+  if (!device) return { keys: {}, paired: false };
   const identity = await documentAt('/api/v1/devices/session');
-  if (identity.account !== device.account) return {};
+  if (identity.account !== device.account) return { keys: {}, paired: false };
   let response;
   try { response = await documentAt('/api/v1/devices/' + device.deviceId + '/boards'); }
-  catch (error) { if (error.code === 'DEVICE_NOT_ENROLLED') return {}; throw error; }
+  catch (error) { if (error.code === 'DEVICE_NOT_ENROLLED') return { keys: {}, paired: false }; throw error; }
   const keys = {};
   for (const row of response.wraps) {
     if (!/^[0-9a-f]{32}$/u.test(row.board ?? '') || row.engine !== ENGINE_VERSION || typeof row.wrapped !== 'string') {
@@ -135,7 +135,12 @@ export async function deviceBoardKeys(documentAt) {
     keys[row.board] = encodeBoardKey(await withBrowserDeadline(() => unwrapDeviceBoardKey(device.privateKey, envelope,
       { board: row.board, device: device.deviceId, engine: ENGINE_VERSION })));
   }
-  return keys;
+  return { keys, paired: true };
+}
+
+/** Preserve the key-only adapter for callers that do not display the browser's pairing state. */
+export async function deviceBoardKeys(documentAt) {
+  return (await deviceBoardKeyState(documentAt)).keys;
 }
 
 /** Decode only bounded approval transport; keys and plaintext grants never enter device storage. */

@@ -393,8 +393,8 @@ function readFixtureViewIdentity(pid) {
       cwd = readlinkSync(`/proc/${pid}/cwd`);
       executable = readlinkSync(`/proc/${pid}/exe`);
     } else if (process.platform === 'darwin') {
-      const cwdOutput = runFixtureProcessTool('/usr/sbin/lsof', ['-a', '-d', 'cwd', '-p', String(pid), '-Fn']);
-      const executableOutput = runFixtureProcessTool('/usr/sbin/lsof', ['-a', '-d', 'txt', '-p', String(pid), '-Fn']);
+      const cwdOutput = runFixtureProcessTool('/usr/sbin/lsof', ['-b', '-a', '-d', 'cwd', '-p', String(pid), '-Fn']);
+      const executableOutput = runFixtureProcessTool('/usr/sbin/lsof', ['-b', '-a', '-d', 'txt', '-p', String(pid), '-Fn']);
       cwd = /^n(.*)$/mu.exec(cwdOutput)?.[1];
       const expectedExecutable = realpathSync(process.execPath);
       executable = executableOutput.split(/\r?\n/u).filter((line) => line.startsWith('n'))
@@ -694,4 +694,39 @@ test('a broken pipe during view shutdown is observed until the listener really c
   assert.equal(connections, 1, 'the observer reaches the still-open real HTTP listener after EPIPE');
   assert.ok(probes >= 3, 'success requires a later real connection refusal');
   assert.equal(listener.listening, false);
+});
+
+
+test('listener lookups use nonblocking lsof and name an unreadable port [N26,C7]', () => {
+  const script = String.raw`
+import fs from 'node:fs';
+import childProcess from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
+const original = { exists: fs.existsSync, spawn: childProcess.spawnSync };
+const calls = [];
+fs.existsSync = path => ['/usr/sbin/lsof', '/usr/bin/lsof'].includes(path) || original.exists(path);
+childProcess.spawnSync = (command, args) => {
+  if (!command.endsWith('/lsof')) throw new Error('unexpected private probe');
+  calls.push(args);
+  return { status: null, stdout: '', error: { code: 'ETIMEDOUT' } };
+};
+syncBuiltinESMExports();
+try {
+  const module = await import(process.argv[1]);
+  module.portHolder(31337);
+  const refusal = module.busyViewPortRefusal?.(31337, true);
+  console.log(JSON.stringify({ calls, message: refusal?.message ?? '' }));
+} finally {
+  fs.existsSync = original.exists; childProcess.spawnSync = original.spawn;
+  syncBuiltinESMExports();
+}
+`;
+  const result = runFixtureChild(process.execPath, ['--input-type=module', '-e', script,
+    new URL('../src/view-session.js', import.meta.url).href], { encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  const document = JSON.parse(result.stdout);
+  assert.ok(document.calls.length > 0);
+  assert.ok(document.calls.every(args => args.includes('-b')), 'a dead mount cannot make a listener lookup use blocking filesystem probes');
+  assert.match(document.message, /port 31337/u);
+  assert.match(document.message, /could not read.*listener.*ETIMEDOUT/iu);
 });

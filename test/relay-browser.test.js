@@ -595,22 +595,23 @@ test('a phone not signed in sees one GitHub button and nothing about this comput
 test('signed in with nothing shared shows one command and waits [H5,H17]', {
   skip: !findChromeExecutable() && 'Chrome is not installed',
 }, async t => {
-  const box = await relayClientFixture(t);
   const marker = 'SHARED_WHILE_WAITING_757';
-  assert.equal((await box.cli('add', box.lane, marker)).code, 0);
   for (const device of ['a phone', 'another computer']) {
+    // Each device starts with no linked boards; the preceding phone iteration really shares its board.
+    const box = await relayClientFixture(t);
+    assert.equal((await box.cli('add', box.lane, marker)).code, 0);
     const chrome = await startChrome();
     t.after(() => chrome.close());
     if (device === 'a phone') await asPhone(chrome);
     await personCookie(chrome, box);
     await chrome.navigate(box.origin);
-    await chrome.waitFor("document.documentElement.dataset.relayScreen === 'share'");
+    await chrome.waitFor("document.documentElement.dataset.relayScreen === 'share' && document.querySelector('#relay-screen .relay-command button')?.dataset.copy === 'pullboard relay on --all'");
     const facts = await chrome.evaluate(SCREEN_FACTS);
     for (const words of ['One step on your computer', 'pullboard relay on --all', 'Ask your agent', 'Help me share my boards with my phone.', 'Waiting for your boards']) {
       assert.equal(facts.text.includes(words), true, device + ': the screen says ' + words);
     }
     assert.deepEqual(facts.actions, ['Copy', 'Copy'], device + ': Copy for the command and Copy for the agent sentence, and nothing to retry');
-    assert.doesNotMatch(facts.text.replace('pullboard relay on --all', ''), /\brelay\b|\blinked\b|local view|try again/iu, device + ': relay only inside the command');
+    assert.doesNotMatch(facts.text.replace('pullboard relay on --all', ''), /\brelay\b|local view|try again/iu, device + ': relay only inside the command');
     assert.equal(facts.command, 60, device + ': the command box is 60 px tall');
     assert.equal(facts.agent, 60, device + ': the agent box is the same height');
     assert.deepEqual(facts.copies, ['Copy 60', 'Copy 60'], device + ': the command\'s Copy and the agent\'s Copy are 60 px tall');
@@ -633,7 +634,7 @@ test('signed in with nothing shared shows one command and waits [H5,H17]', {
   }
 });
 
-test('a signed-in phone shows the one-command screen while its first listing is on its way [H5,H17]', {
+test('a signed-in phone waits for its first listing before prescribing a command [H5,H17]', {
   skip: !findChromeExecutable() && 'Chrome is not installed',
 }, async t => {
   const box = await relayClientFixture(t);
@@ -658,11 +659,11 @@ test('a signed-in phone shows the one-command screen while its first listing is 
   await chrome.waitFor("window.held757?.length > 0 && document.documentElement.dataset.relayScreen === 'share'");
   const facts = await chrome.evaluate(SCREEN_FACTS);
   assert.equal(await chrome.evaluate('window.release757 === undefined && window.held757.length > 0'), true, 'the first listing is still on its way');
-  for (const words of ['One step on your computer', 'pullboard relay on --all', 'Waiting for your boards']) {
+  for (const words of ['Checking your linked boards', 'Checking your boards']) {
     assert.equal(facts.text.includes(words), true, 'while the listing waits, the screen says ' + words);
   }
   assert.doesNotMatch(facts.text, /Pairing this browser|Projects/u, 'no pairing notice or project list while the listing waits');
-  assert.deepEqual(facts.copies, ['Copy 60', 'Copy 60'], 'both Copy buttons are 60 px tall while the listing waits');
+  assert.equal(facts.text.includes('pullboard relay on --all'), false, 'a pending listing does not prove there are no linked boards');
   await chrome.evaluate('window.samePage757 = true; window.releaseListings757()');
   await chrome.waitFor("document.querySelector('#relay-notice') !== null && document.documentElement.dataset.relayScreen === 'share'");
   await box.link();
