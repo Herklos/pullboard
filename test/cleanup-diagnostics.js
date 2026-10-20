@@ -1,7 +1,7 @@
 /** Capture bounded filesystem and live-holder evidence for a fixture cleanup failure. */
 import { readdirSync, rmSync, statSync } from 'node:fs';
 import { runFixtureChild as spawnSync } from './fixture-child.js';
-import { join } from 'node:path';
+import { join, resolve, sep } from 'node:path';
 
 const FILE_OWNER_TIMEOUT_MS = 8_000;
 
@@ -28,8 +28,14 @@ function newestEntries(directory) {
 
 /** Report processes with open files under the fixture tree without exposing arguments or environment. */
 function fileOwners(directory) {
-  const result = spawnSync('lsof', ['-nP', '-Fpcn', '+D', directory], {
-    encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: FILE_OWNER_TIMEOUT_MS,
+  // +D needs readlink/stat, which -b deliberately avoids; filter kernel-reported names instead.
+  const root = resolve(directory);
+  const roots = [root];
+  if (process.platform === 'darwin' && /^\/(?:private\/)?(?:tmp|var|etc)(?:\/|$)/u.test(root)) {
+    roots.push(root.startsWith('/private/') ? root.slice('/private'.length) : '/private' + root);
+  }
+  const result = spawnSync('lsof', ['-b', '-nP', '-Fpcn'], {
+    encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: FILE_OWNER_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024,
   });
   if (result.error?.code === 'ETIMEDOUT') return `unavailable (ETIMEDOUT after ${FILE_OWNER_TIMEOUT_MS} ms)`;
   if (result.error) return `unavailable (${result.error.code ?? result.error.message})`;
@@ -42,7 +48,7 @@ function fileOwners(directory) {
       current = { pid: value, command: '', paths: [] };
       owners.push(current);
     } else if (line.startsWith('c') && current.pid) current.command = value;
-    else if (line.startsWith('n') && current.pid) current.paths.push(value);
+    else if (line.startsWith('n') && current.pid && roots.some(root => value === root || value.startsWith(root + sep))) current.paths.push(value);
   }
   return owners.filter(owner => owner.paths.length)
     .slice(0, 12)
