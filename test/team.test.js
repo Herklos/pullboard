@@ -1,3 +1,4 @@
+/** @pullboard-test-loads src/board.js src/engine.js src/exchange.js */
 /** Two independent Git/SQLite replicas derive verdict freshness without rewriting proof [E8]. */
 import assert from 'node:assert/strict';
 import childProcess from 'node:child_process';

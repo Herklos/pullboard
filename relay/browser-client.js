@@ -206,7 +206,7 @@ export async function createTransport({ onUpdate = () => {}, onOpenBoard = () =>
     const phoneWaiting = root.dataset.relayDevice === 'phone' && (!rendered || paired.size === 0);
     const step = emptyBoardStep({ available, waitingBoards, approvedBoards, loaded: inventoryLoaded, browserPaired, failure });
     showRelayScreen(root, phoneWaiting || paired.size === 0 ? 'share' : null,
-      phoneWaiting && (failure || waitingBoards.size || warnings.some(value => value?.code === 'ACCOUNT_STORAGE_LIMIT')) ? lines.join(' ') : '', step);
+      phoneWaiting && (failure || waitingBoards.size || warnings.some(value => ['ACCOUNT_STORAGE_WARNING', 'ACCOUNT_STORAGE_LIMIT'].includes(value?.code))) ? lines.join(' ') : '', step);
     placePhoneApprovals(document);
   }
 
@@ -236,7 +236,7 @@ export async function createTransport({ onUpdate = () => {}, onOpenBoard = () =>
 
   /** Retain one warning per board without duplicating it on the next live poll. */
   function warning(value, boardId) {
-    if (!value || !['BOARD_INACTIVE', 'ACCOUNT_STORAGE_LIMIT'].includes(value.code)) return;
+    if (!value || !['BOARD_INACTIVE', 'ACCOUNT_STORAGE_WARNING', 'ACCOUNT_STORAGE_LIMIT'].includes(value.code)) return;
     warnings = warnings.filter(entry => entry.board !== boardId || entry.code !== value.code);
     warnings.push({ ...value, board: boardId });
     notice();
@@ -397,6 +397,7 @@ export async function createTransport({ onUpdate = () => {}, onOpenBoard = () =>
       document = await boardEvents(entry);
     }
     warning(document.warning, entry.id);
+    for (const value of document.warnings ?? []) warning(value, entry.id);
     for (const row of document.events) await receive(entry, row, true);
   }
 

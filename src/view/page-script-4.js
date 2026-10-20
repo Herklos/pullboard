@@ -1097,6 +1097,8 @@ async function loadTransport() {
 /** Read local boards first; relay-only pages and pairing still load their configured client directly. */
 async function startPage() {
   let local = 'unreachable';
+  // The page opens on Finding your boards; it shows only if the look is slow (#948).
+  if (hosted.local) revealNote($('local-note').dataset.state);
   if (hosted.local && !relayPairing) {
     if (localProblem) localNote('problem', { detail: localProblem });
     else local = await connectLocal();

@@ -303,8 +303,12 @@ export function createRelayHandler({ directory, auth, pollMs = 200, publicOrigin
     },
     boards: (who) => {
       const boards = who.visible.filter((board) => !retention.expire(board.id));
+      const warnedAccounts = new Set();
       const warnings = boards.flatMap((board) => {
         const storage = quota?.notice(board.id);
+        const accountId = storage?.storage?.account?.id;
+        if (accountId && warnedAccounts.has(accountId)) return [retention.notice(board.id)].filter(Boolean);
+        if (accountId) warnedAccounts.add(accountId);
         return [retention.notice(board.id), ...(storage ? [{ board: board.id, ...storage }] : [])].filter(Boolean);
       });
       return { boards, ...(warnings.length ? { warnings } : {}) };
@@ -321,6 +325,7 @@ export function createRelayHandler({ directory, auth, pollMs = 200, publicOrigin
       return journal.after(after).map(event);
     }, false, board.engineVersion),
     warning: (board) => retention.notice(board.id),
+    warnings: (board) => [quota?.notice(board.id)].filter(Boolean),
     move: append,
     request: async (board, body, who) => (await append(board, body, who, 'request')).body,
   }, { pollMs });

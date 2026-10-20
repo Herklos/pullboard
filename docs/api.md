@@ -286,6 +286,8 @@ A refusal keeps the command's existing exit status and prints exactly one versio
 
 Only the coordinator sets or edits an item's `--check`. `pullboard check [id]` prints the command and its setter before execution, and asks for consent when the caller did not set it. Use `--yes` to confirm that command without a prompt. An EOF or declined answer refuses with `CHECK_CONFIRM` before running the command. With `--json`, the notice and prompt appear immediately on stderr and stdout remains one JSON document; a successful check result also includes the optional `by` setter field.
 
+`pullboard add` and `pullboard edit` refuse a check with `CHECK_MASKS_EXIT`, naming the stage and the fix, when a pipeline's last stage is not the command that proves the work, so a red run would exit 0 (for example `node bin/run-tests.js ... | tail`). That includes a pipeline inside a `( ... )` subshell or a `{ ...; }` group, or after earlier commands or assignments. A check is exempt only when its first command is `set -o pipefail` (alone or with other `set` flags, run unconditionally) and it never clears pipefail, or when it captures the output first and tests it (`out=$(...)`). The rule reads the check's own top-level text: a pipeline inside a nested shell (`sh -c`, `bash -c`), `eval` or a script file is out of its scope.
+
 ```json
 {
   "version": 1,

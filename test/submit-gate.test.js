@@ -964,27 +964,26 @@ for (const mode of ['topic parent', 'merge commit']) {
   });
 }
 
-test('computed imports in test files are always selected in both graphs without forcing full [V4,C7]', (t) => {
+test('a computed-import test joins the selection only when it declares what it loads, and undeclared forces full [V4,C7]', (t) => {
   const box = privateRepo(t);
   const original = seedGraph(box);
   put(box.root, 'test/c.test.js', "export const load = path => import(path);\n");
   const base = commitAll(box);
   const added = selectAffectedTests(box.root, { base: original, commit: base, changed: ['src/a.js'] });
-  assert.equal(added.full, false);
-  assert.deepEqual(added.files, ['test/a.test.js', 'test/c.test.js'], 'the new graph also always selects its computed-import test');
-  put(box.root, 'src/a.js', 'export const value = 2;\n');
-  let commit = commitAll(box, 'feat(core): source change [G1]');
-  let selection = selectAffectedTests(box.root, { base, commit });
-  assert.equal(selection.full, false);
-  assert.deepEqual(selection.files, ['test/a.test.js', 'test/c.test.js'], 'an unrelated computed-import test is always selected');
-  selection = selectAffectedTests(box.root, { base, commit, changed: ['test/c.test.js'] });
-  assert.equal(selection.full, false, 'reaching a computed-import test does not force full');
-  assert.deepEqual(selection.files, ['test/c.test.js']);
+  assert.equal(added.full, true, 'an undeclared computed import cannot be read, so the whole suite runs');
+  assert.match(added.reason, /test\/c\.test\.js/u, 'the reason names the undeclared file');
+  put(box.root, 'test/c.test.js', "/** @pullboard-test-loads src/a.js */\nexport const load = path => import(path);\n");
+  const declared = commitAll(box, 'test(core): declare what the loader reads [G1]');
+  put(box.root, 'src/a.js', 'export const value = 2;\n'); let commit = commitAll(box, 'feat(core): source change [G1]');
+  let selection = selectAffectedTests(box.root, { base: declared, commit }); assert.equal(selection.full, false);
+  assert.deepEqual(selection.files, ['test/a.test.js', 'test/c.test.js'], 'a declared loader of the changed module is selected');
+  selection = selectAffectedTests(box.root, { base: declared, commit, changed: ['test/c.test.js'] });
+  assert.equal(selection.full, false, 'reaching a computed-import test does not force full'); assert.deepEqual(selection.files, ['test/c.test.js']);
   put(box.root, 'test/c.test.js', "import 'node:assert/strict';\n");
   commit = commitAll(box, 'test(core): remove computed loader [G1]');
-  selection = selectAffectedTests(box.root, { base, commit, changed: ['src/a.js'] });
+  selection = selectAffectedTests(box.root, { base: declared, commit, changed: ['src/a.js'] });
   assert.equal(selection.full, false);
-  assert.deepEqual(selection.files, ['test/a.test.js', 'test/c.test.js'], 'the old graph keeps its computed-import test selected');
+  assert.deepEqual(selection.files, ['test/a.test.js', 'test/c.test.js'], 'the old graph keeps its declared loader selected');
 });
 
 
