@@ -13,9 +13,9 @@ import { readRemoteGateHolders, waitForCondition } from './runner-fixture-state.
  * Keep the original custody assertions identical in ordinary and forced ordering cases: `holdRelease` forces a real
  * release write conflict, `chatty` makes the command keep writing output, so some always arrives after the
  * transport drops (#888: a forwarded write then waited forever for a drain from a destroyed stdout), and `epermOnce`
- * makes the worker's first real signal to one process group answer EPERM while its members are still alive (#927), so
- * the forced EPERM does not depend on how the OS answers an exited, unreaped group; the worker retries on a fresh census
- * (#888) before the signal can reach that group's live members.
+ * arms after the child's TERM handler starts, then makes the worker's next real group signal answer EPERM (#945).
+ * The marker is a fixture phase, not an OS-dependent second signal to the same group: the worker's fresh-census retry
+ * (#888) must still drain its owned groups and release its lease.
  * `lateGroup` starts the child in the launcher's group and moves it to its own a second later, so the worker's census
  * always sees it first in the old group, as it did under load when a detached child had not yet called setsid (#888).
  */
@@ -128,14 +128,14 @@ setInterval(() => {}, 1_000);
   let nodeOptions = '';
   if (epermOnce) {
     const preload = join(dir, 'eperm-once.mjs');
-    writeFileSync(preload, `import { writeFileSync } from 'node:fs';
+    writeFileSync(preload, `import { existsSync, writeFileSync } from 'node:fs';
 const kill = process.kill.bind(process);
 let answered = false;
 process.kill = (pid, signal) => {
-  // Force the worker's first real group signal to retry while that group is still alive (#945). Waiting for a second
-  // signal to the same group depended on the OS cleanup sequence: Linux can drain each group after a single TERM.
-  // Liveness probes pass through, and the retry delivers the signal so the detached child's TERM handler still runs.
-  if (!answered && pid < 0 && signal !== 0) {
+  // Keep initial TERM delivery available to the child's controlled handler. Once it starts, force the next actual
+  // group signal, even when Linux signals each group only once (#945). This uses the fixture's explicit phase,
+  // not a second call to the same group or an artificial launcher delay. Liveness probes still pass through.
+  if (!answered && pid < 0 && signal !== 0 && existsSync(${JSON.stringify(childTerm)})) {
     answered = true;
     writeFileSync(${JSON.stringify(epermAnswered)}, 'eperm\\n');
     throw Object.assign(new Error('kill EPERM'), { code: 'EPERM', errno: -1, syscall: 'kill' });
