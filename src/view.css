@@ -998,3 +998,9 @@ code.inline.long { white-space: break-spaces; overflow-wrap: anywhere; }
   .share-x { grid-column: 3; grid-row: 1; }
   .share-gh { grid-column: 2 / 4; justify-self: start; }
 }
+
+/* The hosted page paints only its neutral mark until its script knows which screen applies (#932). */
+.hosted-mark { display: none; }
+.hosted-page.loading .shell { display: none; }
+.hosted-page.loading .hosted-mark { display: grid; place-items: center; min-height: 100vh; color: var(--ink-muted); }
+.hosted-page.loading .hosted-mark svg { width: 56px; height: 56px; }

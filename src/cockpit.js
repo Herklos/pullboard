@@ -103,6 +103,7 @@ export function cockpitPage(key = '', { snapshot = false, readOnly = false, requ
 <link rel="icon" href="data:,">
 </head>
 <body class="loading${hostedLocal && !snapshot ? ' hosted-page open-board' : ''}${snapshot ? ' snapshot' : ''}${readOnly ? ' read-only' : ''}${requestMode ? ' requests' : ''}">
+${hostedLocal && !snapshot ? '<div class="hosted-mark" aria-hidden="true"><svg viewBox="0 0 64 64" aria-hidden="true"><path fill="currentColor" d="M8 7h35a6 6 0 0 1 6 6v7H8a5 5 0 0 1-5-5v-3a5 5 0 0 1 5-5Z"/><rect width="56" height="14" x="3" y="25" fill="var(--accent)" rx="5"/><path fill="currentColor" d="M8 43h35a6 6 0 0 1 6 6v8H8a5 5 0 0 1-5-5v-4a5 5 0 0 1 5-5Z"/></svg></div>' : ''}
 <div class="shell">
 <aside class="side" id="side" aria-label="Projects">
   <div class="side-top">
@@ -352,6 +353,8 @@ const drawHosted = (${drawHosted.toString()});
  * page names before first paint (#757), and it hears nothing about this computer.
  */
 function localNote(state, facts = {}) {
+  // Until the page knows which screen applies, the neutral mark stays and no other screen shows.
+  if (!['looking', 'asking'].includes(state)) document.body.classList.remove('loading');
   drawHosted(document, hostedState(state, { browser: hostedBrowser(navigator), phone: document.documentElement.dataset.relayDevice === 'phone', ...facts }), { view: localSession?.origin || LOCAL_VIEW, signIn: hosted.signIn, session: hosted.relaySession });
 }
 
@@ -3574,7 +3577,6 @@ function fold(open) {
   $('side').classList.toggle('open', open);
   $('proj-switch').setAttribute('aria-expanded', String(open));
 }
-
 /** Show another project and its item; history restores keep the tab their entry named. */
 function switchTo(root, target = null, record = true) {
   // Switching board or project closes Approve all's confirmation and the decline dialog; neither records on either board.
@@ -3600,7 +3602,6 @@ function switchTo(root, target = null, record = true) {
     if (generation === switchGeneration && requestedItem !== null && view.item === requestedItem && view.root === root && view.tab === 'items') reveal();
   });
 }
-
 // The Shouts tab's own controls: a folded shout's more and less, every agent or only those at work, the agents
 // panel hidden or shown, and an agent's name, which filters the feed to its shouts and addresses the composer to it.
 $('shouts-pane').addEventListener('click', (event) => {
@@ -3944,7 +3945,6 @@ async function openApprovedBoard(boardId) {
   keep('pb.tab', view.tab);
   return switchTo(board.root);
 }
-
 /** Load the configured decrypting transport once, only when relay reads or pairing need it. */
 let transportLoading = null;
 async function loadTransport() {
@@ -3965,7 +3965,6 @@ async function loadTransport() {
   catch (error) { transportLoadError = error; pageStartup(document.documentElement).say(error.message + ' Check your connection, then reload this page.'); throw error; }
   finally { transportLoading = null; }
 }
-
 /** Read local boards first; relay-only pages and pairing still load their configured client directly. */
 async function startPage() {
   let local = 'unreachable';

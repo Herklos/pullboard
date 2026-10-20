@@ -1132,3 +1132,94 @@ test('a hosted wait that times out names the page state and Chrome\'s network se
     finally { rmSync(profile, { recursive: true, force: true }); }
   }
 });
+
+test('the hosted page paints no other screen before the one it settles on [N26,H5]', { timeout: 180_000 }, async () => { // budget: hang ceiling for three hosted page loads in Chrome, each recorded from its first frame.
+  const executable = chromeExecutable();
+  assert.ok(executable, 'the hosted page check needs real Chrome');
+  const box = machine();
+  project(box, 'first-frame');
+  const profile = mkdtempSync(join(tmpdir(), 'pullboard-first-frame-'));
+  const relay = createRelayBrowserHandler({ authenticate: async () => { if (stand.signedIn) return { kind: 'session' }; throw new Refused('AUTH_REQUIRED', 'Sign in.'); } });
+  // The three states: signed out; signed in with nothing shared; signed in with a board on this machine.
+  const stand = { signedIn: false, linked: [], local: null };
+  const client = 'export function rememberPairing() { return null; }\nexport async function createTransport() { return { async request(path) { if (path === "/api/v1/boards") return { version: 1, boards: [], warnings: [] }; throw new Error("no paired board"); } }; }\n';
+  // Recorded in the page from its first frame: which screens are shown, in order, each change once.
+  const recorder = `(() => {
+    if (location.origin !== ${JSON.stringify(HOSTED)}) return;
+    const shown = (element) => Boolean(element) && getComputedStyle(element).display !== 'none' && element.getClientRects().length > 0;
+    const screens = [];
+    window.__screens = screens;
+    const sample = () => {
+      const names = [];
+      if (shown(document.querySelector('.hosted-mark'))) names.push('mark');
+      if (shown(document.querySelector('.side'))) names.push('side');
+      if (shown(document.querySelector('.shell'))) names.push('shell');
+      const note = document.querySelector('#local-note');
+      if (shown(note)) names.push('note:' + note.dataset.state);
+      for (const panel of document.querySelectorAll('#relay-screen .relay-panel')) if (shown(panel)) names.push('panel:' + panel.dataset.screen);
+      const now = names.join(' ');
+      if (screens.at(-1) !== now) screens.push(now);
+    };
+    const tick = () => { sample(); requestAnimationFrame(tick); };
+    requestAnimationFrame(tick);
+  })()`;
+  let view, chrome, listener, granted = false;
+  try {
+    view = await startView(box);
+    chrome = namedWaits(await openSnapshotChrome(executable, 'about:blank', profile), profile);
+    listener = ({ data }) => {
+      const message = JSON.parse(String(data));
+      if (message.method !== 'Fetch.requestPaused') return;
+      const { requestId, request: asked } = message.params;
+      const address = new URL(asked.url);
+      const fulfil = (type, body, headers = []) => chrome.send('Fetch.fulfillRequest', { requestId, responseCode: 200, responseHeaders: [{ name: 'Content-Type', value: type }, { name: 'Cache-Control', value: 'no-store' }, ...headers], body: Buffer.from(body).toString('base64') });
+      (async () => {
+        if (address.origin === LOCAL) {
+          if (!stand.local) return chrome.send('Fetch.failRequest', { requestId, errorReason: 'ConnectionRefused' });
+          const reply = await call({ base: stand.local }, address.pathname + address.search, { method: asked.method, headers: Object.fromEntries(Object.entries(asked.headers).filter(([name]) => name.toLowerCase() !== 'host')) });
+          return chrome.send('Fetch.fulfillRequest', { requestId, responseCode: reply.status, responseHeaders: Object.entries(reply.headers).filter(([name]) => !['content-length', 'transfer-encoding', 'connection', 'keep-alive', 'date'].includes(name)).map(([name, value]) => ({ name, value: String(value) })), body: Buffer.from(reply.body).toString('base64') });
+        }
+        if (address.pathname === '/relay/client.js') return fulfil('text/javascript', client);
+        if (address.pathname === '/api/v1/boards') return fulfil('application/json', JSON.stringify({ version: 1, boards: stand.linked, warnings: [] }));
+        let head = {}, body = '';
+        const handled = await relay({ method: 'GET', url: address.pathname, headers: {} }, { writeHead: (status, headers) => { head = headers; }, end: (content) => { body = content ?? ''; } });
+        if (!handled) return chrome.send('Fetch.failRequest', { requestId, errorReason: 'Failed' });
+        const policy = head['content-security-policy'].replace("connect-src 'self'", "connect-src 'self' " + view.base);
+        return fulfil(head['content-type'], body, [{ name: 'Content-Security-Policy', value: policy }]);
+      })().catch((error) => { throw error; });
+    };
+    chrome.socket.addEventListener('message', listener);
+    await chrome.send('Fetch.enable', { patterns: [{ urlPattern: HOSTED + '/*', requestStage: 'Request' }, { urlPattern: LOCAL + '/*', requestStage: 'Request' }] });
+    await chrome.send('Page.addScriptToEvaluateOnNewDocument', { source: recorder });
+    const load = async (name, address, settle) => {
+      await chrome.send('Page.navigate', { url: HOSTED + '/' + address });
+      await chrome.waitFor(`location.origin === ${JSON.stringify(HOSTED)} && document.body && !document.body.classList.contains('loading') && ${settle}`, 30_000); // budget: hang ceiling for one hosted load in Chrome until its screen settles.
+      const screens = JSON.parse(await chrome.stable('JSON.stringify(window.__screens)'));
+      return { name, screens };
+    };
+    const results = [];
+    stand.signedIn = false; stand.linked = []; stand.local = null;
+    results.push(await load('signed out', '?out', 'true'));
+    stand.signedIn = true; stand.linked = []; stand.local = null;
+    results.push(await load('signed in, nothing shared', '?in', 'true'));
+    stand.signedIn = false; stand.linked = []; stand.local = view.base;
+    for (const permissions of [['loopbackNetwork', 'localNetwork', 'localNetworkAccess'], ['localNetworkAccess']]) {
+      try { await chrome.send('Browser.grantPermissions', { origin: HOSTED, permissions }); granted = true; break; } catch { /* a name this Chrome does not have */ }
+    }
+    results.push(await load('signed in, with a board', '?board', 'true'));
+    for (const { name, screens } of results) {
+      assert.equal(screens[0], 'mark', `${name}: the first frame is the neutral mark, not another screen (${JSON.stringify(screens)})`);
+      assert.ok(screens.slice(0, -1).every((screen) => screen === 'mark'), `${name}: every frame before the settled screen is the neutral mark (${JSON.stringify(screens)})`);
+      assert.notEqual(screens.at(-1), 'mark', `${name}: the page settles on a screen (${JSON.stringify(screens)})`);
+      assert.equal(screens.length, 2, `${name}: the settled screen appears once, after the mark (${JSON.stringify(screens)})`);
+    }
+    assert.deepEqual(chrome.exceptions, [], 'Chrome reports no uncaught exceptions');
+  } finally {
+    try { if (chrome) { if (listener) chrome.socket.removeEventListener('message', listener); await closeSnapshotChrome(chrome); } }
+    finally {
+      try { if (view) await view.stop(); }
+      finally { rmSync(profile, { recursive: true, force: true }); }
+    }
+  }
+  void granted;
+});
