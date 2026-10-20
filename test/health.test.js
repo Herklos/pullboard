@@ -299,3 +299,42 @@ test('item history survives garbage collection mid-read [A6]', () => {
   assert.equal(child.status, 0, `reading item history must not lose its statement to garbage collection: ${child.stderr}`);
   assert.equal(child.stdout, '50', 'every item with events has a history entry');
 });
+
+test('health names a route with open work and no agent [N2,B13]', async (t) => {
+  const box = repo(t);
+  const { board, at } = boardAt(box);
+  at(HOUR / 12);
+  store.register(board, { lane: 'coordinator', path: box.root });
+  const light = store.register(board, { lane: 'core', route: 'light', path: join(box.dir, 'core-light') });
+  const waiting = store.addItem(board, { by: 'coordinator', lane: 'core', title: 'Mid work', route: 'mid',
+    criterion: 'The mid work is done when its test passes.', check: 'true', brief: 'Files:\n- src/mid.js\nTest:\n- the mid work runs' });
+  store.closeBoard(board);
+  const result = await cli(box.root, ['health', '--json']);
+  assert.equal(result.code, 1, `a queue fault is stuck work: ${result.stderr}`);
+  const report = JSON.parse(result.stdout);
+  const route = report.stuck.find((entry) => entry.key === 'ROUTE_UNSERVED:route:mid');
+  assert.ok(route, `health names the route nobody serves: ${result.stdout}`);
+  assert.deepEqual(route.owner, { role: 'coordinator', who: 'coordinator' }, 'the coordinator starts an agent on the route');
+  assert.ok(route.why.includes(`#${waiting}`), `the finding names the waiting item: ${route.why}`);
+  assert.ok(route.next.includes('--route mid'), `the next step joins the route: ${route.next}`);
+  assert.ok(!report.stuck.some((entry) => entry.owner?.who === light && entry.key.startsWith('ROUTE_UNSERVED')), 'the light agent is not named for a mid route');
+});
+
+test('health names a rank inversion [N2,B13]', async (t) => {
+  const box = repo(t);
+  const { board, at } = boardAt(box);
+  at(HOUR / 12);
+  store.register(board, { lane: 'coordinator', path: box.root });
+  const builder = store.register(board, { lane: 'core', path: join(box.dir, 'core-1') });
+  const earlier = store.addItem(board, { by: 'coordinator', lane: 'core', title: 'Earlier work' });
+  const later = store.addItem(board, { by: 'coordinator', lane: 'core', title: 'Later work' });
+  store.claim(board, later, { agentId: builder, lane: 'core', leaseMs: 2 * HOUR, freeze });
+  store.closeBoard(board);
+  const result = await cli(box.root, ['health', '--json']);
+  const report = JSON.parse(result.stdout);
+  const inversion = report.stuck.find((entry) => entry.key === `RANK_INVERSION:item:${later}`);
+  assert.ok(inversion, `health names the claim that ranks behind a free item: ${result.stdout}`);
+  assert.deepEqual(inversion.owner, { role: 'builder', who: builder }, 'the holder owns its own rank inversion');
+  assert.ok(inversion.why.includes(`#${earlier}`), `the finding names the free item ahead: ${inversion.why}`);
+  assert.ok(inversion.next.includes(`claim #${earlier}`), `the next step claims it: ${inversion.next}`);
+});
