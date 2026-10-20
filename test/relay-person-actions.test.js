@@ -12,7 +12,7 @@ import { main } from '../src/cli.js';
 import { decodeBoardKey, seal } from '../src/seal.js';
 import { ENGINE_VERSION } from '../src/machine.js';
 import { findChromeExecutable, relayWorkBudgetMs, startChrome } from './relay-browser-fixture.js';
-import { assertSnapshotCheckpoints, cliChildDeadlineMs, relayClientFixture } from './relay-client-fixture.js';
+import { assertSnapshotCheckpoints, cliChildDeadlineMs, relayClientFixture, legacyRelayClientFixture } from './relay-client-fixture.js';
 
 /** Record the real phase and wait budget for a late-snapshot failure without changing either wait. */
 function lateSnapshotTiming(t) {
@@ -216,7 +216,8 @@ test('a person action completes with late native snapshots after 8 seconds [H12,
   const timing = lateSnapshotTiming(t);
   try {
     timing.begin('fixture setup and item creation', '4 serial private CLI children; each has the existing 55,000 ms child bound');
-    const box = await relayClientFixture(t);
+    // This case measures released API1 whole-checkpoint attempts and exact ciphertext retries.
+    const box = await legacyRelayClientFixture(t);
     const title = 'PERSON_ACTION_LATE_SNAPSHOT_READY';
     assert.equal((await box.cli('add', box.lane, title)).code, 0);
     timing.finish();
@@ -283,7 +284,7 @@ test('local view attribution is person-only and an agent token cannot seal perso
   });
   assert.equal(tokenResponse.status, 201);
   const agentToken = (await tokenResponse.json()).token;
-  const stateResponse = await fetch(box.origin + '/api/v1/boards/' + link.board + '/state', {
+  const stateResponse = await fetch(box.origin + '/api/v2/boards/' + link.board + '/state', {
     headers: { authorization: 'Bearer ' + link.token, 'x-pullboard-engine': String(ENGINE_VERSION) },
   });
   assert.equal(stateResponse.status, 200);

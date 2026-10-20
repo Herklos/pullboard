@@ -10,7 +10,7 @@ import { pathToFileURL } from 'node:url';
 import { gunzipSync } from 'node:zlib';
 import { createServer } from 'node:http';
 import { after, test } from 'node:test';
-import { serveRelay } from '../relay/service.js';
+import { serveRelay, createRelayHandler } from '../relay/service.js';
 import { createRelayAuth } from '../relay/auth.js';
 import { createGitHubClient } from '../relay/github.js';
 import { githubFixture } from './relay-fixture.js';
@@ -24,6 +24,7 @@ import { appliedSequence, checkpointSequence, engineReceipt, prepareEngineMove, 
 import { seal as sealMove, unseal as openSealed } from '../src/seal.js';
 import { ENGINE_VERSION, VERIFIER_STANDING_ENGINE } from '../src/machine.js';
 import { relayRecover, syncRelay } from '../src/relay.js';
+import { createRelayPageCache, snapshotSourceId } from '../src/relay-page-cache.js';
 
 after(cleanupFixtureChildren);
 
@@ -54,8 +55,26 @@ async function openCheckpoint(box, snapshot) {
   return JSON.parse(new TextDecoder().decode(plain));
 }
 
+/** Keep API1 ciphertext-interception cases on an explicitly historical HTTP router; current cases use real API2. */
+async function sealedFixtureRelay(options, legacySnapshots) {
+  if (!legacySnapshots) return serveRelay(options);
+  const handler = createRelayHandler(options);
+  const server = createServer((req, res) => {
+    if (/^\/api\/v2(?:\/|$)/u.test(req.url ?? '')) {
+      req.resume();
+      res.writeHead(404, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ version: 1, error: { code: 'NOT_FOUND', message: 'This historical fixture supports API1.' } }));
+      return;
+    }
+    return handler(req, res);
+  });
+  await new Promise((resolveListening, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolveListening); });
+  return { port: server.address().port,
+    close: () => new Promise(done => { handler.close(); server.close(done); server.closeAllConnections(); }) };
+}
+
 /** Create a real private CLI board, actual stand-in GitHub sign-in, and an ephemeral relay server. */
-async function fixture(t, { machineCredentials = true } = {}) {
+async function fixture(t, { machineCredentials = true, legacySnapshots = false } = {}) {
   const directory = realpathSync(mkdtempSync(join(tmpdir(), 'pullboard-sealed-http-')));
   const root = join(directory, 'repo');
   const home = join(directory, 'home');
@@ -97,7 +116,7 @@ async function fixture(t, { machineCredentials = true } = {}) {
   const tokenIssuer = machines[0]?.token ?? person.token;
   const one = await auth.issueToken(tokenIssuer, { board: id, agent: 'client-one' });
   const two = await auth.issueToken(machines[1]?.token ?? tokenIssuer, { board: id, agent: 'client-two' });
-  const relay = await serveRelay({ directory: data, auth, port: 0, pollMs: 20, publicOrigin: 'http://127.0.0.1:44444' });
+  const relay = await sealedFixtureRelay({ directory: data, auth, port: 0, pollMs: 20, publicOrigin: 'http://127.0.0.1:44444' }, legacySnapshots);
   t.after(async () => { await relay.close(); auth.close(); rmSync(directory, { recursive: true, force: true }); });
   const origin = 'http://127.0.0.1:' + relay.port;
   const key = randomBytes(32);
@@ -476,7 +495,8 @@ test('two real clients refuse forged relay actors and person-only requests while
 });
 
 test('two real clients enforce the verify policy captured in the item freeze [H16,O2]', { timeout: 240_000 }, async t => {
-  const box = await fixture(t);
+  // The injected faults address the released whole-ciphertext API1 checkpoint contract.
+  const box = await fixture(t, { legacySnapshots: true });
   const configPath = join(box.root, 'pullboard.json');
   const config = JSON.parse(readFileSync(configPath, 'utf8'));
   config.verify = { ...config.verify, policy: 'coordinator', family: 'require' };
@@ -637,7 +657,8 @@ test('two real clients enforce the verify policy captured in the item freeze [H1
 });
 
 test('person recovery explicitly skips one future-engine blocker and publishes a refusal checkpoint [H3,H16]', async (t) => {
-  const box = await fixture(t);
+  // The injected faults address the released whole-ciphertext API1 checkpoint contract.
+  const box = await fixture(t, { legacySnapshots: true });
   for (const args of [['help', 'relay', 'recover'], ['relay', 'recover', '--help'], ['help', '--all']]) {
     const help = spawnSync(process.execPath, [resolve(import.meta.dirname, '../bin/pullboard.js'), ...args],
       { cwd: box.root, env: box.env, encoding: 'utf8' });
@@ -963,7 +984,7 @@ test('two future-engine blockers recover one durable position at a time on two r
   assert.equal((await syncRelay(box.root, io)).sequence, 5);
   const first = await relayRecover(box.root, 6, io);
   assert.equal(first.sequence, 6, 'later engine99 record cannot roll back the selected skip');
-  assert.equal((await box.call(box.path + '/state')).body.state.sequence, 6, 'skip6 is durably published before skip7');
+  assert.equal((await box.call('/api/v2/boards/' + box.id + '/state')).body.state.sequence, 6, 'skip6 is durably published before skip7');
   await replayClient(roots[1], envs[1], 'relay');
   const afterFirst = await replayClient(roots[1], envs[1], 'export');
   assert.equal(afterFirst.tables.board_meta.find(row => row.meta_key === 'relay_applied_sequence').meta_value, '6');
@@ -979,7 +1000,8 @@ test('two future-engine blockers recover one durable position at a time on two r
 });
 
 test('recovery collision status preserves the retry while the winner catches an appended tail [H16]', async (t) => {
-  const box = await fixture(t);
+  // The injected faults address the released whole-ciphertext API1 checkpoint contract.
+  const box = await fixture(t, { legacySnapshots: true });
   await blockedRecoveryFixture(box);
   const secondRoot = join(box.directory, 'recovery-collision-replica');
   const secondHome = join(box.directory, 'recovery-collision-home');
@@ -1147,7 +1169,7 @@ test('lost-ACK recovery retry refuses to overwrite a concurrent local write [H16
   let wrote = false;
   globalThis.fetch = async (url, options = {}) => {
     const response = await priorFetch(url, options);
-    if (!wrote && options.method === 'PUT' && String(url).endsWith('/state')) {
+    if (!wrote && options.method === 'POST' && /\/api\/v2\/boards\/[0-9a-f]{32}\/uploads\/[^/]+\/publish$/u.test(new URL(url).pathname)) {
       wrote = true;
       const board = store.openBoard(join(box.root, '.git/pullboard/board.sqlite'));
       try {
@@ -1162,7 +1184,16 @@ test('lost-ACK recovery retry refuses to overwrite a concurrent local write [H16
   globalThis.fetch = priorFetch;
   const recovery = JSON.parse(readFileSync(join(box.root, '.git/pullboard/relay.json'), 'utf8')).recovery;
   assert.equal(recovery.skip, 1);
-  assert.equal((await box.call(box.path + '/state')).body.state.sealed, recovery.sealed);
+  assert.equal(wrote, true, 'the fault follows an actual API2 publication acknowledgement');
+  const remote = await box.call('/api/v2/boards/' + box.id + '/state');
+  assert.equal(remote.status, 200);
+  const cache = createRelayPageCache({ board: box.id, url: box.origin });
+  try {
+    const prepared = cache.job(snapshotSourceId(recovery.sealed));
+    assert.ok(prepared, 'the original pending checkpoint has a durable encrypted graph');
+    assert.equal(remote.body.state.root.id, prepared.reference.id, 'the relay retained the exact graph published before its ACK was lost');
+    assert.equal(remote.body.state.sequence, recovery.skip);
+  } finally { cache.close(); }
   await assert.rejects(() => relayRecover(box.root, 1, { err: () => {}, say: () => {} }),
     { code: 'RELAY_LOCAL_CHANGED', message: /cannot be retried from the changed board/ },
     'a local change is preserved and the message does not suggest export alone will unblock retry');
@@ -1304,6 +1335,7 @@ test('[A4,H7] snapshots compact covered moves, preserve the tail and deletion re
 
 test('[A4,H7] malformed or unauthorized calls cannot store clear records, keys or another board', async (t) => {
   const box = await fixture(t);
+  const initialFiles = readdirSync(box.data).sort();
   assert.equal((await box.call(box.path + '/state', { token: null })).status, 401);
   const other = 'b'.repeat(32) === box.id ? 'c'.repeat(32) : 'b'.repeat(32);
   const wrong = await box.call('/api/v1/boards/' + other + '/state');
@@ -1312,7 +1344,7 @@ test('[A4,H7] malformed or unauthorized calls cannot store clear records, keys o
   for (const body of [{ sequence: 0, sealed: 'a' }, { sequence: 0, sealed: 'abc=' }, { sequence: 0, sealed: box.clientSeal({}, 'snapshot', 0), key: 'client key stays on device' }, { sequence: '0', sealed: box.clientSeal({}, 'snapshot', 0) }]) {
     assert.equal((await box.call(box.path + '/state', { method: 'PUT', token: box.person.token, body })).status, 400);
   }
-  assert.deepEqual(readdirSync(box.data), []);
+  assert.deepEqual(readdirSync(box.data).sort(), initialFiles, 'unauthorized or malformed input creates no board data beside pre-existing account metadata');
   await box.call(box.path + '/state', { method: 'PUT', token: box.person.token, body: { sequence: 0, sealed: box.clientSeal(box.document, 'snapshot', 0) } });
   assert.equal((await box.call(box.path + '/moves', { method: 'POST', body: { verb: 'add', args: { title: 'clear' } } })).body.error.code, 'BAD_UPLOAD');
   const deniedCookie = await box.call(box.path + '/moves', { method: 'POST', token: null, headers: { cookie: 'pb_session=' + box.person.token, origin: 'https://foreign.example' }, body: { sequence: 1, sealed: box.clientSeal({}, 'move', 1) } });

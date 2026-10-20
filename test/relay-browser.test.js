@@ -578,7 +578,7 @@ test('a phone not signed in sees one GitHub button and nothing about this comput
   await chrome.navigate(box.origin + '/#board=' + link.board + '&key=' + encoded);
   await chrome.waitFor("document.documentElement.dataset.relayScreen === 'sign-in' && location.hash === ''");
   await chrome.evaluate("document.querySelector('#relay-screen .relay-github').click()");
-  await chrome.waitFor("document.querySelector('#chain')?.textContent.includes(" + JSON.stringify(marker) + ") && document.querySelector('#pairing-storage-notice') !== null");
+  await chrome.waitFor("document.querySelector('#chain')?.textContent.includes(" + JSON.stringify(marker) + ") && document.querySelector('#pairing-storage-notice') !== null && document.documentElement.dataset.relayScreen === undefined");
   const board = await chrome.evaluate(`({ text: document.body.innerText, screen: document.documentElement.dataset.relayScreen ?? null,
     after: Boolean(document.querySelector('#chain').compareDocumentPosition(document.querySelector('#pairing-storage-notice')) & Node.DOCUMENT_POSITION_FOLLOWING),
     line: (() => { const range = document.createRange(); range.selectNodeContents(document.querySelector('#pairing-storage-notice span')); return range.getClientRects().length; })(),

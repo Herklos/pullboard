@@ -7,6 +7,7 @@ import { gunzipSync } from 'node:zlib';
 import { Refused } from '../src/refused.js';
 import { ENGINE_VERSION } from '../src/machine.js';
 import { readBoardKey } from '../src/relay-key.js';
+import { request } from '../src/relay.js';
 import { unseal } from '../src/seal.js';
 
 const REPOSITORY = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -24,7 +25,13 @@ function cli(root, args) {
     child.once('close', (code, signal) => {
       clearTimeout(timer);
       if (signal) return reject(new Error('the Pullboard command did not finish before its deadline'));
-      if (code !== 0) return reject(new Error('the Pullboard command failed; read its message above and repair the repository before retrying'));
+      if (code !== 0) {
+        let refusal;
+        try { refusal = JSON.parse(stdout).error?.code; } catch { /* Only a typed rule is safe to repeat from a failed child. */ }
+        const rule = typeof refusal === 'string' && /^[A-Z][A-Z0-9_]*$/u.test(refusal) ? ` (${refusal})` : '';
+        const operation = args[0] === 'relay' ? `relay ${args[1]}` : args[0];
+        return reject(new Error(`the Pullboard ${operation} command failed${rule}; read its message above and repair the repository before retrying`));
+      }
       try { resolveResult(JSON.parse(stdout)); }
       catch { reject(new Error('the Pullboard command did not return its JSON result')); }
     });
@@ -78,9 +85,7 @@ async function readMirroredMove({ address, board, token, key, after, item, title
   const move = JSON.parse(new TextDecoder().decode(bytes));
   if (move.operation === 'addItem') {
     if (move.args?.[0]?.title !== title) throw new Error('the decrypted relay operation is not the smoke item');
-    const stateResponse = await fetch(new URL(`/api/v1/boards/${board}/state`, address), { headers: { authorization: `Bearer ${token}`, 'x-pullboard-engine': String(ENGINE_VERSION) } });
-    if (!stateResponse.ok) throw new Error('the relay did not return its native checkpoint');
-    const saved = await stateResponse.json();
+    const saved = await request({ url: address, board, token }, `/api/v1/boards/${board}/state`, {}, { err: line => process.stderr.write(line + '\n') });
     const checkpointBytes = await unseal(key, Buffer.from(saved.state.sealed, 'base64url'), {
       boardId: board, kind: 'snapshot', sequence: saved.state.sequence,
     });
@@ -98,9 +103,7 @@ async function readMirroredMove({ address, board, token, key, after, item, title
 
 /** Read a compacted move from its authenticated native checkpoint when the event tail is gone. */
 async function readMirroredCheckpoint({ address, board, token, key, after, item, title }) {
-  const response = await fetch(new URL(`/api/v1/boards/${board}/state`, address), { headers: { authorization: `Bearer ${token}`, 'x-pullboard-engine': String(ENGINE_VERSION) } });
-  if (!response.ok) throw new Error('the relay did not return the mirrored checkpoint');
-  const saved = await response.json();
+  const saved = await request({ url: address, board, token }, `/api/v1/boards/${board}/state`, {}, { err: line => process.stderr.write(line + '\n') });
   const sequence = saved.state?.sequence;
   if (!Number.isSafeInteger(sequence) || sequence !== after + 1 || typeof saved.state.sealed !== 'string') {
     throw new Error('the relay checkpoint does not cover exactly one smoke move');

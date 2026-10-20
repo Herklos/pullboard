@@ -10,7 +10,7 @@ import { snapshotPageRoot } from '../relay/pages-http.js';
 import { createRelayPageCache, snapshotSourceId } from '../src/relay-page-cache.js';
 import { pagedSnapshotRequest, relaySnapshotRequest, relayStorage, relayStorageLine } from '../src/relay-page-client.js';
 import { generateBoardKey } from '../src/seal.js';
-import { writeSealedValue } from '../src/sealed-pages.js';
+import { writeSealedValue, sealedPageFingerprint } from '../src/sealed-pages.js';
 import { Refused } from '../src/refused.js';
 import { createServer } from 'node:http';
 import { relayFixtureChild, cliChildDeadlineMs } from './relay-client-fixture.js';
@@ -138,6 +138,22 @@ test('an incorrect root ACK never completes or discards the private durable uplo
   await assert.rejects(pagedSnapshotRequest(box.state, { method: 'PUT', body: pending }, box.adapter), { code: 'RELAY_RESPONSE' });
   const cache = createRelayPageCache(box.state);
   try { assert.ok(cache.job(snapshotSourceId(pending.sealed))); } finally { cache.close(); }
+});
+
+test('cache hits from a prior key are misses while actual encrypted reads still refuse the wrong key [H15,H17]', async t => {
+  privateHome(t);
+  const state = { board: 'c'.repeat(32), url: 'https://synthetic-relay.example' };
+  const cache = createRelayPageCache(state);
+  const first = { key: await generateBoardKey(), boardId: state.board, sequence: 0, put: cache.put, get: id => cache.object(id).bytes };
+  try {
+    const reference = await writeSealedValue({ marker: 'private native source' }, first);
+    const hash = await sealedPageFingerprint(reference, first);
+    cache.remember(hash, reference);
+    const relinked = { ...first, key: await generateBoardKey() };
+    assert.equal(await cache.lookup(hash, relinked), null, 'the old-key hint is not reused for a new upload');
+    await assert.rejects(sealedPageFingerprint(reference, relinked), { code: 'SEAL_AUTH_FAILED' }, 'an actual wrong-key encrypted read stays refused');
+    assert.deepEqual(await cache.lookup(hash, first), reference, 'the original authenticated object remains intact for its key');
+  } finally { cache.close(); }
 });
 
 test('private reuse authenticates the fingerprint binding rather than trusting an unrelated cached page [H15,H17]', async t => {

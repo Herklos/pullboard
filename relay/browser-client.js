@@ -9,7 +9,7 @@ import { enqueueStream, followStream } from './browser-stream.js';
 import { emptyBoardStep, homeLineDismissed, homeScreenLine, noticeLines, rememberOwnedRequestId, showRelayScreen, storedOwnedRequestState } from './browser-notice.js';
 import { registerApp, requestPairingPersistence } from './install.js';
 import { browserJSON, withBrowserDeadline } from './browser-deadline.js';
-import { phoneApprovalStatus, placePhoneApprovals } from './browser-approval-card.js';
+import { phoneApprovalStatus, placePhoneApprovals, forgetPhoneApprovals } from './browser-approval-card.js';
 import { phoneSnapshotPages } from './browser-pages.js';
 import { createPhoneHistory } from './browser-history.js';
 
@@ -144,6 +144,7 @@ export async function createTransport({ onUpdate = () => {}, onOpenBoard = () =>
     accessLost = true;
     accessError = error ?? new Refused('AUTH_REQUIRED', 'Sign in again to read this board.');
     access.abort();
+    forgetPhoneApprovals(document);
     for (const entry of paired.values()) {
       entry.stream?.close();
       entry.history?.close(); entry.pageCache?.clear(); entry.pages = null;

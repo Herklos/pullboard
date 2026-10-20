@@ -215,6 +215,20 @@ window.fetch = (input, options) => {
   });
   await chrome.navigate(box.origin);
   await chrome.waitFor("document.readyState === 'complete'");
+  const panelOwnership = await chrome.send('Runtime.evaluate', { awaitPromise: true, returnByValue: true, expression: `(async () => {
+    const { phoneApprovalStatus, placePhoneApprovals, forgetPhoneApprovals } = await import('/relay/browser-approval-card.js');
+    const doc = document.implementation.createHTMLDocument('Private approval ownership');
+    doc.body.innerHTML = '<main></main>';
+    const panel = phoneApprovalStatus(doc, 'Private pending request');
+    const button = doc.createElement('button'); let clicks = 0; button.onclick = () => clicks++; panel.append(button);
+    doc.querySelector('main').replaceChildren(doc.createElement('section'));
+    const restored = placePhoneApprovals(doc); button.click();
+    const retained = restored === panel && doc.querySelector('main').contains(panel) && clicks === 1;
+    forgetPhoneApprovals(doc);
+    return { retained, released: panel.childNodes.length === 0 && placePhoneApprovals(doc) === null };
+  })()` });
+  assert.equal(Boolean(panelOwnership.exceptionDetails), false, 'the real approval component executes');
+  assert.deepEqual(panelOwnership.result?.value, { retained: true, released: true }, 'board redraw retains live handlers; access loss releases them');
   // Seed a real non-extractable browser key without exporting it; the authenticated saved board is already readable.
   const seeded = await chrome.send('Runtime.evaluate', { awaitPromise: true, returnByValue: true, expression: `(async () => {
     const { createDeviceKeys } = await import('/relay/device-keys.js');
@@ -237,8 +251,8 @@ window.fetch = (input, options) => {
   await chrome.navigate('about:blank');
   await chrome.navigate(box.origin);
   await chrome.waitFor('window.approvalsPending899 === true');
-  await chrome.waitFor(`document.querySelector('#chain')?.textContent.includes(${JSON.stringify(marker)})`, 3000, // budget: declared #899 three-second ceiling while the late request never answers.
-    'readable board renders while approvals remain pending');
+  await chrome.waitFor(`document.querySelector('#chain')?.textContent.includes(${JSON.stringify(marker)}) && document.documentElement.dataset.relayScreen === undefined && document.body.innerText.includes('Checking requests from your computer')`, 3000, // budget: declared #899 three-second ceiling while the late request never answers.
+    'readable board and pending guidance render while approvals remain pending');
   assert.equal(await chrome.evaluate('window.approvalsPending899 === true'), true);
   assert.ok((await chrome.evaluate('document.body.innerText')).includes(marker));
   assert.ok((await chrome.evaluate('document.body.innerText')).includes('Checking requests from your computer'),

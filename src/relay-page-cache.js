@@ -80,7 +80,14 @@ export function createRelayPageCache(state) {
     if (!saved) return null;
     let reference;
     try { reference = pageReference(JSON.parse(saved.reference)); } catch { throw invalid(); }
-    const actual = await sealedPageFingerprint(reference, { ...context, get: id => object(id).bytes, parents: [] });
+    let actual;
+    try { actual = await sealedPageFingerprint(reference, { ...context, get: id => object(id).bytes, parents: [] }); }
+    catch (error) {
+      // A legitimate off/delete/relink can replace the key at this board/origin. Old local cipher hints cannot
+      // be reused under that key; rebuild from the caller's native data. Actual remote reads still authenticate.
+      if (error instanceof Refused && error.code === 'SEAL_AUTH_FAILED') return null;
+      throw error;
+    }
     if (actual !== hash) throw invalid();
     return reference;
   }
