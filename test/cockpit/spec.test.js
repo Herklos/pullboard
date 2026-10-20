@@ -1167,3 +1167,59 @@ test('doctrine and spec rows share the items row [N26]', { timeout: 300_000 }, a
     }
   }
 });
+
+/** The decline dialog's submit button keeps its place while the dialog is open, even when an approval note times out under it. */
+test('the decline dialog never moves under the pointer [B26,N26]', { timeout: 120_000 }, async (t) => {
+  const executable = chromeExecutable();
+  if (!executable) return t.skip('Install Chrome or set PULLBOARD_CHROME to check the decline dialog.');
+
+  // A long list at a phone width: the page ends below the detail, so removing a note above it clamps the page's scroll.
+  const rows = Array.from({ length: 24 }, (_, index) => `- G${index + 1} [draft, must] Row ${index + 1} keeps its wording. | gate: review`);
+  const spec = '# Decline stability\n\n## G · Goals\n' + rows.join('\n') + '\n';
+  const box = machine();
+  project(box, 'decline-stable', spec);
+  const view = await startView(box);
+  const profile = mkdtempSync(join(tmpdir(), 'pullboard-decline-stable-chrome-'));
+  let chrome;
+  /** One key press, as the keyboard sends it to the focused list. */
+  const pressKey = async (key, code, keyCode) => {
+    for (const type of ['keyDown', 'keyUp']) await chrome.send('Input.dispatchKeyEvent', { type, key, code, windowsVirtualKeyCode: keyCode, ...(type === 'keyDown' && key.length === 1 ? { text: key, unmodifiedText: key } : {}) });
+  };
+  /** The page's scroll and the decline dialog's submit button's box, read in one step. */
+  const measure = async () => JSON.parse(await chrome.stable(`JSON.stringify((() => {
+    const r = document.querySelector('#spec-decline-submit').getBoundingClientRect();
+    return { y: scrollY, box: [r.x, r.y, r.width, r.height] };
+  })())`));
+  try {
+    chrome = await openSnapshotChrome(executable, view.link.href, profile);
+    await chrome.send('Emulation.setDeviceMetricsOverride', { width: 375, height: 900, deviceScaleFactor: 1, mobile: false });
+    await chrome.waitFor('innerWidth === 375');
+    await chrome.waitFor('data?.project?.spec?.length === 24');
+    await chrome.click("document.querySelector('[data-tab=spec]')");
+    await chrome.click("document.querySelector('#spec-chips [data-rows=\"spec:all\"]')");
+    await chrome.waitFor("!!document.querySelector('#spec-list [data-row=\"spec:G2\"]')");
+    // Approving G1 from the list leaves a note in the list for six seconds; the decline for the next row opens inside that window.
+    await chrome.click("document.querySelector('#spec-list [data-row=\"spec:G1\"]')");
+    await chrome.stable("document.querySelector('#spec-list').focus();true");
+    await pressKey('a', 'KeyA', 65);
+    await chrome.waitFor("!!document.querySelector('#spec-list .spec-feedback.ok')");
+    await chrome.stable('window.scrollTo(0, document.documentElement.scrollHeight);true');
+    await pressKey('d', 'KeyD', 68);
+    await chrome.waitFor("!document.querySelector('#spec-decline-dialog').hidden && document.querySelector('#spec-decline-title').textContent === 'Decline G2'");
+    assert.equal(await chrome.stable("!!document.querySelector('#spec-list .spec-feedback.ok')"), true, 'the approval note is still in the list when the dialog opens');
+    await chrome.send('Input.insertText', { text: 'a reason' });
+    const opened = await measure();
+
+    // The note's six-second timer fires while the dialog is open. Its own state clears; the page must not redraw.
+    await new Promise((resolve) => setTimeout(resolve, 7000)); // budget: the note's six-second timer, plus a second of slack
+    assert.equal(await chrome.stable('view.specFeedback === null'), true, 'the approval note timed out while the dialog was open');
+    assert.deepEqual(await measure(), opened, 'nothing moves while the dialog waits for its press');
+
+    // The press itself: record the page and the button at pointer down, then press with the real mouse.
+    await chrome.stable("window.__pressAt = null; document.addEventListener('pointerdown', (event) => { if (event.target.closest('#spec-decline-submit')) window.__pressAt = JSON.stringify({ y: scrollY, box: (() => { const r = document.querySelector('#spec-decline-submit').getBoundingClientRect(); return [r.x, r.y, r.width, r.height]; })() }); }, { capture: true });true");
+    await press(chrome, "document.querySelector('#spec-decline-submit')");
+    const pressed = JSON.parse(await chrome.stable('window.__pressAt'));
+    assert.deepEqual(pressed, opened, 'the page and the submit button are where the person aimed when the press lands');
+    assert.deepEqual(chrome.exceptions, []);
+  } finally { if (chrome) await closeSnapshotChrome(chrome); rmSync(profile, { recursive: true, force: true }); await view.stop(); }
+});
