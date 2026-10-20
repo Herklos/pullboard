@@ -222,6 +222,12 @@ The causes, each with its owner:
 | `DECISION_UNANSWERED` | a decision to the coordinator or the person is unanswered past `health.stuck` | the coordinator or the person |
 | `REQUEST_UNANSWERED` | a person's request is not done or declined past `health.stuck` | the coordinator |
 | `RELEASE_OVERDUE` | landed work waits and the newest version tag is older than `health.release` | the coordinator |
+| `ROUTE_UNSERVED` | open current work on a route that no active agent can take; `detail.items` names them | the coordinator, who starts an agent on the route |
+| `ITEM_UNTAKEABLE` | an open item that no active agent in its lane can take on its route | the coordinator |
+| `IDLE_AGENT` | an agent with no claim, review or event for 30 minutes while open work in its lane is one it could take | the agent itself |
+| `RANK_INVERSION` | a claim whose holder could take an earlier-ranked item that sits free; `detail.ahead` names it | the holder |
+
+An agent is active while it holds a claim or review, has submitted work still awaiting review, or had an event or shout in the last 30 minutes. Queue faults read the queue's own order, so `pullboard queue` and health agree.
 
 The current release is the roadmap's first milestone with unverified local work; an unplanned item counts as current. A release is the newest tag named like `v1.2.3` or `1.2.3`, dated by its creation, and its landed work is every item first recorded merged after it. A repository with no such tag has no release deadline. The trunk is the primary checkout's branch, or the retained trunk when that checkout is detached.
 
