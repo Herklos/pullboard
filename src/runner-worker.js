@@ -653,8 +653,11 @@ function createDescendantTracker(directory) {
     catch (error) {
       if (error.code === 'ESRCH') return false;
       // macOS answers EPERM for a group whose members exited but are not yet reaped. Throwing here escaped cleanup and
-      // skipped the lease release (#888); retry on a fresh census instead, as for any other ambiguity.
-      if (error.code === 'EPERM') return null;
+      // skipped the lease release (#888, and the load flake in #850); retry on a fresh census instead, and say so.
+      if (error.code === 'EPERM') {
+        process.stderr.write(`runner: signal to process group ${pgid} answered EPERM; its members have exited, so the next census decides\n`);
+        return null;
+      }
       throw error;
     }
     return true;
