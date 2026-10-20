@@ -22,8 +22,9 @@ export function boardNotWritable(file, error, environment = process.env) {
   const folder = dirname(file);
   // Codex's workspace-write sandbox keeps .git read-only; its own flag grants the one folder (#913).
   if (CODEX_MARKERS.some((name) => Boolean(environment[name]))) {
+    // A named permission profile ignores the legacy writable_roots key, so each settings form gets its own step.
     return new Refused('BOARD_NOT_WRITABLE', `Cannot write the board in "${folder}": Codex's workspace-write sandbox keeps .git read-only.`,
-      `restart Codex with that folder writable: codex --add-dir '${folder.replaceAll("'", "'\\''")}' (or add it to writable_roots under [sandbox_workspace_write] in ~/.codex/config.toml), then run the command again`);
+      `restart Codex with that folder writable: codex --add-dir '${folder.replaceAll("'", "'\\''")}'; to keep it in ~/.codex/config.toml, a permission profile takes ${JSON.stringify(folder)} = "write" in its [permissions.<active-profile>.filesystem] table, and only settings without a profile use writable_roots under [sandbox_workspace_write]; then run the command again`);
   }
   return new Refused('BOARD_NOT_WRITABLE',
     `Cannot write the board in "${folder}". Give the agent write access to that folder, the repo's .git/pullboard, or run the command outside the sandbox.`);

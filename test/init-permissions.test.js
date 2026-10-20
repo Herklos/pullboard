@@ -162,6 +162,8 @@ test('init grants the agent the permissions the Pullboard loop needs [I1,I2]', t
   assert.ok(initialized.document.notes.some(note => /https:\/\/learn\.chatgpt\.com\/docs\/config-file\/config-reference.*https:\/\/learn\.chatgpt\.com\/docs\/permissions/u.test(note)), 'Codex setup cites the official sandbox and permission-profile references');
   assert.equal(readFileSync(codexConfigPath, 'utf8'), existingCodexConfig, 'init prints Codex configuration guidance without rewriting a project config');
   assert.ok(initialized.document.notes.some(note => /permission-profile users.*existing \[permissions\.<active-profile>\.filesystem\].*do not mix/iu.test(note)), 'Codex setup explains the permission-profile alternative without mixing config systems');
+  const profileBoard = `${JSON.stringify(machineHomePath)} = "write" and ${JSON.stringify(join(box.root, '.git', 'pullboard'))} = "write" under their existing [permissions.<active-profile>.filesystem] table instead, since a named profile ignores writable_roots`;
+  assert.ok(initialized.document.notes.some(note => note.includes(profileBoard)), 'the permission-profile step grants the board folder too (#913)');
 
   const settingsBytes = readFileSync(settingsPath, 'utf8');
   const codexBytes = readFileSync(codexPath, 'utf8');

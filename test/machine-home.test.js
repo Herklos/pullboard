@@ -129,6 +129,8 @@ test('a Codex agent that cannot write the board is told the Codex step that gran
   assert.equal(p.run(p.repo, 'resume').code, 0, 'the board opens before it is locked');
   // init's agent guidance names the step before the first refusal.
   assert.match(readFileSync(join(p.repo, 'AGENTS.md'), 'utf8'), /\*\*Codex\.\*\* .*codex --add-dir "\$\(git rev-parse --path-format=absolute --git-common-dir\)\/pullboard"/u);
+  // A named permission profile ignores writable_roots, so the guidance gives each settings form its own step (#913).
+  assert.match(readFileSync(join(p.repo, 'AGENTS.md'), 'utf8'), /a permission profile takes `"<that folder>" = "write"` in its `\[permissions\.<profile>\.filesystem\]` table; only settings without a profile use `writable_roots`/u);
   lockBoard(folder);
   try {
     const codex = runFixtureChild(process.execPath, [join(import.meta.dirname, '..', 'bin', 'pullboard.js'), 'resume', '--json'],
@@ -137,6 +139,6 @@ test('a Codex agent that cannot write the board is told the Codex step that gran
     const { error } = JSON.parse(codex.stdout);
     assert.equal(error.code, 'BOARD_NOT_WRITABLE');
     assert.match(error.message, /Codex's workspace-write sandbox keeps \.git read-only/u);
-    assert.equal(error.next, `restart Codex with that folder writable: codex --add-dir '${folder}' (or add it to writable_roots under [sandbox_workspace_write] in ~/.codex/config.toml), then run the command again`);
+    assert.equal(error.next, `restart Codex with that folder writable: codex --add-dir '${folder}'; to keep it in ~/.codex/config.toml, a permission profile takes ${JSON.stringify(folder)} = "write" in its [permissions.<active-profile>.filesystem] table, and only settings without a profile use writable_roots under [sandbox_workspace_write]; then run the command again`);
   } finally { unlockBoard(folder); }
 });
