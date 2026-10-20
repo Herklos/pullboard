@@ -190,7 +190,7 @@ export function cockpitPage(key = '', { snapshot = false, readOnly = false, requ
     </aside>
   </section>
   <section data-pane="spec" class="two">
-    <div class="primary"><div class="card-panel rows-card"><div class="rows-filter"><div class="seg" id="spec-chips" role="group" aria-label="Show"></div></div><div class="rows" id="spec-list" tabindex="0" aria-label="Spec rows"></div></div></div>
+    <div class="primary"><div class="card-panel rows-card"><div id="spec-fit" class="fit"></div><div class="rows-filter"><div class="seg" id="spec-chips" role="group" aria-label="Show"></div></div><div class="rows" id="spec-list" tabindex="0" aria-label="Spec rows"></div></div></div>
     <aside class="card-panel detail" aria-label="Spec row"><div id="spec-detail"></div></aside>
   </section>
   <section data-pane="doctrine" class="two">
@@ -2812,6 +2812,7 @@ function render() {
   const held = new Map(p.holds.map((h) => [h.hold_lane, h]));
   $('lanes').innerHTML = working.map((l) => '<div class="lane"><span><b>' + esc(l) + '</b> ' + (held.has(l) ? '<span class="chip no" title="held by ' + esc(agentName(held.get(l).hold_by)) + '">held by ' + esc(agentName(held.get(l).hold_by)) + '</span> <span class="muted">' + linked(held.get(l).hold_reason, titles) + '</span>' : '<span class="chip ok">open</span>') + '</span>' + (held.has(l) ? '<button class="ghost" data-release="' + esc(l) + '" type="button">Release</button>' : '') + '</div>').join('');
 
+  $('spec-fit').innerHTML = (p.fit || []).length ? '<h3>Blueprint fit: ' + p.fit.length + ' unverified ' + (p.fit.length === 1 ? 'proposal' : 'proposals') + ' waiting for you</h3>' + p.fit.map(fitRow).join('') : '';
   for (const kind of ['spec', 'doctrine']) {
     const rows = kind === 'spec' ? p.spec : p.practice;
     const filter = view.rows[kind];
@@ -2889,7 +2890,6 @@ function showFlow(shown) {
   $('flow-show').hidden = shown;
   if (shown && data && data.project) $('flow').innerHTML = flowSvg(data.project);
 }
-
 function showTab() {
   document.querySelectorAll('[data-pane]').forEach((pane) => { pane.hidden = pane.dataset.pane !== view.tab; });
   document.querySelectorAll('.tab').forEach((button) => button.classList.toggle('on', button.dataset.tab === view.tab));
@@ -3328,6 +3328,11 @@ function moveMessage(move, result) {
   return move.args.off ? 'released the ' + move.args.lane + ' lane' : 'holding the ' + move.args.lane + ' lane: ' + move.args.reason;
 }
 
+/** One blueprint fit proposal: its decision, its new text or reason, and where it came from. */
+function fitRow(f) {
+  return '<div class="fit-row" data-fit="' + esc(f.target) + '"><div class="meta"><b>' + esc(f.target) + '</b><span class="chip">' + esc(f.decision) + '</span><span class="chip">unverified draft, recorded as ' + esc(f.recordedAs) + '</span></div>' + (f.text ? '<div>' + esc(f.text) + '</div>' : '') + (f.reason ? '<div>Reason: ' + esc(f.reason) + '</div>' : '') + '<div class="muted">Blueprint source: ' + esc(f.blueprint.name + ' v' + f.blueprint.version + ' ' + (f.kind === 'item' ? 'starter' : f.kind) + ' ' + f.key + ': ' + f.source) + '</div></div>';
+}
+
 /** Render escaped decision feedback beside the affected Spec row (B26, N26). */
 function specFeedback(feedback) {
   return '<div class="spec-feedback ' + feedback.tone + '" role="status">' + esc(feedback.text) + '</div>';
@@ -3546,7 +3551,6 @@ function foldShouts() {
     card.classList.toggle('clamp', card.classList.contains('open') || text.scrollHeight > text.clientHeight + 1);
   });
 }
-
 function tickAges() {
   document.querySelectorAll('[data-ago]').forEach((node) => { node.textContent = node.classList.contains('long') ? agoLong(node.dataset.ago) : ago(node.dataset.ago); });
   tickDays();
@@ -3568,13 +3572,11 @@ function tickDays() {
   if (first && !first.previousElementSibling?.classList?.contains('day-rule')) first.insertAdjacentHTML('beforebegin', '<div class="day-rule" role="separator"><span>' + names.Today + '</span></div>');
   daysNamedAt = now;
 }
-
 /** Open or close the project list where the sidebar is folded into a top bar (under 900px). */
 function fold(open) {
   $('side').classList.toggle('open', open);
   $('proj-switch').setAttribute('aria-expanded', String(open));
 }
-
 /** Show another project and its item; history restores keep the tab their entry named. */
 function switchTo(root, target = null, record = true) {
   // Switching board or project closes Approve all's confirmation and the decline dialog; neither records on either board.
@@ -3600,7 +3602,6 @@ function switchTo(root, target = null, record = true) {
     if (generation === switchGeneration && requestedItem !== null && view.item === requestedItem && view.root === root && view.tab === 'items') reveal();
   });
 }
-
 // The Shouts tab's own controls: a folded shout's more and less, every agent or only those at work, the agents
 // panel hidden or shown, and an agent's name, which filters the feed to its shouts and addresses the composer to it.
 $('shouts-pane').addEventListener('click', (event) => {
@@ -3944,7 +3945,6 @@ async function openApprovedBoard(boardId) {
   keep('pb.tab', view.tab);
   return switchTo(board.root);
 }
-
 /** Load the configured decrypting transport once, only when relay reads or pairing need it. */
 let transportLoading = null;
 async function loadTransport() {
@@ -3965,7 +3965,6 @@ async function loadTransport() {
   catch (error) { transportLoadError = error; pageStartup(document.documentElement).say(error.message + ' Check your connection, then reload this page.'); throw error; }
   finally { transportLoading = null; }
 }
-
 /** Read local boards first; relay-only pages and pairing still load their configured client directly. */
 async function startPage() {
   let local = 'unreachable';
