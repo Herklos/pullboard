@@ -1107,7 +1107,7 @@ test('list rows hold their shape: one-line titles end in an ellipsis, every row 
     const config = JSON.parse(readFileSync(configPath, 'utf8'));
     config.agents = { names: 'prefix' };
     writeFileSync(configPath, JSON.stringify(config, null, 2));
-    box.run(demo.web, 'join', 'web', '--model', 'claude-opus-designer-on-the-studio');
+    box.run(demo.web, 'join', 'web', '--model', 'claude-opus-designer-on-a-long-review-model-name');
     await chrome.stable('refresh()');
     for (const width of [375, 1280]) {
       await chrome.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
