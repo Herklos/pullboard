@@ -1,12 +1,12 @@
 /** Device-only relay transport: cookie authorization, local keys and authenticated ciphertext [H5,H15,H16,H17]. */
-import { rememberDevicePairing, enrollPhone, deviceBoardKeys, installPhoneApprovals, forgetDevice } from './browser-devices.js';
+import { rememberDevicePairing, enrollPhone, deviceBoardKeyState, installPhoneApprovals, forgetDevice } from './browser-devices.js';
 import { decodeBoardKey, encodeBoardKey, seal, unseal } from './seal.js';
 import { preparePersonRequest, validatePersonRequest } from './person-request.js';
 import { snapshotState, presentationState } from './model.js';
 import { ENGINE_VERSION } from './engine.js';
 import { Refused } from './refused.js';
 import { enqueueStream, followStream } from './browser-stream.js';
-import { homeLineDismissed, homeScreenLine, noticeLines, nothingShared, rememberOwnedRequestId, showRelayScreen, storedOwnedRequestState } from './browser-notice.js';
+import { emptyBoardStep, homeLineDismissed, homeScreenLine, noticeLines, rememberOwnedRequestId, showRelayScreen, storedOwnedRequestState } from './browser-notice.js';
 import { registerApp, requestPairingPersistence } from './install.js';
 import { browserJSON, withBrowserDeadline } from './browser-deadline.js';
 import { phoneApprovalStatus, placePhoneApprovals } from './browser-approval-card.js';
@@ -102,6 +102,8 @@ export async function createTransport({ onUpdate = () => {}, onOpenBoard = () =>
   const keys = savedKeys && typeof savedKeys === 'object' && !Array.isArray(savedKeys) ? savedKeys : {};
   const paired = new Map();
   let available = [];
+  let inventoryLoaded = false;
+  let browserPaired = false;
   let waitingBoards = new Map();
   const approvedBoards = new Set();
   let warnings = [];
@@ -181,8 +183,9 @@ export async function createTransport({ onUpdate = () => {}, onOpenBoard = () =>
     // A phone has no local-view screen to fall back to: keep its shell and the real reason until a board is readable.
     const root = document.documentElement;
     const phoneWaiting = root.dataset.relayDevice === 'phone' && (!rendered || paired.size === 0);
-    showRelayScreen(root, phoneWaiting || nothingShared({ paired, waitingBoards, failure }) ? 'share' : null,
-      phoneWaiting && (failure || waitingBoards.size) ? lines.join(' ') : '');
+    const step = emptyBoardStep({ available, waitingBoards, approvedBoards, loaded: inventoryLoaded, browserPaired, failure });
+    showRelayScreen(root, phoneWaiting || paired.size === 0 ? 'share' : null,
+      phoneWaiting && (failure || waitingBoards.size) ? lines.join(' ') : '', step);
     placePhoneApprovals(document);
   }
 
@@ -398,10 +401,15 @@ export async function createTransport({ onUpdate = () => {}, onOpenBoard = () =>
   async function listing() {
     const document = await documentAt('/api/v1/boards', denied);
     if (accessLost) throw accessError;
-    const receivedKeys = await deviceBoardKeys((path, options) => documentAt(path, denied, options));
+    const device = await deviceBoardKeyState((path, options) => documentAt(path, denied, options));
     if (accessLost) throw accessError;
-    Object.assign(keys, stored(localStorage, KEYS, {}), receivedKeys);
+    Object.assign(keys, stored(localStorage, KEYS, {}), device.keys);
+    browserPaired = device.paired || Boolean(pair) || Object.values(keys).some(value => {
+      try { decodeBoardKey(value); return true; } catch { return false; }
+    });
+    if (device.failure) { failure = device.failure; failureBoard = null; }
     available = document.boards.filter(board => BOARD.test(board.id) && typeof board.repository === 'string');
+    inventoryLoaded = true;
     waitingBoards = new Map();
     warnings = document.warnings ?? [];
     const visible = new Set(available.map(board => board.id));
@@ -584,8 +592,7 @@ export async function createTransport({ onUpdate = () => {}, onOpenBoard = () =>
   // A pairing link opened in another tab, as a scanned QR does, saves its key here: this page fills in by itself.
   addEventListener('storage', event => { if (event.key === KEYS && !accessLost) listing().then(onUpdate, notice); });
   addEventListener('pagehide', () => { for (const entry of paired.values()) entry.stream?.close(); });
-  // Signed in with no board key saved and no pairing on its way, the one-command screen shows at once, while the
-  // first listing is still on the network; the listing then fills the board in, or keeps this screen.
+  // Keep the first screen while inventory is unknown; a pending read is not evidence that nothing is linked.
   let devicePairing = /(?:^#|&)device=/u.test(location.hash);
   try { devicePairing ||= sessionStorage.getItem('pullboard.relay.device-pair.v1') !== null; } catch { /* No storage: no saved pairing. */ }
   if (!pair && !devicePairing && !Object.keys(keys).length) showRelayScreen(document.documentElement, 'share');
