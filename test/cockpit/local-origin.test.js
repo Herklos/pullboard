@@ -2,9 +2,9 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createServer, request } from 'node:http';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { test } from 'node:test';
 import { cockpitPage } from '../../src/cockpit.js';
 import { VERSION } from '../../src/help.js';
@@ -338,11 +338,27 @@ test('a pullboard.dev page reads the local board [N26,A2]', { timeout: 120_000 }
   }
 });
 
-test('the hosted page says how far behind this machine\'s Pullboard is [N26,A2]', { timeout: 120_000 }, async (t) => {
+/**
+ * Register a project under a symlink to its real path, as a machine whose path runs through one does (#937). The
+ * registry keeps the spelling it was given, while git reports the real path, so the page sees two spellings.
+ */
+function registeredUnderSymlink(box, repo) {
+  const link = join(box.dir, `linked-${basename(repo)}`);
+  symlinkSync(repo, link);
+  const file = join(box.dir, 'home', 'projects.json');
+  const registry = JSON.parse(readFileSync(file, 'utf8'));
+  registry.projects = registry.projects.map((project) => (project.root === repo ? { ...project, root: link } : project));
+  writeFileSync(file, JSON.stringify(registry));
+  return link;
+}
+
+/** The hosted page says how far behind this machine's Pullboard is, for a project at its real or symlinked path (#937). */
+async function howFarBehind(t, { linked }) {
   const executable = chromeExecutable();
   assert.ok(executable, 'the hosted version notice needs real Chrome');
   const box = machine();
   const board = project(box, 'hosted-release');
+  if (linked) registeredUnderSymlink(box, board.repo);
   box.run(board.repo, 'add', 'web', 'A board on an older Pullboard release', '--specs', 'G1');
   const profile = mkdtempSync(join(tmpdir(), 'pullboard-release-lag-'));
   let view, chrome, stopStandIn;
@@ -464,7 +480,14 @@ export async function createTransport() { return { async request(path) {
       await open(VERSION, true);
       await chrome.waitFor("Boolean(transport) && [...boardSources.values()].map((source) => source.kind).sort().join() === 'local,relay' && document.querySelectorAll('#proj-list .proj.repo').length === 2", 25_000); // budget: hang ceiling for the relay module and its board list after the local read; no throughput claim.
       const roots = JSON.parse(await chrome.stable("JSON.stringify(Object.fromEntries([...boardSources.values()].map((source) => [source.kind, source.board.root])))"));
-      const selected = (root) => chrome.waitFor(`data?.project?.root === ${JSON.stringify(root)} && document.querySelector('#chain')?.textContent.length > 0`, 25_000); // budget: hang ceiling for one board switch and its state read; no throughput claim.
+      // A failed wait names the root the page reported next to the one it expected, so a spelling mismatch shows (#937).
+      const selected = async (root) => {
+        try { await chrome.waitFor(`data?.project?.root === ${JSON.stringify(root)} && document.querySelector('#chain')?.textContent.length > 0`, 25_000); } // budget: hang ceiling for one board switch and its state read; no throughput claim.
+        catch (error) {
+          const reported = await chrome.stable('JSON.stringify(data?.project?.root ?? null)').catch(() => 'unreadable');
+          throw new Error(`${error.message}; the page reported ${reported}, expected ${JSON.stringify(root)}`);
+        }
+      };
       const mixedNote = `Pullboard 0.8.20 is installed; ${VERSION} is current, ${releasesBehind} ${releasesBehind === 1 ? 'release' : 'releases'} behind. Update with`;
       await chrome.stable(`(switchTo(${JSON.stringify(roots.local)}), true)`);
       await selected(roots.local);
@@ -495,7 +518,10 @@ export async function createTransport() { return { async request(path) {
       }
     }
   }
-});
+}
+
+test('the hosted page says how far behind this machine\'s Pullboard is [N26,A2]', { timeout: 120_000 }, (t) => howFarBehind(t, { linked: false }));
+test('the hosted page shows how far behind a project under a symlinked path is [N26,A2]', { timeout: 120_000 }, (t) => howFarBehind(t, { linked: true }));
 
 test('the hosted relay never treats a remote board version as this machine\'s version [N26,A2]', { timeout: 120_000 }, async (t) => {
   const executable = chromeExecutable();
