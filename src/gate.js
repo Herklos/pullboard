@@ -69,6 +69,11 @@ import {
   timingRunner,
 } from './timing.js';
 import { landingShardProfile } from './landing-shards.js';
+import { receiptLine } from './gate-receipt.js';
+import { receiptOf } from './gate-receipt.js';
+import { recordReceipt } from './gate-receipt.js';
+import { slotOf } from './gate-receipt.js';
+import { startReceipt } from './gate-receipt.js';
 import {
   gateStages,
   stagedScript,
@@ -307,19 +312,21 @@ export function runProfiledShell(root, command, { waitMs = 0, artifactDirectory,
     [LANDING_WAIVERS_ENV]: landing ? JSON.stringify(waivers) : '[]',
   };
   // The registered worker returns the same complete stage/component accounting as a local run.
+  gateLease?.tracker?.mark('runAt');
   const run = gateLease?.runner ? { ...runOnRunner(root, command, { runner: gateLease.runner, source: gateLease.source,
     browser: gateLease.browser, pipefail, stages, waivers: landing ? waivers : [], metadata: { ...(gateLease.runMetadata ?? {}), landing } }) }
     : runShell(root, command, { pipefail, env: inherited, stages });
+  gateLease?.tracker?.mark('ranAt');
   const sandboxBlocked = run.isGreen ? null : run.sandboxBlocked ?? (run.executionRunner
     // The controller cannot realpath remote files; retain the network denial signal without treating remote paths as local paths.
     ? sandboxBlockedOperation(root, run.output, { includeFilePaths: false })
     : sandboxBlockedOperation(root, run.output));
   const profiledRun = { ...run, sandboxBlocked };
+  if (logPath) writeFileSync(logPath, safeLog(run.output), { mode: 0o600 });
   const profile = writeTimingProfile(profilePath, {
     ...runTiming(profiledRun, command),
-    waitMs: Math.max(0, Math.round(waitMs)), wallMs: Math.max(0, Date.now() - started),
+    waitMs: Math.max(0, Math.round(waitMs)), wallMs: Math.max(0, Date.now() - started), receipt: settleReceipt(gateLease),
   });
-  if (logPath) writeFileSync(logPath, safeLog(run.output), { mode: 0o600 });
   return { ...profiledRun, profile, profilePath, logPath };
 }
 
@@ -331,14 +338,16 @@ export function runProfiledShell(root, command, { waitMs = 0, artifactDirectory,
  */
 export async function runProfiledShellAsync(root, command, { waitMs = 0, gateSlotHeld = false, gateLease, landing = false } = {}) {
   const started = Date.now();
+  gateLease?.tracker?.mark('runAt');
   if (gateLease?.runner) {
     const run = await runOnRunnerAsync(root, command, { runner: gateLease.runner, source: gateLease.source,
       browser: gateLease.browser, metadata: { ...(gateLease.runMetadata ?? {}), landing } });
+    gateLease.tracker?.mark('ranAt');
     const wallMs = Math.max(0, Date.now() - started);
     const profilePath = join(dirname(gitPath(root, LOG)), `pullboard-gate-${randomUUID()}.profile.json`);
     const sandboxBlocked = run.isGreen ? null : run.sandboxBlocked
       ?? sandboxBlockedOperation(root, run.output, { includeFilePaths: false });
-    const profile = writeTimingProfile(profilePath, { ...runTiming(run, command), waitMs, wallMs });
+    const profile = writeTimingProfile(profilePath, { ...runTiming(run, command), waitMs, wallMs, receipt: settleReceipt(gateLease) });
     return { ...run, sandboxBlocked, seconds: Math.round(wallMs / 1000), profile, profilePath, logPath: null };
   }
   const inherited = {
@@ -361,14 +370,22 @@ export async function runProfiledShellAsync(root, command, { waitMs = 0, gateSlo
   child.stderr.setEncoding('utf8').on('data', capture);
   child.once('error', error => { failure = error; });
   const status = await new Promise(resolveClose => child.once('close', resolveClose));
+  gateLease?.tracker?.mark('ranAt');
   invalidateGitFacts();
   const output = chunks.join('') + (overflow ? '\nFocused comparison output exceeded one GiB.\n' : '')
     + (failure ? `\n${failure.message}\n` : '');
   const wallMs = Math.max(0, Date.now() - started);
   const profilePath = join(dirname(gitPath(root, LOG)), `pullboard-gate-${randomUUID()}.profile.json`);
   const profile = writeTimingProfile(profilePath, { ...timingFromOutput(output, timingRunner(command)),
-    waitMs: Math.max(0, Math.round(waitMs)), wallMs });
+    waitMs: Math.max(0, Math.round(waitMs)), wallMs, receipt: settleReceipt(gateLease) });
   return { isGreen: status === 0 && !overflow && !failure, sandboxBlocked: status === 0 ? null : sandboxBlockedOperation(root, output), output, seconds: Math.round(wallMs / 1000), profile, profilePath, logPath: null };
+}
+
+/** Close a gated run's receipt (#836) as its evidence is written; the slot's release records this same receipt. */
+function settleReceipt(lease) {
+  if (!lease?.tracker) return undefined;
+  lease.receipt = receiptOf(lease.tracker, { kind: lease.receiptKind, slot: lease.slot });
+  return lease.receipt;
 }
 
 /** Keep raw remote TAP intact while resolving its measured filenames against the local source. */
@@ -425,6 +442,7 @@ export function writeTimingProfile(path, profile) {
     format: sanitize(profile.format ?? 'none', 'format'),
     unavailable: sanitize(profile.unavailable ?? null, 'availability'),
     ...(profile.executionRunner ? { executionRunner: sanitize(profile.executionRunner, 'execution runner') } : {}),
+    ...(profile.receipt ? { receipt: { ...profile.receipt, slot: { kind: sanitize(profile.receipt.slot?.kind, 'slot kind'), reason: sanitize(profile.receipt.slot?.reason, 'slot reason') } } } : {}),
     ...(profile.landingShards ? { landingShards: {
       balance: sanitize(String(profile.landingShards.balance ?? 'unknown'), 'landing balance'),
       unverified: (profile.landingShards.unverified ?? []).map(entry => ({ shard: sanitize(String(entry.shard), 'landing unverified shard'),
@@ -473,14 +491,24 @@ function hasPipeline(command) {
  * hold (gate.memoryFloorMB) holds short slots too, since a short run uses the same machine memory.
  *
  * @param {(lease: { waitMs: number, token?: string, pool?: string, browser?: boolean, slotClass?: 'gate'|'short', release: () => void }) => any | Promise<any>} action - Work to perform while holding a slot.
- * @param {{ landing?: boolean, itemCheck?: boolean, shortEligible?: boolean, diagnostic?: boolean, browser?: boolean, remote?: boolean, agent?: string, item?: string|number, kind?: string, onWait?: (state: object) => void, readMemory?: typeof readMachineMemory }} [options] - Queue class, short-slot eligibility, remote eligibility, progress reporter and, for tests, the machine memory reader.
+ * @param {{ landing?: boolean, itemCheck?: boolean, shortEligible?: boolean, diagnostic?: boolean, browser?: boolean, remote?: boolean, agent?: string, item?: string|number, kind?: string, onWait?: (state: object) => void, onReceipt?: (receipt: object) => void, readMemory?: typeof readMachineMemory }} [options] - Queue class, short-slot eligibility, remote eligibility, progress reporter, the run's receipt once its slot is released (#836) and, for tests, the machine memory reader.
  * @returns {Promise<any>} The action's result after releasing its lease.
  */
-export async function withGateSlot(root, action, { landing = false, itemCheck = false, shortEligible = false, diagnostic = false, browser = false, remote = true, agent, item = '', kind = '', onWait, readMemory = readMachineMemory } = {}) {
+export async function withGateSlot(root, action, { landing = false, itemCheck = false, shortEligible = false, diagnostic = false, browser = false, remote = true, agent, item = '', kind = '', onWait, onReceipt, readMemory = readMachineMemory } = {}) {
+  const tracker = startReceipt();
+  const receiptKind = kind || (landing ? 'landing' : 'gate');
+  /** Hand the run its receipt tracker and slot, then record its receipt once the slot is released (#836). */
+  const timed = lease => Object.assign(lease, { tracker, receiptKind, slot: slotOf(lease, { browserFree: browserFreeChecksEnabled() }) });
+  const record = lease => {
+    const receipt = lease.receipt ?? receiptOf(tracker, { kind: receiptKind, slot: lease.slot });
+    recordReceipt(root, receipt);
+    onReceipt?.(receipt);
+  };
   const inherited = inheritedGateSlot({ root, browser, namedFiles: shortEligible });
   if (inherited) {
+    timed(Object.assign(inherited, { inherited: true })).tracker.mark('actionAt');
     try { return await action(inherited); }
-    finally { inherited.release(); }
+    finally { inherited.release(); record(inherited); }
   }
   const settingsProvider = () => loadMachineSettings();
   const floorMB = memoryFloorMB();
@@ -489,6 +517,7 @@ export async function withGateSlot(root, action, { landing = false, itemCheck = 
   // Read the board once before queueing, never inside the machine admission transaction.
   const releaseContext = gateQueueSettings().currentReleaseFirst
     ? (await import('./release-queue.js')).captureReleaseQueue(root, item) : undefined;
+  tracker.mark('queuedAt');
   let lease = await takeResource({
     name: 'gate',
     capacity: capacityProvider(),
@@ -513,10 +542,12 @@ export async function withGateSlot(root, action, { landing = false, itemCheck = 
     memory: floorMB === null ? undefined : memoryAdmission({ floorBytes: () => (memoryFloorMB() ?? floorMB) * 1024 ** 2, read: readMemory }),
     onWait,
   });
+  tracker.mark('admittedAt');
   try {
     while (true) {
       lease.source = source;
       lease.runMetadata = { landing, itemCheck, diagnostic, item: String(item), kind };
+      timed(lease).tracker.mark('actionAt');
       try { return await action(lease); }
       catch (error) {
         if (!(error instanceof RunnerDropped) || !lease.runner || !lease.requeueRunner) throw error;
@@ -528,6 +559,7 @@ export async function withGateSlot(root, action, { landing = false, itemCheck = 
     }
   } finally {
     lease.release();
+    record(lease);
   }
 }
 
@@ -544,12 +576,16 @@ export async function withGateSlot(root, action, { landing = false, itemCheck = 
  * @param {{ trustStamp?: boolean, onWait?: (state: object) => void, landing?: boolean, agent?: string, item?: string|number }} [options]
  * @returns {Promise<{ isGreen: boolean, isCached: boolean, output: string, seconds: number, log: string, profile?: object, profilePath?: string }>}
  */
-export async function runGate(root, config, { trustStamp = true, onWait, landing = false, agent, item = '', stages = false, waivers = [] } = {}) {
+export async function runGate(root, config, { trustStamp = true, onWait, landing = false, agent, item = '', stages = false, waivers = [], onFailure } = {}) {
   if (!config.gate.trim()) {
     throw missingGate(root);
   }
   if (trustStamp && isStampedGreen(root)) return { isGreen: true, isCached: true, output: '', seconds: 0, log: '' };
-  return await withGateSlot(root, (lease) => fullGateRun(root, config, trustStamp, { waitMs: lease.waitMs, gateLease: lease, landing, stages, waivers }), {
+  return await withGateSlot(root, async (lease) => {
+    const run = fullGateRun(root, config, trustStamp, { waitMs: lease.waitMs, gateLease: lease, landing, stages, waivers });
+    if (!run.isGreen && onFailure) await onFailure(run, { root, command: config.gate, lease });
+    return run;
+  }, {
     landing, browser: true, agent, item, kind: landing ? 'landing' : 'gate', onWait,
   });
 }
@@ -617,7 +653,7 @@ export async function runStaticChecks(root, config, { agent, item = '', onWait, 
  * @param {{base:string|null, trunk?:string, changed?:string[], check:string, agent?:string, item?:string|number, kind?:string, onWait?:(state:object)=>void, onBrowserFallback?:(decision:{file:string,reason:string})=>void}} options
  * @returns {Promise<any>}
  */
-export async function runSubmitGate(root, config, { base, trunk, changed, check, agent, item = '', kind = 'submit', onWait, onBrowserFallback }) {
+export async function runSubmitGate(root, config, { base, trunk, changed, check, agent, item = '', kind = 'submit', onWait, onBrowserFallback, onFailure }) {
   if (!config.gate.trim()) throw missingGate(root);
   await runStaticChecks(root, config, { agent, item, onWait, onBrowserFallback });
   const selection = config.affectedTests
@@ -641,7 +677,7 @@ export async function runSubmitGate(root, config, { base, trunk, changed, check,
     ? (proofFiles.length > 0 && (!allowBrowserFreeChecks || await testsNeedBrowser(root, proofFiles, { onFallback: onBrowserFallback })))
     : (selection.full || !allowBrowserFreeChecks || await testsNeedBrowser(root, proofFiles, { onFallback: onBrowserFallback }));
   const browser = checkUsesBrowser || proofUsesBrowser;
-  return await withGateSlot(root, (lease) => {
+  return await withGateSlot(root, async (lease) => {
     const startedAt = Date.now();
     const log = gitPath(root, 'pullboard-submit.log');
     const checkLog = `${log}.check.log`;
@@ -671,6 +707,7 @@ export async function runSubmitGate(root, config, { base, trunk, changed, check,
     };
     if (!criterion.isGreen) {
       writeFileSync(log, criterion.output);
+      if (onFailure) await onFailure({ ...criterion, log: checkLog }, { root, command: check, lease });
       return finish({ isGreen: false, sandboxBlocked: criterion.sandboxBlocked, isCached: false, output: criterion.output, seconds: 0, log: '' });
     }
     // The proof already owns this lease: its phase profile has no additional queue wait.
@@ -686,6 +723,8 @@ export async function runSubmitGate(root, config, { base, trunk, changed, check,
     }
     const phase = deferFullFallback ? `submit invariants: ${invariants.length ? invariants.join(', ') : 'none'}; full suite deferred to the landing gate` : selection.full ? 'full gate' : 'affected tests';
     writeFileSync(log, `item check:\n${criterion.output}\n${phase}:\n${proof.output}`);
+    if (!proof.isGreen && onFailure) await onFailure(proof, { root,
+      command: !deferFullFallback && selection.full ? config.gate : `${config.affectedTests.trimEnd()} ${proofFiles.map(path => commandWord('./' + path)).join(' ')}`, lease });
     return finish(proof);
   }, { browser, agent, item, kind, itemCheck: true, onWait });
 }
@@ -717,7 +756,8 @@ export function timingDigest(profile) {
   const summary = `timing (${profile.runner ?? 'shell'}${profile.executionRunner ? ` on runner ${profile.executionRunner}` : ''}): wall ${measured(profile.wallMs)}, slot wait ${measured(profile.waitMs)}`;
   const rows = [...(profile.files ?? [])].filter(file => typeof file.path === 'string' && Number.isFinite(file.durationMs) && file.durationMs >= 0).sort((left, right) => right.durationMs - left.durationMs).slice(0, 10);
   const files = rows.length ? `\nslowest test files:\n${rows.map(file => `  ${file.path}: ${(file.durationMs / 1000).toFixed(2)}s`).join('\n')}` : '';
-  return `${summary}${profile.unavailable ? `\n${profile.unavailable}` : ''}${files}`;
+  const receipt = profile.receipt ? `\n${receiptLine(profile.receipt)}` : '';
+  return `${summary}${receipt}${profile.unavailable ? `\n${profile.unavailable}` : ''}${files}`;
 }
 
 /**

@@ -895,13 +895,13 @@ test('starter items land in a build lane, never the coordinator lane [S1,I1]', (
   const configLanes = (box) => JSON.parse(readFileSync(join(box.repo, 'pullboard.json'), 'utf8')).lanes ?? {};
 
   // A fresh init with a blueprint: init proposes the app lane and the starters are filed in it.
-  // The proposal stays unwritten until the person runs the command init prints.
+  // The proposal stays unwritten until the agent runs the command init prints, then tells the person (#914).
   const fresh = emptyRepo();
   const started = fresh.run('init', '--blueprint', 'web-app');
   assert.equal(started.status, 0, started.stdout + started.stderr);
   assert.deepEqual(lanesOf(fresh), Array(PUBLISHED.items.length).fill('app'), 'init files every starter in the lane it proposes');
-  assert.match(started.stdout, /starter items filed in the app lane, proposed above and not written until the person accepts/u, 'init says the lane is a proposal');
-  assert.match(started.stdout, /to accept, run: pullboard lane add app --owns app\//u, 'init prints the command that accepts it');
+  assert.match(started.stdout, /starter items filed in the app lane, proposed above; add it with the command printed there/u, 'init says the lane is a proposal');
+  assert.match(started.stdout, /then tell the person which lanes you made: pullboard lane add app --owns app\//u, 'init prints the command that accepts it');
   assert.deepEqual(Object.keys(configLanes(fresh)).filter((name) => name === 'app'), [], 'the proposed lane is not written');
   const accepted = fresh.run('lane', 'add', 'app', '--owns', 'app/');
   assert.equal(accepted.status, 0, accepted.stdout + accepted.stderr);
@@ -949,8 +949,8 @@ test('starter items land in a build lane, never the coordinator lane [S1,I1]', (
   const again = freshBoard();
   const said = again.run('blueprint', 'add', 'web-app');
   assert.equal(said.status, 0, said.stdout + said.stderr);
-  assert.match(said.stdout, /starter items filed in the app lane, proposed, not written until the person accepts/u, 'blueprint add says the lane is a proposal');
-  assert.match(said.stdout, /to accept, run: pullboard lane add app --owns app\//u, 'blueprint add prints the command that accepts it');
+  assert.match(said.stdout, /starter items filed in the app lane, proposed; add it to start them/u, 'blueprint add says the lane is a proposal');
+  assert.match(said.stdout, /then tell the person which lanes you made: pullboard lane add app --owns app\//u, 'blueprint add prints the command that accepts it');
 });
 
 /** The bundled blueprint of this name, as its file says. */

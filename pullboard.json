@@ -91,5 +91,8 @@
     ],
     "noEmoji": true
   },
-  "staticChecks": "node --experimental-vm-modules --disable-warning=ExperimentalWarning bin/static-style-checks.js"
+  "staticChecks": "node --experimental-vm-modules --disable-warning=ExperimentalWarning bin/static-style-checks.js",
+  "flakes": {
+    "rerun": true
+  }
 }
