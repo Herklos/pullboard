@@ -1,6 +1,5 @@
-/** Cockpit spec checks, using the shared real-board fixtures [N26].
- * @pullboard-test-input source-tree
- */
+/** @pullboard-test-input source-tree */
+/** Cockpit spec checks, using the shared real-board fixtures [N26]. */
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
