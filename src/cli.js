@@ -41,6 +41,7 @@ import { reviewerStartup } from './next-steps.js';
 import * as seatCheckout from './seat-checkout.js';
 import { submitPreflight } from './submit-preflight.js';
 import * as store from './board.js';
+import * as nativeFlakes from './native-flake-cli.js';
 import {
   firstInputLine,
   hookRead,
@@ -2306,6 +2307,7 @@ function refuseUncommittedSetup(mainRoot, config) {
  */
 function readCommands(io, { first, second, rest, values }) {
   return {
+    flakes: () => nativeFlakes.command(context(io), { first, second, rest }, withBoard),
     doctrine: async () => {
       if (first !== 'check' || second || rest.length) throw new Refused('USAGE', 'pullboard doctrine check');
       const ctx = context(io);
@@ -2747,7 +2749,8 @@ async function submitHere(ctx, id) {
     submitInvariants: acceptedMain.config.submitInvariants,
     // The accepted project runner interprets its current invariant files; candidate config cannot replace it.
     ...(acceptedMain.config.submitInvariants.length ? { affectedTests: acceptedMain.config.affectedTests } : {}) };
-  const gate = await runSubmitGate(root, submitConfig, { base: claimHead, trunk: acceptedMain.commit, check: frozenCheck(held), agent: me.id, item: String(id), onWait: queuedItemLease(ctx, held, me.id, 'build'), onBrowserFallback: browserAdmissionReporter(ctx.io, ctx.io.relayJson) });
+  const gate = await runSubmitGate(root, submitConfig, { base: claimHead, trunk: acceptedMain.commit, check: frozenCheck(held), agent: me.id, item: String(id), onWait: queuedItemLease(ctx, held, me.id, 'build'), onBrowserFallback: browserAdmissionReporter(ctx.io, ctx.io.relayJson),
+    onFailure: nativeFlakes.observer(ctx, { kind: 'submit', main: acceptedMain.commit, config: submitConfig }, { ordered, withBoard, resourceAgent }) });
   // Only the person's live waivers can pass a red proof, failure by failure; the item's own check is never waived [B3].
   const waived = !gate.isGreen && gate.check?.green ? withBoard(ctx, (board) => waivedFailures(board, accountedFailures(gate, root))) : null;
   if (!gate.isGreen && !waived) {
@@ -3005,7 +3008,7 @@ async function verifyHere(ctx, id, { second, values }) {
         const browser = !browserFreeChecksEnabled() || await checkNeedsBrowser(root, frozenCheck(item), { commit: checkedCommit, onFallback: browserAdmissionReporter(ctx.io, ctx.io.relayJson) });
         // A private checked composition needs this machine's live local gate markers [C7,V4].
         const shortEligible = Boolean(await explicitCheckFiles(root, frozenCheck(item), { commit: checkedCommit }));
-        check = await withGateSlot(root, (lease) => checkAtCommit(root, checkedItem, { waitMs: lease.waitMs, gateLease: lease }), { browser, remote: false, agent: me.id, item: String(id), kind: 'review', itemCheck: true, shortEligible, onWait: queuedItemLease(ctx, item, me.id, 'review') });
+        check = await withGateSlot(root, nativeFlakes.verify(ctx, checkedItem, frozenCheck(item), { board, main: trunk.commit, commit: checkedCommit }, { ordered, withBoard, resourceAgent }), { browser, remote: false, agent: me.id, item: String(id), kind: 'review', itemCheck: true, shortEligible, onWait: queuedItemLease(ctx, item, me.id, 'review') });
       } else {
         check = checkAtCommit(root, checkedItem);
       }
@@ -3579,7 +3582,7 @@ function workCommands(io, args) {
       await runStaticChecks(ctx.info.root, (item.item_claim_head ? itemPolicy(ctx.info.root, item) : mainPolicy(ctx.info.root)).config, { agent: caller, item: String(item.item_id), onWait: queuedItemLease(ctx, item, caller, 'build'), onBrowserFallback: browserAdmissionReporter(io, values.json) });
       const browser = !browserFreeChecksEnabled() || await checkNeedsBrowser(ctx.info.root, check, { onFallback: browserAdmissionReporter(io, values.json) });
       const shortEligible = Boolean(await explicitCheckFiles(ctx.info.root, check));
-      const run = await withGateSlot(ctx.info.root, (lease) => runProfiledShell(ctx.info.root, check, { waitMs: lease.waitMs, artifactPrefix: `pullboard-check-${item.item_id}`, persistLog: true, gateLease: lease }), { browser, agent: caller, item: String(item.item_id), kind: 'check', itemCheck: true, shortEligible, onWait: queuedItemLease(ctx, item, caller, 'build') });
+      const run = await withGateSlot(ctx.info.root, nativeFlakes.check(ctx, item, check, { ordered, withBoard, resourceAgent }), { browser, agent: caller, item: String(item.item_id), kind: 'check', itemCheck: true, shortEligible, onWait: queuedItemLease(ctx, item, caller, 'build') });
       refuseSandboxBlocked(run);
       io.result?.({ id: item.item_id, green: run.isGreen, seconds: run.seconds, check, by, report: run.isGreen ? '' : digestOf(run.output) });
       const timings = timingDigest(run.profile);
@@ -4470,7 +4473,8 @@ async function runCommand(argv, io) {
         throw error;
       }
       const waivers = values.landing ? withBoard(ctx, (board) => liveWaiverProjection(board)) : [];
-      const gate = await runGate(ctx.info.root, config, { landing: values.landing, agent: resourceAgent(ctx), onWait: gateWaitReporter(io), stages: Boolean(values.landing), waivers });
+      const gate = await runGate(ctx.info.root, config, { landing: values.landing, agent: resourceAgent(ctx), onWait: gateWaitReporter(io), stages: Boolean(values.landing), waivers,
+        onFailure: nativeFlakes.observer(ctx, { kind: values.landing ? 'land' : 'gate', config }, { ordered, withBoard, resourceAgent }) });
       // A landing gate honours the person's live waivers exactly as land does; a red run never stamps, so it stays waived, not green [B3,R3].
       const waived = values.landing && !gate.isGreen ? withBoard(ctx, (board) => waivedFailures(board, accountedFailures(gate, ctx.info.root))) : null;
       if (waived) {

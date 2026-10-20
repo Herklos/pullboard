@@ -152,6 +152,10 @@ Engine 55 (`ROW_DRAFT_ENGINE`) adds `draftSpecRow`: an agent in a lane worktree 
 
 Engine 56 (`BOARD_SENTINEL_ENGINE`) adds board-owned watch proposals, exact person approve/decline decisions, ordered due-run claims and completed run receipts. Approval binds the entire execution definition; changing it creates a pending proposal. Replay records history without executing commands. Every non-cancelled red run records `sentinel:<name>` for Rigor; feed notices only mark failure and recovery transitions. Older engines refuse these operations and this new cause form before replay. Published engine-55 readers reject these moves by their newer engine number before interpreting an operation.
 
+Engine 59 (`NATIVE_FLAKE_ENGINE`) adds `recordFlakeObservation` and typed diagnostic relationships in landing-batch receipts. A registered reporting agent supplies a bounded observation: stable id, relative test file/name (or null when unknown), pinned head/tree/main, gate kind, classification, observation time, machine-load sample, diagnostic duration, command digest, and original/paired/main receipt references. A receipt contains its result, byte count, SHA-256 and optional profile digest; full raw output and profiles stay under the common Git directory's `pullboard/flake-evidence/<id>/`, outside board events. Those local artifacts are not automatically copied to another device by a board snapshot. A duplicate observation id returns the original receipt; different evidence under that id is refused. The original red remains authoritative.
+
+The board's committed `flakes.rerun` setting defaults off. Off retains released execution, including landing's whole-file diagnosis and first legacy `landing_flake`; the new ledger still records the original failure. On permits one exact-target diagnostic for a supported structured Node test at unchanged source, never green-by-retry. Built-in `node --test` is supported; a `bin/run-tests.js` script is recognized only when its committed bytes on candidate and pinned main match the bundled Native runner. Its filename alone does not establish selector support, and a probe that executes other targets remains unclassified. A pinned green main marks a possible regression, not a flake. Unknown selectors, source changes or unsupported remote execution evidence remain unclassified; no local substitute is run for a remote admission. A confirmed second sighting drafts an ordinary strong repair item, not an approved spec or doctrine row. A landed repair reads fixed until another sighting. Enabled landing consumes its captured pair without another legacy diagnosis or first-sighting legacy defect; saved typed relationships prevent remeasurement on adoption. Diagnostic-recording failures are reported while the original red and completed evidence remain retained. Older engines refuse the new operation and typed landing relationships before changing rows or the replay cursor; legacy `landing_flake` meaning and the schema/event-log versions are unchanged.
+
 Engine 60 (`SUBMITTED_CONFLICT_ENGINE`) lets a conflict reopen return a submitted head, not only an accepted one, and lets any joined seat record it. Before it offers a review, `pullboard next --verify` merges every submitted head onto the trunk in memory, as landing does; a head that conflicts goes back to its builder, open and unreviewed, with Git's conflicting files and the trunk commit, and its builder is told which files and that the one step back is to claim it, merge main and submit again. The reopen sets no accept aside and records no verdict; its next review is a whole one. A hand-written `--conflict` on a submission, which names no trunk commit, is still refused. Engines 57 to 59 are allocated to other changes; older engines refuse this move before replay.
 
 The CLI declares its engine in every relay request's `X-Pullboard-Engine` header.
@@ -370,6 +374,8 @@ The `event` table is a SQLite schema object governed by `SCHEMA_VERSION`; its ap
 | `guards` | board | `missing`, `changed`, `stale` |
 | `rigor-notice` | rigor | `cause`, `items`, `occurrences`, `neverAgain`, `engine` |
 | `shout` | sender | `shout`, `to`, `decision`, `request`, `answers` |
+| `flake-observation` | reporting agent | `engine`, `observation` |
+| `flake-repair` | reporting agent | `engine`, `key`, `item` |
 | `health-scan` | observing agent | `active`, `engine` |
 | `health-failure` | sentinel | `key`, `cause`, `since`, `subject`, `owner`, `commit`, `engine` |
 | `health-resolved` | sentinel | `key`, `cause`, `since`, `subject`, `owner`, `commit`, `engine` |
@@ -382,6 +388,8 @@ The `event` table is a SQLite schema object governed by `SCHEMA_VERSION`; its ap
 | `answer` | answerer | `shout`, `to`, `decision`, `request`, `answers`, `outcome`, `channel`, engine-20 `implies`, `supersedes` |
 | `row_decision` | person | `record`, `channel` |
 | `row_draft` | builder | engine-55 `row`, `written` |
+| `flake-observation` | reporting agent | engine-59 `engine`, `observation` |
+| `flake-repair` | reporting agent | engine-59 `engine`, `key`, `item` |
 | `row_apply` | coordinator | `events` |
 <!-- events:end -->
 
