@@ -38,6 +38,10 @@ import { laneOf } from './lanes.js';
 import { Refused } from './refused.js';
 import { landingFileTimes } from './submit-invariants.js';
 import {
+  flakeSource,
+  observeNativeFailure,
+} from './native-flakes.js';
+import {
   staleVerdictRefusal,
   verdictProjector,
 } from './verdict-freshness.js';
@@ -248,7 +252,15 @@ async function gateGroup(state, label) {
   mkdirSync(directory, { recursive: true });
   const logPath = join(directory, `${label}-${state.batch.revision}.log`);
   await save(state, { state: 'gating', tip: headCommit(state.batch.root), logPath });
-  const gate = await runGate(state.batch.root, state.config, { trustStamp: false, landing: true, agent: 'coordinator', onWait: state.onWait, stages: true, waivers: liveWaiverProjection(state.board) });
+  const pin = flakeSource(state.batch.root, { commit, main: state.batch.base });
+  const gate = await runGate(state.batch.root, state.config, { trustStamp: false, landing: true, agent: 'coordinator', onWait: state.onWait, stages: true, waivers: liveWaiverProjection(state.board),
+    onFailure: (run, { root, command, lease }) => observeNativeFailure({ root, config: state.config, pin, run, command, lease, kind: 'land',
+      record: observation => {
+        const owner = observation.file ? laneOf(state.config, observation.file) : 'coordinator';
+        const lane = owner === 'coordinator' ? store.getItem(state.board, state.batch.items[0].id).item_lane : owner;
+        return state.write('recordFlakeObservation', [{ agentId: 'coordinator', observation, lane }]);
+      } }),
+  });
   copyFileSync(gate.log, logPath);
   if (gate.profilePath) copyFileSync(gate.profilePath, `${logPath}.profile.json`);
   if (headCommit(state.batch.root) !== commit || headTree(state.batch.root) !== tree || !isClean(state.batch.root)) {
@@ -262,14 +274,25 @@ async function gateGroup(state, label) {
     submissions: state.batch.items.map(({ id, commit }) => ({ id, commit })),
     failures: [...new Set(landingFailures(gate.output, state.batch.root, { excludeCancelled: true }).map(failure => failure.file).filter(Boolean))],
     fileTimes: landingFileTimes(state.batch.root, gate.profile) };
-  await save(state, { gateResults: [...state.gates.values()].map(({ tree: testedTree, isGreen, failures, accounted, complete, requiresGreen, logPath: log }) =>
-    ({ tree: testedTree, isGreen, failures, accounted: accounted ?? null, complete: complete ?? null, requiresGreen: Boolean(requiresGreen), logPath: log })),
+  await save(state, { gateResults: [...state.gates.values()].map(({ tree: testedTree, isGreen, failures, accounted, complete, requiresGreen, logPath: log, flakeDiagnostics }) =>
+    ({ tree: testedTree, isGreen, failures, accounted: accounted ?? null, complete: complete ?? null, requiresGreen: Boolean(requiresGreen), logPath: log,
+      ...(flakeDiagnostics ? { flakeDiagnostics } : {}) })),
     invariantEvidence: { ...evidence, gates: [...evidence.gates, tested] } });
   return result;
 }
 
 /** Run each failing file once alone, with the same queued machine capacity as other checks. */
-async function diagnose(state, failures) {
+async function diagnose(state, failures, gate) {
+  // The enabled observer already made the only allowed exact-target pair under the original lease.
+  // A saved gate retains that association, so adopting it cannot repeat a confidence measurement.
+  if (state.config.flakes?.rerun === true) {
+    const observations = gate?.flakeDiagnostics?.observations ?? [];
+    if (gate?.flakeDiagnostics?.error || !observations.length || observations.some(row => !row.recorded || row.classification === 'unclassified')) {
+      await save(state, { state: 'blocked', failures, flakeDiagnostics: gate?.flakeDiagnostics });
+      throw new Refused('LAND_DIAGNOSTIC', `the original red has no complete classified diagnostic; no additional run or landing is allowed; inspect ${gate.logPath} and pullboard flakes`);
+    }
+    return [...new Set(observations.filter(row => row.classification === 'flake' && row.file).map(row => row.file))];
+  }
   if (!failures.length || failures.some((entry) => !entry.file)) throw new Refused('LAND_DIAGNOSTIC', `the gate did not name a failing test file; inspect ${state.batch.logPath} and make its reporter name source files`);
   const files = [...new Set(failures.map((entry) => entry.file))];
   const flakes = [];
@@ -441,7 +464,7 @@ async function bisect(state, items, failures, label = 'split') {
     const gate = await gateGroup(state, `${label}-${index}`);
     if (gate.isGreen || waivedProof(state, gate)) green.push(...build.items);
     else {
-      const flakyFiles = await diagnose(state, gate.failures);
+      const flakyFiles = await diagnose(state, gate.failures, gate);
       if (flakyFiles.length) {
         await fileFlakes(state, gate, flakyFiles);
         state.flaky = true;
@@ -467,6 +490,11 @@ async function returnCulprits(state) {
 
 /** File a flake once against its named test and leave the batch stopped. */
 async function fileFlakes(state, gate, files) {
+  if (state.config.flakes?.rerun === true) {
+    await save(state, { state: 'blocked', failures: gate.failures, flakeDiagnostics: gate.flakeDiagnostics });
+    state.say(`flake observed: ${files.join(', ')}; the original gate stays red and nothing lands; inspect pullboard flakes`);
+    return;
+  }
   const flakes = [];
   for (const file of files) {
     const owner = laneOf(state.config, file);
@@ -619,7 +647,7 @@ export async function land({ root, board, config, write, say, owner, maximum = I
       let gate = await gateGroup(state, 'batch');
       let proof = gate.isGreen ? null : waivedProof(state, gate);
       if (!gate.isGreen && !proof) {
-        const flakyFiles = await diagnose(state, gate.failures);
+        const flakyFiles = await diagnose(state, gate.failures, gate);
         if (flakyFiles.length) { await fileFlakes(state, gate, flakyFiles); state.flaky = true; }
         else {
           const green = await bisect(state, build.items, gate.failures);
