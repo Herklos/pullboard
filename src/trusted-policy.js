@@ -211,12 +211,14 @@ export function checkAtCommit(root, item, { waitMs = 0, gateSlotHeld = false, ga
   let installLogPath = '';
   let checkLogPath = '';
   let timingProfile = { files: [], tests: [] };
+  let checkedSourceReady = false;
   /** Format one completed check phase with the private captures and durable artifact locations. */
   const finish = (state, stage) => {
     const runner = timingRunner(command);
     const events = checkLogPath && existsSync(checkLogPath) ? timingFromLog(checkLogPath, runner) : timingFromOutput(checkOutput, runner);
     timingProfile = { ...events, wallMs: Math.max(0, Date.now() - checkStartedAt) };
-    return checkResult(state, stage, installOutput, checkOutput, { root, item, commandRoot: copy, installLogPath, checkLogPath, timingProfile, waitMs });
+    return checkResult(state, stage, installOutput, checkOutput, { root, item, commandRoot: copy, installLogPath, checkLogPath, timingProfile, waitMs,
+      executionSourceUnchanged: checkedSourceReady && privateSourceUnchanged(copy, item.item_commit, env) });
   };
   try {
     const common = policyGit(root, ['rev-parse', '--path-format=absolute', '--git-common-dir']).trim();
@@ -242,6 +244,7 @@ export function checkAtCommit(root, item, { waitMs = 0, gateSlotHeld = false, ga
     }
     const checkout = clone.status === 0 && spawnSync('git', ['checkout', '--quiet', '--detach', item.item_commit], { cwd: copy, env, stdio: 'ignore' });
     if (!checkout || checkout.status !== 0) return finish('unverified', 'clone or checkout could not start');
+    checkedSourceReady = true;
     const deadline = Date.now() + timeout;
     if (install) {
       installLogPath = join(scratch, 'install.log');
@@ -404,8 +407,16 @@ function streamSanitizedLog(path, fallback, label, writeArtifact, onLine = () =>
   return { tail, sawOutput };
 }
 
+/** Capture the private clone before cleanup, so a diagnostic cannot call edited source an unchanged-head measurement. */
+function privateSourceUnchanged(root, commit, env) {
+  const state = spawnSync('git', ['--no-replace-objects', 'status', '--porcelain=v2', '--branch', '--untracked-files=normal'], { cwd: root, env, encoding: 'utf8' });
+  if (state.status !== 0) return false;
+  const lines = state.stdout.split('\n').filter(Boolean);
+  return lines.includes('# branch.oid ' + commit) && lines.every(line => line.startsWith('# '));
+}
+
 /** Persist a sanitized full diagnostic outside the temporary checkout so a refusal can name it. */
-function checkResult(state, stage, installCapture, checkCapture, { root = '', item = {}, commandRoot = root, installLogPath = '', checkLogPath = '', timingProfile = null, waitMs = 0 } = {}) {
+function checkResult(state, stage, installCapture, checkCapture, { root = '', item = {}, commandRoot = root, installLogPath = '', checkLogPath = '', timingProfile = null, waitMs = 0, executionSourceUnchanged } = {}) {
   const boundedInstall = secretScanned(installCapture, 'check install capture');
   const boundedCheck = secretScanned(checkCapture, 'frozen check capture');
   const install = digestOf(boundedInstall) || '(no output)';
@@ -480,5 +491,7 @@ function checkResult(state, stage, installCapture, checkCapture, { root = '', it
   const failure = state === 'red' ? 'failed' : /timed out/u.test(stage) ? 'timed out'
     : /could not start/u.test(stage) ? "couldn't start" : state === 'unverified' ? 'could not be verified' : 'passed';
   const output = `install output:\n${boundedInstall || '(no output)'}\ncheck output:\n${boundedCheck || '(not run or no output)'}`;
-  return { sandboxBlocked, state, green: state === 'pass', checked: true, stage, failure, report, output, outputTail, outputPath, outputError, profilePath, profile: timingProfile ? { ...timingProfile, profilePath } : null };
+  return { sandboxBlocked, state, green: state === 'pass', checked: true, stage, failure, report, output, outputTail, outputPath, outputError, profilePath,
+    executionRoot: commandRoot, ...(executionSourceUnchanged === undefined ? {} : { executionSourceUnchanged }),
+    profile: timingProfile ? { ...timingProfile, profilePath } : null };
 }
