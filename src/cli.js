@@ -41,6 +41,7 @@ import {
   refuseNextIdle,
 } from './next-steps.js';
 import { reviewerStartup } from './next-steps.js';
+import { submitPreflight } from './submit-preflight.js';
 import * as store from './board.js';
 import {
   CONFIG_FILE,
@@ -2740,6 +2741,7 @@ async function submitHere(ctx, id) {
   if (stray.length) throw new Refused('UNTRACKED', `commit or ignore ${stray.length} untracked file(s), e.g. ${stray[0]}`);
   const commit = headCommit(root);
   if (!commit) throw new Refused('NO_COMMIT', 'nothing committed yet');
+  withBoard(ctx, (board) => submitPreflight(board, id, { agentId: me.id, commit, tree: headTree(root) ?? '' }));
   const trunk = requireTrunkMerge(root, commit);
   withBoard(ctx, (board) => refuseUnverifiedStack(root, board, held, commit, trunk));
   // Doctrine counts only fall: accepted main's rules, at this exact commit (D1). No rule, no change.
