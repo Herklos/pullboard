@@ -10,8 +10,67 @@ import { findChromeExecutable, startChrome } from './relay-browser-fixture.js';
 import { relayClientFixture } from './relay-client-fixture.js';
 import { createRelayBrowserHandler } from '../relay/browser-page.js';
 import { runFixtureGit } from './fixture-child.js';
+import { emptyPhoneFixture, emptyPhoneScreen } from './relay-empty-phone-fixture.js';
 
 const chromeOptions = { skip: !findChromeExecutable() && 'Chrome is not installed' };
+
+test('a signed-in phone names its empty-board blocker and one next step [N26,H5,H17]', chromeOptions, async t => {
+  await t.test('no linked board is claimed only after the authorized listing answers', async t => {
+    const box = await emptyPhoneFixture(t, { linked: false, delayed: true });
+    await box.chrome.waitFor("document.readyState === 'complete' && document.documentElement.dataset.relayDevice === 'phone'");
+    const before = await emptyPhoneScreen(box.chrome);
+    box.releaseListing();
+    assert.equal(before.visible, true);
+    assert.equal(before.text.includes('pullboard relay on --all'), false, 'an unanswered inventory cannot prove that nothing is linked');
+    assert.deepEqual(before.commands, [], 'an unknown account offers no command to copy');
+    await box.chrome.waitFor("document.querySelector('#relay-screen')?.innerText.includes('No linked boards')");
+    const shown = await emptyPhoneScreen(box.chrome);
+    assert.ok(shown.commands.includes('pullboard relay on --all'), 'sharing is appropriate only for the confirmed empty account');
+  });
+  await t.test('linked board and unpaired browser', async t => {
+    const box = await emptyPhoneFixture(t);
+    await box.chrome.waitFor("document.querySelector('#relay-notice')?.textContent.includes('fixture/empty-project')");
+    const shown = await emptyPhoneScreen(box.chrome);
+    assert.match(shown.text, /not paired/iu);
+    assert.match(shown.text, /open.*link.*here/iu);
+    assert.ok(shown.commands.includes('pullboard relay pair'));
+    assert.equal(shown.text.includes('pullboard relay on --all'), false);
+  });
+  await t.test('known board key but no first copy', async t => {
+    const box = await emptyPhoneFixture(t, { savedKey: true });
+    await box.chrome.waitFor("document.querySelector('#relay-notice')?.textContent.includes('waiting for its first snapshot')");
+    const shown = await emptyPhoneScreen(box.chrome);
+    assert.match(shown.text, /fixture\/empty-project/u);
+    assert.match(shown.text, /first (?:copy|snapshot)/iu);
+    assert.ok(shown.commands.includes('pullboard relay status'));
+    assert.equal(shown.text.includes('pullboard relay on --all'), false);
+  });
+  await t.test('paired browser has no keys for the linked boards', async t => {
+    const box = await emptyPhoneFixture(t, { enrolled: true });
+    await box.chrome.waitFor("document.querySelector('#relay-notice')?.textContent.includes('fixture/empty-project')");
+    assert.ok(box.calls.some(path => /\/devices\/[^/]+\/boards$/u.test(path)), 'the browser actually authenticated its saved device and fetched its empty grants');
+    const shown = await emptyPhoneScreen(box.chrome);
+    assert.match(shown.text, /linked boards.*none.*read/iu);
+    assert.match(shown.text, /keys/iu);
+    assert.ok(shown.commands.includes('pullboard relay pair'));
+    assert.equal(shown.text.includes('pullboard relay on --all'), false);
+  });
+});
+
+test('a signed-in second computer names a linked board blocker without asking to share again [H5,H17]', chromeOptions, async t => {
+  for (const [name, options, command] of [
+    ['unpaired', {}, 'pullboard relay pair'],
+    ['first copy missing', { savedKey: true }, 'pullboard relay status'],
+    ['paired without grants', { enrolled: true }, 'pullboard relay pair'],
+  ]) await t.test(name, async t => {
+    const box = await emptyPhoneFixture(t, { ...options, phone: false });
+    await box.chrome.waitFor("document.querySelector('#relay-notice')?.textContent.includes('fixture/empty-project')");
+    const shown = await emptyPhoneScreen(box.chrome);
+    assert.equal(shown.visible, true, 'the actual desktop person can read this guidance');
+    assert.ok(shown.commands.includes(command));
+    assert.equal(shown.text.includes('pullboard relay on --all'), false);
+  });
+});
 
 /** Wait for a private native setup transition without repeating its command or weakening an assertion. */
 async function phoneSetupState(read, message) {
@@ -205,7 +264,8 @@ test('a signed-in phone shows its first screen before a local probe can answer [
   })`);
   assert.equal(first.screen, 'share', 'a signed-in phone gets its screen before any asynchronous probe or board read');
   assert.equal(first.visible, true, 'the screen heading is painted, not merely present in hidden markup');
-  assert.match(first.text, /One step on your computer/u);
+  assert.match(first.text, /Checking your linked boards/u);
+  assert.doesNotMatch(first.text, /pullboard relay on --all/u, 'an unanswered inventory offers no sharing command');
 });
 
 test('a phone keeps its screen and the reason while a saved board fails or waits [N26,H5,H17]', chromeOptions, async t => {

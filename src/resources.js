@@ -505,12 +505,16 @@ async function readBiggestProcesses(platform, run, readLink, count = 3) {
     return match ? { pid: Number(match[1]), bytes: Number(match[2]) * 1024, name: basename(match[3].trim()) } : null;
   }).filter(Boolean).sort((left, right) => right.bytes - left.bytes).slice(0, count);
   return Promise.all(listed.map(async (entry) => {
-    let cwd = '';
+    let cwd = '', cwdFailure = '';
     try {
       if (platform === 'linux') cwd = await readLink(`/proc/${entry.pid}/cwd`);
-      else cwd = /^n(.*)$/mu.exec(await run('/usr/sbin/lsof', ['-a', '-d', 'cwd', '-p', String(entry.pid), '-Fn']))?.[1] ?? '';
-    } catch { /* Another user's process hides its directory; the pid and size still name it. */ }
-    return { ...entry, cwd };
+      else cwd = /^n(.*)$/mu.exec(await run('/usr/sbin/lsof', ['-b', '-a', '-d', 'cwd', '-p', String(entry.pid), '-Fn']))?.[1] ?? '';
+    } catch (error) {
+      const code = typeof error.code === 'string' && /^[A-Z0-9_]+$/u.test(error.code) ? error.code : 'unavailable';
+      cwdFailure = `an unreadable directory for pid ${entry.pid} (${platform === 'linux' ? 'readlink' : 'lsof'} ${code})`;
+    }
+    if (!cwd && !cwdFailure) cwdFailure = `an unreadable directory for pid ${entry.pid} (no directory reported)`;
+    return { ...entry, cwd, ...(cwdFailure ? { cwdFailure } : {}) };
   }));
 }
 
@@ -562,7 +566,7 @@ export function memoryVerdict(reading, floorBytes) {
   const why = [critical ? 'pressure is critical' : '', low ? 'free memory is under the floor' : ''].filter(Boolean).join(' and ');
   const pressure = reading.pressure === 'unknown' ? 'pressure not reported' : `pressure ${reading.pressure}`;
   const state = `${pressure}, ${memorySize(reading.availableBytes)} free of ${memorySize(reading.totalBytes)}${off ? '' : ` (floor ${memorySize(floorBytes)})`}`;
-  const biggest = (reading.processes ?? []).map(({ pid, name, bytes, cwd }) => `pid ${pid} ${name} ${memorySize(bytes)} in ${cwd || 'an unreadable directory'}`).join('; ');
+  const biggest = (reading.processes ?? []).map(({ pid, name, bytes, cwd, cwdFailure }) => `pid ${pid} ${name} ${memorySize(bytes)} in ${cwd || cwdFailure || 'an unreadable directory'}`).join('; ');
   const verdict = off ? 'hold off (set gate.memoryFloorMB to turn it on)' : held ? `holding the gate queue because ${why}` : 'admitting';
   return { checked: true, held, line: `memory: ${verdict}: ${state}${biggest ? `; biggest: ${biggest}` : ''}` };
 }
