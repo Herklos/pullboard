@@ -75,30 +75,32 @@ function pipelines(command) {
 
 /**
  * Name the final stage of the first pipeline that would hide a check's exit status, or null when none does. A
- * pipeline is exempt only when pipefail is on as it runs, or when its first stage prints a value captured earlier
- * with NAME=$(...), the out=$(...) form this board uses; an untested capture excuses nothing. Pipefail is on only
- * after a set -o pipefail (or set -euo pipefail) that always runs: it starts a statement outside any ( ) subshell
- * and follows no && or ||. A later set +o pipefail turns it off again [C7,V4].
+ * pipeline is exempt in two cases only: the check's first command is set -o pipefail (alone or with other set flags,
+ * so it always runs) and nothing in the check clears it with a set +o form; or the pipeline's first stage prints a
+ * value captured earlier with NAME=$(...), the out=$(...) form this board uses. An untested capture excuses nothing.
+ * A nested shell (sh -c, bash -c), eval or script file is not read: the rule reads the check's own text [C7,V4].
  *
  * @param {string} command
  * @returns {string | null}
  */
 function maskingStage(command) {
+  const all = pipelines(command);
+  const statements = all.filter(pipeline => command.slice(pipeline.start, pipeline.end).trim());
+  const cleared = statements.some(pipeline => /^\s*set\s+(?:[-+]\S+\s+)*\+\S*o\s+pipefail\b/u.test(command.slice(pipeline.start, pipeline.end)));
+  const first = statements[0];
+  const pipefail = !cleared && first !== undefined && first.after === 'start' && !first.pipes.length
+    && /^\s*set\s+(?:[-+]\S+\s+)*-\S*o\s+pipefail\b/u.test(command.slice(first.start, first.end));
+  if (pipefail) return null;
   const captured = new Set();
-  let pipefail = false;
-  for (const pipeline of pipelines(command)) {
-    const text = command.slice(pipeline.start, pipeline.end);
-    const assignment = /^\s*(\w+)="?\$\(/u.exec(text);
+  for (const pipeline of all) {
+    const assignment = /^\s*(\w+)="?\$\(/u.exec(command.slice(pipeline.start, pipeline.end));
     if (assignment) captured.add(assignment[1]);
-    if (/^\s*set\s+(?:[-+]\S+\s+)*\+\S*o\s+pipefail\b/u.test(text)) pipefail = false;
-    else if (/^\s*set\s+(?:[-+]\S+\s+)*-\S*o\s+pipefail\b/u.test(text) && !pipeline.pipes.length
-      && pipeline.depth === 0 && ['start', ';', '\n', ')'].includes(pipeline.after)) pipefail = true;
-    if (!pipeline.pipes.length || pipefail) continue;
-    const first = command.slice(pipeline.start, pipeline.pipes[0]);
-    const tested = /^\s*(?:printf|echo)\b/u.test(first)
-      && [...first.matchAll(/\$\{?(\w+)\}?/gu)].some((match) => captured.has(match[1]));
+    if (!pipeline.pipes.length) continue;
+    const head = command.slice(pipeline.start, pipeline.pipes[0]);
+    const tested = /^\s*(?:printf|echo)\b/u.test(head)
+      && [...head.matchAll(/\$\{?(\w+)\}?/gu)].some((match) => captured.has(match[1]));
     if (tested) continue;
-    return /^\s*([^\s;&|)]+)/u.exec(command.slice(pipeline.pipes.at(-1) + 1))?.[1] ?? 'a later stage';
+    return /^\s*([^\s;&|)}]+)/u.exec(command.slice(pipeline.pipes.at(-1) + 1))?.[1] ?? 'a later stage';
   }
   return null;
 }
