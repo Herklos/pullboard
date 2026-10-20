@@ -1,6 +1,9 @@
 /** Bounded, device-sealed snapshot objects; plaintext and private cache fingerprints never reach the relay [H15,H17]. */
 import { Refused } from './refused.js';
-import { seal, unseal } from './seal.js';
+import {
+  seal,
+  unseal,
+} from './seal.js';
 
 export const PAGE_BYTES = 262_144;
 export const PAGE_FANOUT = 64;

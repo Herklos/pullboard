@@ -1,6 +1,13 @@
 /** One native snapshot with a small current presentation and separately addressed sealed history [H15,H17]. */
 import { Refused } from './refused.js';
-import { PAGE_FANOUT, pageReference, readSealedDescriptor, readSealedValue, writeSealedDescriptor, writeSealedValue } from './sealed-pages.js';
+import {
+  PAGE_FANOUT,
+  pageReference,
+  readSealedDescriptor,
+  readSealedValue,
+  writeSealedDescriptor,
+  writeSealedValue,
+} from './sealed-pages.js';
 
 const FORMAT = 'pullboard-paged-snapshot/1';
 const BATCH_BYTES = 131_072;

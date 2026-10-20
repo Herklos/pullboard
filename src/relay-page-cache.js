@@ -1,11 +1,21 @@
 /** Private device-only cipher cache and durable upload graph; no board key or decrypted record is stored [H15,H17]. */
 import { createHash } from 'node:crypto';
-import { closeSync, lstatSync, mkdirSync, openSync } from 'node:fs';
+import {
+  closeSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+} from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { Refused } from './refused.js';
-import { PAGE_CIPHER_BYTES, PAGE_FANOUT, pageReference, sealedPageFingerprint } from './sealed-pages.js';
+import {
+  PAGE_CIPHER_BYTES,
+  PAGE_FANOUT,
+  pageReference,
+  sealedPageFingerprint,
+} from './sealed-pages.js';
 
 /** Refuse a damaged private cache without repeating any bytes or private fingerprints. */
 function invalid() { return new Refused('RELAY_PAGE_CACHE', 'Restore private relay page cache storage, or remove this device cache and retry the saved snapshot.'); }

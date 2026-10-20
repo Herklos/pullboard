@@ -3,10 +3,16 @@ import { Refused } from './refused.js';
 import { legacyPageRoute } from './relay-page-support.js';
 import { relayStorage } from './relay-storage.js';
 export { relayStorage, relayStorageLine } from './relay-storage.js';
-import { createRelayPageCache, snapshotSourceId } from './relay-page-cache.js';
+import {
+  createRelayPageCache,
+  snapshotSourceId,
+} from './relay-page-cache.js';
 import { openPagedSnapshot } from './relay-page-layout.js';
 import { writePagedSnapshot } from './relay-page-writer.js';
-import { PAGE_CIPHER_BYTES, pageReference } from './sealed-pages.js';
+import {
+  PAGE_CIPHER_BYTES,
+  pageReference,
+} from './sealed-pages.js';
 
 const PAGE_CAPABILITIES = new WeakMap();
 

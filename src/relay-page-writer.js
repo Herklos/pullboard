@@ -1,5 +1,8 @@
 /** Native snapshot projection uses the same lifecycle fields as the local API [A2,H17]. */
-import { itemSummary, withListFields } from './item-list.js';
+import {
+  itemSummary,
+  withListFields,
+} from './item-list.js';
 import { encodePagedSnapshot } from './relay-page-layout.js';
 
 /** Project current list fields without pulling the native lifecycle implementation into phone readers. */
