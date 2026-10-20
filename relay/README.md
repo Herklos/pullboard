@@ -156,8 +156,8 @@ The client owns the encryption format and engine-version checks.
   It removes the link and its board-scoped credentials too; other boards and person sessions remain valid.
 
 All responses and refusals retain envelope `version: 1`. Moves use the shared
-100,000 byte JSON-body limit. Legacy API1 snapshots allow a bounded 14,000,000
-byte JSON body and 10,000,000 decoded bytes; API2 uses the bounded objects below. One private SQLite journal per board stores only its
+100,000 byte JSON-body limit. Legacy API1 snapshots allow a bounded 90,000,000
+byte JSON body and 64,000,000 decoded bytes; API2 uses the bounded objects below. One private SQLite journal per board stores only its
 identity, format, head cursor, receive times, public sender identities and sealed payloads. Compaction
 keeps the head cursor, so the next move never reuses an earlier sequence.
 
