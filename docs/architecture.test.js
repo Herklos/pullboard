@@ -13,6 +13,8 @@ import { test } from 'node:test';
 import { createRelayAuth } from '../relay/auth.js';
 import { createDeviceStore } from '../relay/device-store.js';
 import { createRelayJournal } from '../relay/journal.js';
+import { createRelayPages } from '../relay/page-store.js';
+import { createStorageQuota } from '../relay/storage-quota.js';
 
 const ROOT = join(import.meta.dirname, '..');
 const PAGE = readFileSync(join(ROOT, 'docs', 'architecture.md'), 'utf8');
@@ -89,11 +91,13 @@ function liveTables() {
     auth.close();
     const boards = join(folder, 'boards');
     createRelayJournal({ directory: boards, boardId: '0'.repeat(32) }).close();
+    createRelayPages({ directory: boards, boardId: '0'.repeat(32) }).close();
+    createStorageQuota({ directory: boards, auth: { withBoard: (board, work) => work() } }).close();
     const devices = createDeviceStore({ directory: boards });
     devices.begin('1', 'a'.repeat(22));
     devices.close();
     const tables = new Set();
-    for (const file of [join(folder, 'auth.sqlite'), join(boards, 'devices.sqlite'), join(boards, '0'.repeat(32) + '.journal.sqlite')]) {
+    for (const file of [join(folder, 'auth.sqlite'), join(boards, 'devices.sqlite'), join(boards, '0'.repeat(32) + '.journal.sqlite'), join(boards, 'storage-quota.sqlite')]) {
       const db = new DatabaseSync(file, { readOnly: true });
       try {
         for (const row of db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all()) tables.add(row.name);
