@@ -48,6 +48,10 @@ import {
   SUBMISSION_PROOF_ENGINE,
   submissionProof,
 } from './submit-invariants.js';
+import {
+  NATIVE_FLAKE_ENGINE,
+  carriesFlakeDiagnostics,
+} from './flake-engine.js';
 
 const ITEM_ID_FIRST_ARGUMENT = new Set(['acceptCheck', 'editItem', 'escalate', 'recordAttempt', 'claim', 'release', 'submit', 'reserveReview', 'verify', 'merged', 'withdraw', 'refreeze', 'reopen', 'appendFact']);
 
@@ -60,6 +64,7 @@ export const ENGINE_OPERATIONS = Object.freeze([
   'recordRowDecisions', 'applyRowDecisions', 'draftSpecRow', 'appendFact',
   'recordLandingBatch', 'recordLandingWaiver', 'recordLandingFlake', 'finishLandingBatch', 'acceptCheck',
   'recordHealthFindings', 'proposeSentinel', 'decideSentinel', 'beginSentinelRun', 'finishSentinelRun',
+  'recordFlakeObservation',
 ]);
 
 /** Engine version at which each ordered operation first has stable replay semantics. */
@@ -68,6 +73,8 @@ const OPERATION_ENGINE = Object.freeze({ draftSpecRow: ROW_DRAFT_ENGINE, orderMi
 
 /** Dependency edits, causes, sealed reviews, submission proofs, trunk conflicts, health observations and milestone targets retain distinct recorded engine meanings. */
 function minimumOperationEngine(operation, args, board) {
+  if (operation === 'recordFlakeObservation') return NATIVE_FLAKE_ENGINE;
+  if (operation === 'recordLandingBatch' && carriesFlakeDiagnostics(args[0]?.batch)) return NATIVE_FLAKE_ENGINE;
   if (['proposeSentinel', 'decideSentinel', 'beginSentinelRun', 'finishSentinelRun'].includes(operation) || typeof args[1]?.cause === 'string' && args[1].cause.startsWith('sentinel:')) return BOARD_SENTINEL_ENGINE;
   if (operation === 'recordHealthFindings') return HEALTH_SENTINEL_ENGINE;
   const options = args[1];

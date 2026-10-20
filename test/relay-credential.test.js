@@ -7,6 +7,7 @@ import { ENGINE_OPERATIONS } from '../src/engine.js';
 import { ENGINE_VERSION } from '../src/machine.js';
 import { decodeBoardKey, unseal } from '../src/seal.js';
 import { relayClientFixture } from './relay-client-fixture.js';
+import { syntheticFlakeObservation } from './flake-observation-fixture.js';
 
 test('every current operation selects its native actor credential without a second authorization policy [H2,H9,H16]', async (t) => {
   const box = await relayClientFixture(t);
@@ -24,6 +25,7 @@ test('every current operation selects its native actor credential without a seco
     if (['claim', 'refreeze'].includes(operation)) args = [box.before.tables.item[0].item_id, options];
     if (operation === 'reserveNextReview') args = [options];
     if (operation === 'recordHealthFindings') args = [{ agentId: actor, observedRevision: 0, findings: [] }];
+    if (operation === 'recordFlakeObservation') args = [{ agentId: actor, lane: box.lane, observation: syntheticFlakeObservation('credential-fixture') }];
     if (operation === 'proposeSentinel') args = [{ agentId: actor,
       row: { name: 'credential-watch', check: 'true', every: 'hourly', owner: actor } }];
     if (['beginSentinelRun', 'finishSentinelRun'].includes(operation)) {
@@ -50,6 +52,7 @@ test('every current operation selects its native actor credential without a seco
   });
   cases.push(
     { operation: 'recordHealthFindings', args: [{ observedRevision: 0, findings: [] }], kind: 'agent', sent: false, expected: 'RELAY_ACTOR' },
+    { operation: 'recordFlakeObservation', args: [{ lane: box.lane, observation: syntheticFlakeObservation('missing-actor') }], kind: 'agent', sent: false, expected: 'RELAY_ACTOR' },
     { operation: 'submit', args: [999999, options], kind: 'agent', sent: false, expected: 'SUBMISSION_PROOF' },
     { operation: 'answerDecision', args: [999999, { ...options, asPerson: true, channel: 'terminal' }], kind: 'person', sent: false },
     { operation: 'holdLane', args: [box.lane, { ...options, asPerson: true, channel: 'terminal' }], kind: 'person', sent: false },

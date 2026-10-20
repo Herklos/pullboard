@@ -1,6 +1,6 @@
 /** The frozen check outcome travels with accepts without changing the board schema [V19,V8]. */
 import assert from 'node:assert/strict';
-import { runFixtureExecFile as execFileSync, runFixtureChild, runFixtureChildAsync, runFixtureGit } from './fixture-child.js';
+import { runFixtureExecFile as execFileSync, runFixtureChild, runFixtureChildAsync, runFixtureGit, safeFixtureDiagnostic } from './fixture-child.js';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -30,6 +30,7 @@ function sandbox() {
     PULLBOARD_HOME: join(dir, 'pullboard-home'),
     PULLBOARD_MACHINE_HOME: join(dir, 'machine-home'),
   });
+  delete env.NODE_TEST_CONTEXT; // A fixture CLI/compiler child is a normal process, not its parent's Node test worker.
   mkdirSync(env.HOME);
   /** Run isolated Git commands for this fixture. */
   const git = (cwd, ...args) => runFixtureGit(args, { cwd, env, encoding: 'utf8', stdio: 'pipe' });
@@ -63,7 +64,7 @@ function project(box) {
 /** Run a fixture command and fail with its captured diagnostics if it refuses. */
 function succeeds(box, cwd, ...args) {
   const result = box.run(cwd, ...args);
-  assert.equal(result.code, 0, result.failure ?? `${result.out}\n${result.err}`);
+  assert.equal(result.code, 0, result.failure ? `${result.failure}\nstdout:\n${safeFixtureDiagnostic(result.out, box.env)}` : `${result.out}\n${result.err}`);
   return result.out;
 }
 
@@ -108,6 +109,18 @@ test('accept records none or green in its event and JSON, and says when unchecke
     box.git(repo, 'switch', 'main');
 
     const checked = submitted(box, repo, web, 'Checked accept', 'node --check web/item-3.js');
+    succeeds(box, repo, 'check', String(checked.id), '--yes'); // Diagnostics must not block an existing frozen check while main is detached for review.
+    const checkedSource = join(repo, 'web', `item-${checked.id}.js`);
+    const originalSource = readFileSync(checkedSource, 'utf8');
+    writeFileSync(checkedSource, 'const = ;\n'); // Keep the negative compiler case unambiguous; Node22 can silently accept invalid detected-ESM .js (#65202).
+    const reference = runFixtureChild(process.execPath, ['--check', checkedSource], { cwd: repo, env: box.env, encoding: 'utf8' });
+    assert.equal(reference.status, 1, safeFixtureDiagnostic(JSON.stringify({ phase: 'direct compiler reference', status: reference.status,
+      stdout: reference.stdout, stderr: reference.stderr, source: readFileSync(checkedSource, 'utf8'), inheritedTestContext: Boolean(box.env.NODE_TEST_CONTEXT) }), box.env));
+    const redCheck = box.run(repo, 'check', String(checked.id), '--yes', '--json');
+    assert.equal(redCheck.code, 1, safeFixtureDiagnostic(JSON.stringify({ phase: 'real check after direct compiler red', redCheck, source: readFileSync(checkedSource, 'utf8') }), box.env));
+    assert.equal(JSON.parse(redCheck.out).green, false);
+    assert.match(redCheck.err, /failure diagnostics could not finish \(NO_POLICY\).*original result stays red/u);
+    writeFileSync(checkedSource, originalSource);
     const checkedJson = JSON.parse(succeeds(box, repo, 'verify', String(checked.id), 'accept', '--as', 'coordinator', '--note', 'the frozen check passed', '--json'));
     assert.equal(checkedJson.check, 'green');
     const checkedEvent = JSON.parse(succeeds(box, repo, 'log', String(checked.id), '--json')).events.find((event) => event.event_kind === 'accept');
