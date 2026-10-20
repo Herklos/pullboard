@@ -374,6 +374,8 @@ The `event` table is a SQLite schema object governed by `SCHEMA_VERSION`; its ap
 | `guards` | board | `missing`, `changed`, `stale` |
 | `rigor-notice` | rigor | `cause`, `items`, `occurrences`, `neverAgain`, `engine` |
 | `shout` | sender | `shout`, `to`, `decision`, `request`, `answers` |
+| `flake-observation` | reporting agent | `engine`, `observation` |
+| `flake-repair` | reporting agent | `engine`, `key`, `item` |
 | `health-scan` | observing agent | `active`, `engine` |
 | `health-failure` | sentinel | `key`, `cause`, `since`, `subject`, `owner`, `commit`, `engine` |
 | `health-resolved` | sentinel | `key`, `cause`, `since`, `subject`, `owner`, `commit`, `engine` |

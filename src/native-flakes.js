@@ -17,6 +17,7 @@ import {
   readFileSync,
   readSync,
   readdirSync,
+  realpathSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
@@ -70,6 +71,12 @@ export function flakeSource(root, { commit, main, privateCheck = false } = {}) {
     load: { average: loadavg(), cpus: availableParallelism(), freeMB: Math.floor(freemem() / 1048576) } };
 }
 
+/** Resolve live aliases; deleted private checks already carry their physical execution root. */
+function physicalPath(path) {
+  try { return realpathSync(path); }
+  catch { return path; }
+}
+
 /** Read structured Node TAP blocks only; nested selectors and cancelled parents stay unsupported. */
 function tapTests(output, root) {
   const rows = [];
@@ -86,7 +93,7 @@ function tapTests(output, root) {
     const value = field[3].replace(/^(['"])(.*)\1$/u, '$2');
     if (field[2] === 'location') {
       const path = value.replace(/:\d+(?::\d+)?$/u, '');
-      const file = isAbsolute(path) ? relative(root, path) : path.replace(/^\.\//u, '');
+      const file = isAbsolute(path) ? relative(physicalPath(root), physicalPath(path)) : path.replace(/^\.\//u, '');
       if (file && !file.startsWith('../') && !file.includes('\\')) active.file = file;
     } else active[field[2]] = value;
   }

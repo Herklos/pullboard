@@ -19,6 +19,7 @@ import {
   openSync,
   readFileSync,
   readSync,
+  realpathSync,
   rmSync,
   writeSync,
 } from 'node:fs';
@@ -195,7 +196,8 @@ export function checkAtCommit(root, item, { waitMs = 0, gateSlotHeld = false, ga
   catch { return checkResult('unverified', 'policy', '', '', { root, item }); }
   const install = config.check.install;
   const timeout = config.check.timeoutMs;
-  const scratch = mkdtempSync(join(tmpdir(), 'pullboard-criterion-'));
+  // Retain the physical root before cleanup; Node TAP resolves symlinks in test locations.
+  const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'pullboard-criterion-')));
   const copy = join(scratch, 'repo');
   const home = join(scratch, 'home');
   mkdirSync(home, { mode: 0o700 });

@@ -295,8 +295,15 @@ test('a red submit records diagnostics without submitting the item [C7,V4,H16]',
   assertReceipts(box, observation);
 });
 
-test('an independent private verification check stays red after its one passing pair [C7,V4,H16]', t => {
+for (const linkedTemp of [false, true]) test(linkedTemp
+  ? 'a private verification pair uses physical paths through a symlinked temporary root [C7,V4,H16]'
+  : 'an independent private verification check stays red after its one passing pair [C7,V4,H16]', t => {
   const box = flakyProject(t, { alwaysPass: 'controlled' });
+  if (linkedTemp) {
+    const alias = join(box.scratch, 'temporary-alias');
+    symlinkSync(box.scratch, alias, 'dir');
+    box.env.TMPDIR = alias;
+  }
   const id = checkedItem(box);
   const builder = privateBuilder(box);
   const claimed = builder.cli('claim', String(id));
