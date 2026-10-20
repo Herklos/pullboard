@@ -1,17 +1,41 @@
 /** Owner-only relay key files and legacy keychain migration [H15,H17]. */
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
-import { chmodSync, existsSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync } from 'node:fs';
+import { constants } from 'node:fs';
+import { copyFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
+import { mkdirSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
+import { realpathSync } from 'node:fs';
+import { rmSync } from 'node:fs';
+import { statSync } from 'node:fs';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { relayClientFixture } from './relay-client-fixture.js';
 import { ENGINE_VERSION } from '../src/machine.js';
 
+/**
+ * Copy this Node into a folder whose name has a space, as on a machine where Node lives under such a path (#865).
+ * A shebang cannot hold that path, so every wrapper below must start Node through the shell instead.
+ */
+function nodeAtSpacedPath(box) {
+  const folder = join(box.env.PULLBOARD_HOME, 'node with spaces');
+  mkdirSync(folder, { recursive: true });
+  const node = join(folder, 'node');
+  copyFileSync(realpathSync(process.execPath), node, constants.COPYFILE_FICLONE);
+  chmodSync(node, 0o700);
+  return node;
+}
+
 /** Install an isolated `security` command without consulting the host keychain. */
 function securityStandIn(box) {
   const store = join(box.env.PULLBOARD_HOME, 'legacy-keychain-entry');
   const security = join(box.env.PATH, 'security');
-  const script = '#!' + process.execPath + '\n' + [
+  const program = join(box.env.PULLBOARD_HOME, 'security stand-in.cjs');
+  const wrapper = `#!/bin/sh\nexec ${JSON.stringify(nodeAtSpacedPath(box))} ${JSON.stringify(program)} "$@"\n`;
+  const script = [
     "const { existsSync, readFileSync, rmSync } = require('node:fs');",
     'const command = process.argv[2];',
     "if (['list-keychains', 'search'].includes(command)) process.exit(0);",
@@ -22,8 +46,9 @@ function securityStandIn(box) {
     "} else if (['delete-generic-password', 'clear'].includes(command)) rmSync(process.env.KEYCHAIN_STORE, { force: true });",
     'else process.exit(1);',
   ].join('\n');
+  writeFileSync(program, script, { mode: 0o600 });
   for (const executable of [security, join(box.env.PATH, 'secret-tool')]) {
-    writeFileSync(executable, script, { mode: 0o700 });
+    writeFileSync(executable, wrapper, { mode: 0o700 });
     chmodSync(executable, 0o700);
   }
   box.env.KEYCHAIN_STORE = store;
