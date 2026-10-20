@@ -182,15 +182,14 @@ const LOCAL_TRIPS = 'pullboard.local.trips';
 let localSession = null;
 let localProblem = null;
 let localConfirmed = false;
-/** Read, keep or forget a value for this tab only; a browser that refuses keeps nothing, and the page goes on. */
-function tabValue(name, value) {
+const tabValue = (function tabValue(name, value) {
   try {
     if (value === undefined) return sessionStorage.getItem(name);
     if (value === null) sessionStorage.removeItem(name);
     else sessionStorage.setItem(name, value);
   } catch { return null; }
   return value;
-}
+});
 /** Whether a value is a local session this page may use: version 1, a loopback origin with its port, and a secret. */
 function validLocalSession(value) {
   if (!value || value.version !== 1 || typeof value.key !== 'string' || !/^[\x21-\x7e]{1,256}$/.test(value.key) || typeof value.origin !== 'string') return false;
@@ -199,6 +198,26 @@ function validLocalSession(value) {
     return address.protocol === 'http:' && ['127.0.0.1', 'localhost'].includes(address.hostname) && address.port !== '' && address.origin === value.origin;
   } catch { return false; }
 }
+const pageStartup = (function pageStartup(root) {
+  const phone = root.dataset.relayDevice === 'phone';
+  return {
+    phone,
+    /** Put text in the phone shell's status line and keep the shell showing; false on a computer or without a shell. */
+    say(text) {
+      const status = phone ? root.querySelector('#relay-screen .relay-live span') : null;
+      if (!status) return false;
+      root.dataset.relayScreen ||= 'share';
+      status.textContent = text;
+      return true;
+    },
+    /** Await load(), failing with message after ms; the timer is cleared either way, so it never outlives the load. */
+    within(load, ms, message) {
+      let timer;
+      const late = new Promise((resolve, reject) => { timer = setTimeout(() => reject(new Error(message)), ms); });
+      return Promise.race([load(), late]).finally(() => clearTimeout(timer));
+    },
+  };
+});
 // A relay pairing link carries its own fragment; that load stays the relay's, as before.
 const relayPairing = hosted.local && ['board', 'key', 'device'].some((name) => new URLSearchParams(location.hash.slice(1)).has(name));
 if (hosted.local && !relayPairing) {
@@ -261,7 +280,7 @@ let data = null;
 let seen = '';
 let addressReady = false;
 let heldClickPointer = null;
-let deferredClickRender = false;
+let deferredClickRender = false; const pageDialogs = new Set(); // open page dialogs; the page holds its redraws while one is open
 // Detail replies stay with an unchanged summary, while search results are keyed by board and words.
 const itemDetails = new Map();
 const itemSearches = new Map();
@@ -438,6 +457,8 @@ let localReached = false;
  * computer, so a later screen, such as signing in, stays.
  */
 async function connectLocal(again = false) {
+  // A phone never runs Pullboard: it is unreachable at once, before a permission query or a fetch can wait (#900).
+  if (pageStartup(document.documentElement).phone) return 'unreachable';
   if (localChecking) return 'busy';
   localChecking = true;
   try { return await lookLocal(again); }
@@ -677,7 +698,11 @@ const staleChip = (function staleChip(item) {
 const roadmapBlock = (function roadmapBlock(item, context = {}) {
   if (!item) return null;
   const escape = text => String(text ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
-  const items = context.items || [], name = context.name || (id => id), time = context.time || (at => at);
+  const items = context.items || [], boardAgents = context.agents || [];
+  // An agent's name: its display name with the model, or its name alone when the model is unknown (the display name would carry an "unknown" placeholder).
+  const name = context.name || (id => { const agent = boardAgents.find(entry => entry.agent_id === id), model = agent?.model || agent?.agent_model; return !model || model === 'unknown' ? id : agent.displayName || id + ' (' + model + ')'; });
+  // A time as the viewer's locale writes it with hours and minutes (7:09 PM in English), with the date first when it is not today.
+  const time = context.time || (iso => { const moment = new Date(iso), clock = moment.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }); return moment.toDateString() === new Date().toDateString() ? clock : moment.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + clock; });
   const waits = (item.blockedBy || []).map(id => items.find(other => other.id === id) || {id,status:'unavailable'});
   const hold = (context.holds || []).find(h => h.hold_lane === item.lane);
   const blocked = item.status === 'open' && Boolean(waits.length || hold);
@@ -697,6 +722,15 @@ const roadmapBlock = (function roadmapBlock(item, context = {}) {
   const ref = other => {const [word,color] = words[state(other)] || [other.status,''];return '<span class="chip roadmap-ref '+color+'">#'+escape(other.id)+' '+escape(word || (other.merged || other.stage === 'merged' ? 'landed' : 'verified'))+'</span>';};
   const field = (key,value,extra='') => value ? '<dt>'+icon(key)+escape(key)+'</dt><dd'+(extra?' class="'+extra+'"':'')+'>'+value+'</dd>' : '';
   const first = text => String(text || '').split('\n').find(line => line.trim())?.trim() || '';
+  /**
+   * The first sentence of a send-back note, cut at 160 characters. An ellipsis marks any text left out,
+   * so a reader knows the full note is one click away in Items (the row never shows it all).
+   */
+  const shortNote = text => {
+    const line = first(text), sentence = line.match(/^.*?[.!?](?=\s|$)/u)?.[0] || line;
+    const short = sentence.length > 160 ? sentence.slice(0, 160).trimEnd() : sentence;
+    return short.length < text.length ? short + '…' : short;
+  };
   const criterion = first(item.criterion).match(/^.*?[.!?](?:\s|$)|^.*$/u)?.[0]?.trim() || '';
   const agents = [];
   const builder = item.status === 'claimed' ? item.claim?.by || item.owner : item.builtBy;
@@ -713,7 +747,7 @@ const roadmapBlock = (function roadmapBlock(item, context = {}) {
   const reasons = {TEST_FAILURE:'A test failed',BEHAVIOR_MISMATCH:'Behavior differs from the criterion',INSUFFICIENT_EVIDENCE:'More evidence is needed',STALE_HEAD:'The submitted commit is out of date',OTHER:'Sent back'};
   let returned = '';
   if (reject) {
-    const note = first(reject.note).replace(new RegExp('^'+String(reject.reason || '')+'(?::|\\s*[-–—])?\\s*','u'),'');
+    const note = shortNote(String(reject.note ?? '').trim().replace(new RegExp('^'+String(reject.reason || '')+'(?::|\\s*[-–—])?\\s*','u'),''));
     returned = (reject.at?escape(time(reject.at))+' ':'')+(reject.by?'by <b>'+escape(name(reject.by))+'</b>: ':'')+escape(note || reasons[reject.reason] || 'Sent back');
   }
   let claims = 0;
@@ -732,6 +766,17 @@ const roadmapBlock = (function roadmapBlock(item, context = {}) {
   return {label,dot:blocked?'<span class="block-dot" role="img" aria-label="'+escape(label)+'" title="'+escape(label)+'"></span>':'',
     detail:context.loading?'<span class="roadmap-loading muted">Loading detail…</span>':context.error?'<p class="muted">'+escape(context.error)+'</p>':
       '<dl class="roadmap-detail">'+rows+'</dl><a class="ref roadmap-items" href="'+escape(address(item.id))+'" data-go="item:'+item.id+'"'+(context.board?' data-board="'+escape(context.board)+'"':'')+'>Open #'+item.id+' in Items <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M14 3h7v7m0-7L10 14M10 3H3v18h18v-7"/></svg></a>'};
+});
+const openPageDialog = (function openPageDialog(dialog, focus, open) {
+  dialog.hidden = false;
+  open.add(dialog);
+  for (const element of document.body.children || []) if (element !== dialog && element.tagName !== 'SCRIPT') element.inert = true;
+  focus.focus();
+}), closePageDialog = (function closePageDialog(dialog, open) {
+  dialog.hidden = true;
+  open.delete(dialog);
+  for (const element of document.body.children || []) element.inert = false;
+  return open.size === 0;
 });
 /** Parse the bounded reference syntax before requesting additional committed line windows. */
 function codeReferenceParts(ref) {
@@ -873,6 +918,7 @@ let personNeeds = (function personNeeds(state) {
     ...(state.holds ?? []).map(hold => ({ kind: 'hold', id: hold.hold_lane,
       ref: hold.hold_lane, text: hold.hold_reason, what: 'lane held by ' + name(hold.hold_by) })),
     ...rigorDrafts,
+    ...(state.sentinelDrafts ?? []),
     ...(drafts ? [{ kind: 'draft', id: 'drafts', count: drafts, ref: String(drafts),
       text: 'draft spec rows to approve or drop' + rows.filter(row => row.staleDecision).map(row => `; ${row.stage}`).join(''), what: 'review in SPEC.md', target: 'tab:spec' }] : []),
   ];
@@ -882,7 +928,7 @@ function projectNeeds(p) {
   return personNeeds(p);
 }
 // The item lifecycle as pullboard declares it in src/machine.js, embedded when the page is served.
-const FLOW = {"initial":"open","states":[{"id":"open","means":"waiting for a builder; claimable once what it waits on is verified","final":false,"entry":[]},{"id":"claimed","means":"an agent holds it under a lease, its criterion frozen","final":false,"entry":[]},{"id":"submitted","means":"built and gated green at a pinned commit, waiting for another agent","final":false,"entry":[]},{"id":"verified","means":"another agent accepted it at the submitted commit","final":false,"entry":["the caller's checkout contains the submitted commit","the caller did not build it; on a linked board, at engine 48 or newer, the caller was enrolled through the relay by a line of creating seats from the coordinator that includes neither the builder nor a machine join","the criterion and the rows it cites read as they did at claim","an accept notes how it was proved"]},{"id":"withdrawn","means":"nobody should build it; the reason stays on it","final":true,"entry":["the caller is the coordinator","the move carries a note: what failed, what was tried, or why"]}],"moves":[{"verb":"claim","from":["open","claimed"],"to":"claimed","by":["agent","coordinator"],"how":"pullboard claim \u003cid>","checks":["the caller is the main checkout, or a worktree that joined a lane (NOT_JOINED)","the item exists (NO_ITEM)","the item is open or claimed (NOT_CLAIMABLE)","the item's check does not already pass on main, or the person accepted that exact check (CRITERION_PROVES_NOTHING)","the coordinator has not put this item on hold (ITEM_HELD)","the item is in the caller's lane; the main checkout builds coordinator-lane items only (WRONG_LANE)","the caller's route covers the item's: light, then mid, then strong (ROUTE)","every item it waits on is verified (BLOCKED)","no other agent holds it under a live lease (HELD)","no coordinator correction to a claimed criterion or check is waiting to be frozen (PENDING_REFREEZE)","nobody holds its lane (LANE_HELD)","the caller holds no other live top-level claim, reworks of its own rejected items aside (ONE_CLAIM)","every row the item cites exists and is in force (UNKNOWN_SPEC)"]},{"verb":"release","from":["claimed"],"to":"open","by":["agent","coordinator"],"how":"pullboard release \u003cid>","checks":["the caller is the main checkout, or a worktree that joined a lane (NOT_JOINED)","the item exists (NO_ITEM)","the item is claimed (NOT_YOURS)","the caller holds the claim (NOT_YOURS)","a review release gives a nonempty one-line reason (NOTE_REQUIRED)"]},{"verb":"lapse","from":["claimed"],"to":"open","by":["clock"],"how":"when its lease runs out","checks":[]},{"verb":"submit","from":["claimed"],"to":"submitted","by":["agent","coordinator"],"how":"pullboard submit \u003cid>","checks":["the caller is the main checkout, or a worktree that joined a lane (NOT_JOINED)","the item exists (NO_ITEM)","the item is claimed (NOT_YOURS)","the caller holds the claim (NOT_YOURS)","no coordinator correction to a claimed criterion or check is waiting to be frozen (PENDING_REFREEZE)","the item's check does not already pass on main, or the person accepted that exact check (CRITERION_PROVES_NOTHING)","the criterion and the rows it cites read as they did at claim (CRITERIA_CHANGED)","the worktree has no uncommitted changes (DIRTY)","the worktree has no untracked files (UNTRACKED)","there is a commit to submit (NO_COMMIT)","the full claimed diff respects committed coordinator ownership (OUTSIDE_LANE)","the candidate merges cleanly into the current primary branch without changing an index or worktree (MERGE_CONFLICT)","the candidate range contains no other item's unverified submitted commit (STACKED_ON_UNVERIFIED)","every touched doctrine check counts (exit 0 or 1), none rises above its committed count and no changed file gains a problem; watch-mode rules only count (RATCHET_ROSE)","the repo names a gate command (NO_GATE)","the caller still owns the same live item claim or review and can renew it against the frozen criterion (ITEM_LEASE_LOST)","the gate, which submit runs itself every time, is green at HEAD (GATE_RED)","when the gate ends, HEAD and every tracked file are as they were when it started (MOVED_DURING_GATE)","recorded test selection names literal project files and its full-fallback policy (SUBMISSION_PROOF)","every child item is verified or withdrawn (CHILDREN_OPEN)","a verifier has not rejected this commit at this bar; after a no-verdict reopen, the bar was refrozen (HEAD_NOT_NEW)"]},{"verb":"reserve","from":["submitted"],"to":"submitted","by":["agent","coordinator"],"how":"pullboard next --verify","checks":["in the main checkout, the caller says it is the coordinator (MAIN_IS_COORDINATOR)","the caller is the main checkout, or a worktree that joined a lane (NOT_JOINED)","the roadmap is readable when selecting the next review (MILESTONES_CORRUPT)","the item exists (NO_ITEM)","the item is submitted (NOT_SUBMITTED)","the reviewer has not released this submission within the past hour (REVIEW_COOLDOWN)","the caller did not build it; on a linked board, at engine 48 or newer, the caller was enrolled through the relay by a line of creating seats from the coordinator that includes neither the builder nor a machine join (SELF_VERIFY)","the caller's route covers the item's: light, then mid, then strong (ROUTE)","the repo's verify policy lets the caller verify this lane's work (COORDINATOR_VERIFIES)","the builder and verifier have different declared families; an undeclared family counts as a match (O2_FAMILY_MATCH)","no other agent holds its review under a live lease (REVIEW_HELD)"]},{"verb":"accept","from":["submitted","verified"],"to":"verified","by":["agent","coordinator"],"how":"pullboard verify \u003cid> accept --note \"...\"","checks":["in the main checkout, the caller says it is the coordinator (MAIN_IS_COORDINATOR)","the caller is the main checkout, or a worktree that joined a lane (NOT_JOINED)","the item exists (NO_ITEM)","the item is submitted or verified (NOT_SUBMITTED)","the caller's checkout contains the submitted commit (NOT_AT_COMMIT)","the item has no recorded merge receipt (ALREADY_MERGED)","a new review binds the submitted commit, its exact checked commit, a valid trunk commit and canonical candidate paths (BAD_VERDICT_REVIEW)","a stale acceptance is re-reviewed at a clean HEAD containing the current trunk, which stays fixed through its check (STALE_VERDICT)","the caller did not build it; on a linked board, at engine 48 or newer, the caller was enrolled through the relay by a line of creating seats from the coordinator that includes neither the builder nor a machine join (SELF_VERIFY)","the caller's route covers the item's: light, then mid, then strong (ROUTE)","the repo's verify policy lets the caller verify this lane's work (COORDINATOR_VERIFIES)","the builder and verifier have different declared families; an undeclared family counts as a match (O2_FAMILY_MATCH)","no other agent holds its review under a live lease (REVIEW_HELD)","the criterion and the rows it cites read as they did at claim (CRITERIA_CHANGED)","an accept gives CRITERION_MET as its reason (BAD_REASON)","the candidate merges cleanly into the current primary branch without changing an index or worktree (MERGE_CONFLICT)","the candidate range contains no other item's unverified submitted commit (STACKED_ON_UNVERIFIED)","the caller still owns the same live item claim or review and can renew it against the frozen criterion (ITEM_LEASE_LOST)","the frozen item check passes at the submitted commit, or its clean reviewed composition for a stale acceptance (CHECK_RED)","an accept notes how it was proved (PROOF_REQUIRED)"]},{"verb":"reject","from":["submitted","verified"],"to":"open","by":["agent","coordinator"],"how":"pullboard verify \u003cid> reject --reason CODE --note \"...\"","checks":["in the main checkout, the caller says it is the coordinator (MAIN_IS_COORDINATOR)","the caller is the main checkout, or a worktree that joined a lane (NOT_JOINED)","the item exists (NO_ITEM)","the item is submitted or verified (NOT_SUBMITTED)","the caller's checkout contains the submitted commit (NOT_AT_COMMIT)","the item has no recorded merge receipt (ALREADY_MERGED)","a new review binds the submitted commit, its exact checked commit, a valid trunk commit and canonical candidate paths (BAD_VERDICT_REVIEW)","a stale acceptance is re-reviewed at a clean HEAD containing the current trunk, which stays fixed through its check (STALE_VERDICT)","the caller did not build it; on a linked board, at engine 48 or newer, the caller was enrolled through the relay by a line of creating seats from the coordinator that includes neither the builder nor a machine join (SELF_VERIFY)","the caller's route covers the item's: light, then mid, then strong (ROUTE)","the repo's verify policy lets the caller verify this lane's work (COORDINATOR_VERIFIES)","the builder and verifier have different declared families; an undeclared family counts as a match (O2_FAMILY_MATCH)","no other agent holds its review under a live lease (REVIEW_HELD)","the criterion and the rows it cites read as they did at claim (CRITERIA_CHANGED)","a reject names one of the reject reasons (BAD_REASON)","the move carries a note: what failed, what was tried, or why (NOTE_REQUIRED)","a cause, when given, is test:\u003cfile>::\u003ctitle>, refusal:\u003cCODE>, row:\u003cid> or doctrine:\u003cid> (BAD_CAUSE)"]},{"verb":"reopen","from":["submitted","verified"],"to":"open","by":["coordinator"],"how":"pullboard reopen \u003cid> --note \"why\" | --conflict \u003cfile> [--conflict \u003cfile>]","checks":["the caller is the main checkout, or a worktree that joined a lane (NOT_JOINED)","the item exists (NO_ITEM)","the item is submitted or verified (NOT_SUBMITTED)","the caller is the coordinator (COORDINATOR_ONLY)","the move carries a note: what failed, what was tried, or why (NOTE_REQUIRED)","a cause, when given, is test:\u003cfile>::\u003ctitle>, refusal:\u003cCODE>, row:\u003cid> or doctrine:\u003cid> (BAD_CAUSE)","the item has no recorded merge receipt (ALREADY_MERGED)","a verified item note names the failing test and landing merge commit (LANDING_FAILURE_REQUIRED)","the accepted commit no longer merges onto the trunk, and every named file is one that conflicts (NOT_CONFLICTING)","a trunk conflict reopens an accepted item, names its files and the full trunk commit, and replays only under engine 52 or later (NOT_ACCEPTED)"]},{"verb":"escalate","from":["open","claimed"],"to":"open","by":["agent","coordinator"],"how":"pullboard escalate \u003cid> --note \"...\"","checks":["the caller is the main checkout, or a worktree that joined a lane (NOT_JOINED)","the move carries a note: what failed, what was tried, or why (NOTE_REQUIRED)","the item exists (NO_ITEM)","the caller holds the item, or is the coordinator (NOT_YOURS)","the item is open or claimed (CLOSED)"]},{"verb":"refreeze","from":["open","claimed","submitted"],"to":"open","by":["coordinator"],"how":"pullboard refreeze \u003cid>","checks":["the caller is the main checkout, or a worktree that joined a lane (NOT_JOINED)","the caller is the coordinator (COORDINATOR_ONLY)","the item exists (NO_ITEM)","the item is open or claimed or submitted (CLOSED)","every row the item cites exists and is in force (UNKNOWN_SPEC)"]},{"verb":"refreeze","from":["claimed"],"to":"claimed","by":["agent","coordinator"],"how":"pullboard refreeze \u003cid>","checks":["the caller is the main checkout, or a worktree that joined a lane (NOT_JOINED)","the item exists (NO_ITEM)","the caller holds the item, or is the coordinator (NOT_YOURS)","the item is claimed (CLOSED)","every row the item cites exists and is in force (UNKNOWN_SPEC)"]},{"verb":"withdraw","from":["open","claimed","submitted"],"to":"withdrawn","by":["coordinator"],"how":"pullboard withdraw \u003cid> \u003creason>","checks":["the caller is the main checkout, or a worktree that joined a lane (NOT_JOINED)","the caller is the coordinator (COORDINATOR_ONLY)","the move carries a note: what failed, what was tried, or why (NOTE_REQUIRED)","the item exists (NO_ITEM)","the item is open or claimed or submitted (CLOSED)"]}]};
+const FLOW = {"initial":"open","states":[{"id":"open","means":"waiting for a builder; claimable once what it waits on is verified","final":false,"entry":[]},{"id":"claimed","means":"an agent holds it under a lease, its criterion frozen","final":false,"entry":[]},{"id":"submitted","means":"built and gated green at a pinned commit, waiting for another agent","final":false,"entry":[]},{"id":"verified","means":"another agent accepted it at the submitted commit","final":false,"entry":["the caller's checkout contains the submitted commit","the caller did not build it; on a linked board, at engine 48 or newer, the caller was enrolled through the relay by a line of creating seats from the coordinator that includes neither the builder nor a machine join","the criterion and the rows it cites read as they did at claim","an accept notes how it was proved"]},{"id":"withdrawn","means":"nobody should build it; the reason stays on it","final":true,"entry":["the caller is the coordinator","the move carries a note: what failed, what was tried, or why"]}],"moves":[{"verb":"claim","from":["open","claimed"],"to":"claimed","by":["agent","coordinator"],"how":"pullboard claim \u003cid>","checks":["the caller is the main checkout, or a worktree that joined a lane (NOT_JOINED)","the item exists (NO_ITEM)","the item is open or claimed (NOT_CLAIMABLE)","the item's check does not already pass on main, or the person accepted that exact check (CRITERION_PROVES_NOTHING)","the coordinator has not put this item on hold (ITEM_HELD)","the item is in the caller's lane; the main checkout builds coordinator-lane items only (WRONG_LANE)","the caller's route covers the item's: light, then mid, then strong (ROUTE)","every item it waits on is verified (BLOCKED)","no other agent holds it under a live lease (HELD)","no coordinator correction to a claimed criterion or check is waiting to be frozen (PENDING_REFREEZE)","nobody holds its lane (LANE_HELD)","the caller holds no other live top-level claim, reworks of its own rejected items aside (ONE_CLAIM)","every row the item cites exists and is in force (UNKNOWN_SPEC)"]},{"verb":"release","from":["claimed"],"to":"open","by":["agent","coordinator"],"how":"pullboard release \u003cid>","checks":["the caller is the main checkout, or a worktree that joined a lane (NOT_JOINED)","the item exists (NO_ITEM)","the item is claimed (NOT_YOURS)","the caller holds the claim (NOT_YOURS)","a review release gives a nonempty one-line reason (NOTE_REQUIRED)"]},{"verb":"lapse","from":["claimed"],"to":"open","by":["clock"],"how":"when its lease runs out","checks":[]},{"verb":"submit","from":["claimed"],"to":"submitted","by":["agent","coordinator"],"how":"pullboard submit \u003cid>","checks":["the caller is the main checkout, or a worktree that joined a lane (NOT_JOINED)","the item exists (NO_ITEM)","the item is claimed (NOT_YOURS)","the caller holds the claim (NOT_YOURS)","no coordinator correction to a claimed criterion or check is waiting to be frozen (PENDING_REFREEZE)","the item's check does not already pass on main, or the person accepted that exact check (CRITERION_PROVES_NOTHING)","the criterion and the rows it cites read as they did at claim (CRITERIA_CHANGED)","the worktree has no uncommitted changes (DIRTY)","the worktree has no untracked files (UNTRACKED)","there is a commit to submit (NO_COMMIT)","the full claimed diff respects committed coordinator ownership (OUTSIDE_LANE)","the candidate merges cleanly into the current primary branch without changing an index or worktree (MERGE_CONFLICT)","the candidate range contains no other item's unverified submitted commit (STACKED_ON_UNVERIFIED)","every touched doctrine check counts (exit 0 or 1), none rises above its committed count and no changed file gains a problem; watch-mode rules only count (RATCHET_ROSE)","the repo names a gate command (NO_GATE)","the caller still owns the same live item claim or review and can renew it against the frozen criterion (ITEM_LEASE_LOST)","the gate, which submit runs itself every time, is green at HEAD (GATE_RED)","when the gate ends, HEAD and every tracked file are as they were when it started (MOVED_DURING_GATE)","recorded test selection names literal project files and its full-fallback policy (SUBMISSION_PROOF)","every child item is verified or withdrawn (CHILDREN_OPEN)","a verifier has not rejected this commit at this bar; after a no-verdict reopen, the bar was refrozen (HEAD_NOT_NEW)"]},{"verb":"reserve","from":["submitted"],"to":"submitted","by":["agent","coordinator"],"how":"pullboard next --verify","checks":["in the main checkout, the caller says it is the coordinator (MAIN_IS_COORDINATOR)","the caller is the main checkout, or a worktree that joined a lane (NOT_JOINED)","the roadmap is readable when selecting the next review (MILESTONES_CORRUPT)","the item exists (NO_ITEM)","the item is submitted (NOT_SUBMITTED)","the reviewer has not released this submission within the past hour (REVIEW_COOLDOWN)","the caller did not build it; on a linked board, at engine 48 or newer, the caller was enrolled through the relay by a line of creating seats from the coordinator that includes neither the builder nor a machine join (SELF_VERIFY)","the caller's route covers the item's: light, then mid, then strong (ROUTE)","the repo's verify policy lets the caller verify this lane's work (COORDINATOR_VERIFIES)","the builder and verifier have different declared families; an undeclared family counts as a match (O2_FAMILY_MATCH)","no other agent holds its review under a live lease (REVIEW_HELD)"]},{"verb":"accept","from":["submitted","verified"],"to":"verified","by":["agent","coordinator"],"how":"pullboard verify \u003cid> accept --note \"...\"","checks":["in the main checkout, the caller says it is the coordinator (MAIN_IS_COORDINATOR)","the caller is the main checkout, or a worktree that joined a lane (NOT_JOINED)","the item exists (NO_ITEM)","the item is submitted or verified (NOT_SUBMITTED)","the caller's checkout contains the submitted commit (NOT_AT_COMMIT)","the item has no recorded merge receipt (ALREADY_MERGED)","a new review binds the submitted commit, its exact checked commit, a valid trunk commit and canonical candidate paths (BAD_VERDICT_REVIEW)","a stale acceptance is re-reviewed at a clean HEAD containing the current trunk, which stays fixed through its check (STALE_VERDICT)","the caller did not build it; on a linked board, at engine 48 or newer, the caller was enrolled through the relay by a line of creating seats from the coordinator that includes neither the builder nor a machine join (SELF_VERIFY)","the caller's route covers the item's: light, then mid, then strong (ROUTE)","the repo's verify policy lets the caller verify this lane's work (COORDINATOR_VERIFIES)","the builder and verifier have different declared families; an undeclared family counts as a match (O2_FAMILY_MATCH)","no other agent holds its review under a live lease (REVIEW_HELD)","the criterion and the rows it cites read as they did at claim (CRITERIA_CHANGED)","an accept gives CRITERION_MET as its reason (BAD_REASON)","the candidate merges cleanly into the current primary branch without changing an index or worktree (MERGE_CONFLICT)","the candidate range contains no other item's unverified submitted commit (STACKED_ON_UNVERIFIED)","the caller still owns the same live item claim or review and can renew it against the frozen criterion (ITEM_LEASE_LOST)","the frozen item check passes at the submitted commit, or its clean reviewed composition for a stale acceptance (CHECK_RED)","an accept notes how it was proved (PROOF_REQUIRED)"]},{"verb":"reject","from":["submitted","verified"],"to":"open","by":["agent","coordinator"],"how":"pullboard verify \u003cid> reject --reason CODE --note \"...\"","checks":["in the main checkout, the caller says it is the coordinator (MAIN_IS_COORDINATOR)","the caller is the main checkout, or a worktree that joined a lane (NOT_JOINED)","the item exists (NO_ITEM)","the item is submitted or verified (NOT_SUBMITTED)","the caller's checkout contains the submitted commit (NOT_AT_COMMIT)","the item has no recorded merge receipt (ALREADY_MERGED)","a new review binds the submitted commit, its exact checked commit, a valid trunk commit and canonical candidate paths (BAD_VERDICT_REVIEW)","a stale acceptance is re-reviewed at a clean HEAD containing the current trunk, which stays fixed through its check (STALE_VERDICT)","the caller did not build it; on a linked board, at engine 48 or newer, the caller was enrolled through the relay by a line of creating seats from the coordinator that includes neither the builder nor a machine join (SELF_VERIFY)","the caller's route covers the item's: light, then mid, then strong (ROUTE)","the repo's verify policy lets the caller verify this lane's work (COORDINATOR_VERIFIES)","the builder and verifier have different declared families; an undeclared family counts as a match (O2_FAMILY_MATCH)","no other agent holds its review under a live lease (REVIEW_HELD)","the criterion and the rows it cites read as they did at claim (CRITERIA_CHANGED)","a reject names one of the reject reasons (BAD_REASON)","the move carries a note: what failed, what was tried, or why (NOTE_REQUIRED)","a cause, when given, is test:\u003cfile>::\u003ctitle>, refusal:\u003cCODE>, row:\u003cid>, doctrine:\u003cid> or sentinel:\u003cname> (BAD_CAUSE)"]},{"verb":"reopen","from":["submitted","verified"],"to":"open","by":["coordinator"],"how":"pullboard reopen \u003cid> --note \"why\" | --conflict \u003cfile> [--conflict \u003cfile>]","checks":["the caller is the main checkout, or a worktree that joined a lane (NOT_JOINED)","the item exists (NO_ITEM)","the item is submitted or verified (NOT_SUBMITTED)","the caller is the coordinator (COORDINATOR_ONLY)","the move carries a note: what failed, what was tried, or why (NOTE_REQUIRED)","a cause, when given, is test:\u003cfile>::\u003ctitle>, refusal:\u003cCODE>, row:\u003cid>, doctrine:\u003cid> or sentinel:\u003cname> (BAD_CAUSE)","the item has no recorded merge receipt (ALREADY_MERGED)","a verified item note names the failing test and landing merge commit (LANDING_FAILURE_REQUIRED)","the accepted commit no longer merges onto the trunk, and every named file is one that conflicts (NOT_CONFLICTING)","a trunk conflict reopens an accepted item, names its files and the full trunk commit, and replays only under engine 52 or later (NOT_ACCEPTED)"]},{"verb":"escalate","from":["open","claimed"],"to":"open","by":["agent","coordinator"],"how":"pullboard escalate \u003cid> --note \"...\"","checks":["the caller is the main checkout, or a worktree that joined a lane (NOT_JOINED)","the move carries a note: what failed, what was tried, or why (NOTE_REQUIRED)","the item exists (NO_ITEM)","the caller holds the item, or is the coordinator (NOT_YOURS)","the item is open or claimed (CLOSED)"]},{"verb":"refreeze","from":["open","claimed","submitted"],"to":"open","by":["coordinator"],"how":"pullboard refreeze \u003cid>","checks":["the caller is the main checkout, or a worktree that joined a lane (NOT_JOINED)","the caller is the coordinator (COORDINATOR_ONLY)","the item exists (NO_ITEM)","the item is open or claimed or submitted (CLOSED)","every row the item cites exists and is in force (UNKNOWN_SPEC)"]},{"verb":"refreeze","from":["claimed"],"to":"claimed","by":["agent","coordinator"],"how":"pullboard refreeze \u003cid>","checks":["the caller is the main checkout, or a worktree that joined a lane (NOT_JOINED)","the item exists (NO_ITEM)","the caller holds the item, or is the coordinator (NOT_YOURS)","the item is claimed (CLOSED)","every row the item cites exists and is in force (UNKNOWN_SPEC)"]},{"verb":"withdraw","from":["open","claimed","submitted"],"to":"withdrawn","by":["coordinator"],"how":"pullboard withdraw \u003cid> \u003creason>","checks":["the caller is the main checkout, or a worktree that joined a lane (NOT_JOINED)","the caller is the coordinator (COORDINATOR_ONLY)","the move carries a note: what failed, what was tried, or why (NOTE_REQUIRED)","the item exists (NO_ITEM)","the item is open or claimed or submitted (CLOSED)"]}]};
 
 /**
  * An item's history replayed through the lifecycle: each event with the state it found the item in
@@ -1760,14 +1806,15 @@ function detailOf(project, item, ask, root = view.root) {
   /** Keep the prior detail visible during a refresh, or return the short initial loading state. */
   const waiting = (entry) => (entry?.shown ? { item: { ...item, ...entry.shown } } : { loading: true });
   if (kept?.loading) return waiting(kept);
-  if (kept && kept.summary === summary && !movedSince(project, item.id, kept.cursor)) {
+  if (kept && kept.summary === summary && !movedSince(project, item.id, kept.cursor) && !(ask && kept.error && Date.now() - kept.failedAt >= 2_500)) {
     return kept.error ? { error: kept.error } : { item: { ...item, ...kept.detail } };
   }
   if (!ask) return waiting(kept && { shown: kept.detail });
   const entry = { loading: true, summary, cursor: project.events?.[0]?.event_id ?? 0, detail: null, error: null, shown: kept?.detail ?? null };
   itemDetails.set(key, entry);
   detailRead = api(boardPath(root) + '/items/' + encodeURIComponent(String(item.id))).then((reply) => { entry.detail = reply.item; },
-    (error) => { entry.error = String(error.message || error); }).finally(() => {
+    // A failed read is not the answer: while this item stays open it reads again in 3 s, so a dropped request recovers (#908).
+    (error) => { entry.error = String(error.message || error); entry.failedAt = Date.now(); setTimeout(() => { if (view.root === drawnRoot && view.item === item.id) render(); }, 3_000); }).finally(() => {
     entry.loading = false;
     if (view.root === drawnRoot && ((root === view.root && view.item === item.id) || view.tab === 'roadmap')) render();
   });
@@ -1933,6 +1980,7 @@ async function refresh(fresh = null) {
   if (!snapshot) follow();
   $('live').textContent = snapshot ? 'read-only snapshot' : liveLine();
   sharingReady ??= sharingInvitation();
+  transport?.didRender?.(); // The board drew: a transport holding a phone's shell may clear it; today's has no such call (#900).
 }
 
 // The local view follows the shown boards' events instead of a timer (#545): it reads the board once, waits on its
@@ -2291,7 +2339,7 @@ function renderSide() {
    * @param {boolean|'in-place'} allowLinks
    * @returns {string}
    */
-  function inline(text, titles, allowLinks = true, root = view.root) { return String(text ?? '').split(/(`[^`]*`|(?:[^\s:@()[\]{}"'`]+)?:\d+(?:-\d+)?@[0-9a-f]{0,40}|pullboard (?:hook pre-merge-commit|blueprint starters|join coordinator|milestone remove|prompt decompose|spec signers add|hook commit-msg|hook pre-commit|milestone items|milestone order|blueprint save|doctrine check|milestone edit|milestone move|milestone ship|prompt signoff|blueprint add|blueprint fit|hook pre-push|milestone add|prompt review|prompt verify|relay devices|relay recover|spec fit edit|check accept|relay revoke|relay status|relay tokens|spec approve|spec decline|spec signers|spec signoff|prompt plan|rigor draft|spec answer|view export|relay join|relay pair|runner add|spec apply|spec check|spec draft|spec unmet|blueprint|decisions|lifecycle|milestone|relay off|resources|spec show|spec view|doctrine|escalate|lane add|refreeze|relay on|settings|spec fit|takeover|withdraw|worktree|release|roadmap|version|answer|digest|doctor|export|forget|health|import|ledger|merged|prompt|reopen|resume|runner|skills|status|submit|verify|whoami|check|claim|hooks|inbox|lanes|relay|rigor|serve|shout|stats|sweep|watch|done|edit|fact|gate|help|hold|hook|init|join|land|lane|list|next|pass|show|spec|tour|view|add|log|mcp|run|why)(?![\w-])(?: (?:--?[\w-]+|\d+|#\d+|"[^"\n]*"|[A-Z][A-Z0-9_]*|[\w-]*[\/.:@][^\s"]*|[a-z]+-\d+)(?![\w-]))*|--[\w-]+|(?:\/|\.\.?\/|[\w.-]+\/)\w[\w./-]*\.[A-Za-z0-9]+|\b[0-9a-fA-F]{7,40}\b|#\d+)/g).map((part, n, parts) => {
+  function inline(text, titles, allowLinks = true, root = view.root) { return String(text ?? '').split(/(`[^`]*`|(?:[^\s:@()[\]{}"'`]+)?:\d+(?:-\d+)?@[0-9a-f]{0,40}|pullboard (?:settings gate.shortSlots|hook pre-merge-commit|settings browserSlots|blueprint starters|settings gateSlots|join coordinator|milestone remove|prompt decompose|sentinel approve|sentinel decline|sentinel propose|spec signers add|hook commit-msg|hook pre-commit|milestone items|milestone order|blueprint save|doctrine check|milestone edit|milestone move|milestone ship|prompt signoff|blueprint add|blueprint fit|hook pre-push|milestone add|prompt review|prompt verify|relay devices|relay recover|spec fit edit|check accept|relay revoke|relay status|relay tokens|spec approve|spec decline|spec signers|spec signoff|prompt plan|rigor draft|spec answer|view export|relay join|relay pair|runner add|spec apply|spec check|spec draft|spec unmet|blueprint|decisions|lifecycle|milestone|relay off|resources|sentinels|spec show|spec view|doctrine|escalate|gate set|lane add|refreeze|relay on|sentinel|settings|spec fit|takeover|withdraw|worktree|release|roadmap|version|answer|digest|doctor|export|forget|health|import|ledger|merged|prompt|reopen|resume|runner|skills|status|submit|verify|whoami|check|claim|hooks|inbox|lanes|queue|relay|rigor|serve|shout|stats|sweep|watch|done|edit|fact|gate|help|hold|hook|init|join|land|lane|list|next|pass|show|spec|tour|view|add|log|mcp|run|why)(?![\w-])(?: (?:--?[\w-]+|\d+|#\d+|"[^"\n]*"|[A-Z][A-Z0-9_]*|[\w-]*[\/.:@][^\s"]*|[a-z]+-\d+)(?![\w-]))*|--[\w-]+|(?:\/|\.\.?\/|[\w.-]+\/)\w[\w./-]*\.[A-Za-z0-9]+|\b[0-9a-fA-F]{7,40}\b|#\d+)/g).map((part, n, parts) => {
     if (part.startsWith('`') && part.endsWith('`')) return codeChip(part.slice(1, -1));
     if (part.includes('@') && part.includes(':')) {
       const textBefore = parts.slice(0, n).join('');
@@ -2308,7 +2356,7 @@ function renderSide() {
       if (allowLinks === true && validRef) return codeRef(part, textBefore.slice(-2000));
       return codeChip(part);
     }
-    if (/^(?:pullboard (?:hook pre-merge-commit|blueprint starters|join coordinator|milestone remove|prompt decompose|spec signers add|hook commit-msg|hook pre-commit|milestone items|milestone order|blueprint save|doctrine check|milestone edit|milestone move|milestone ship|prompt signoff|blueprint add|blueprint fit|hook pre-push|milestone add|prompt review|prompt verify|relay devices|relay recover|spec fit edit|check accept|relay revoke|relay status|relay tokens|spec approve|spec decline|spec signers|spec signoff|prompt plan|rigor draft|spec answer|view export|relay join|relay pair|runner add|spec apply|spec check|spec draft|spec unmet|blueprint|decisions|lifecycle|milestone|relay off|resources|spec show|spec view|doctrine|escalate|lane add|refreeze|relay on|settings|spec fit|takeover|withdraw|worktree|release|roadmap|version|answer|digest|doctor|export|forget|health|import|ledger|merged|prompt|reopen|resume|runner|skills|status|submit|verify|whoami|check|claim|hooks|inbox|lanes|relay|rigor|serve|shout|stats|sweep|watch|done|edit|fact|gate|help|hold|hook|init|join|land|lane|list|next|pass|show|spec|tour|view|add|log|mcp|run|why)(?![\w-])(?: (?:--?[\w-]+|\d+|#\d+|"[^"\n]*"|[A-Z][A-Z0-9_]*|[\w-]*[\/.:@][^\s"]*|[a-z]+-\d+)(?![\w-]))*|--[\w-]+)$/.test(part)) return codeChip(part, 'cmd');
+    if (/^(?:pullboard (?:settings gate.shortSlots|hook pre-merge-commit|settings browserSlots|blueprint starters|settings gateSlots|join coordinator|milestone remove|prompt decompose|sentinel approve|sentinel decline|sentinel propose|spec signers add|hook commit-msg|hook pre-commit|milestone items|milestone order|blueprint save|doctrine check|milestone edit|milestone move|milestone ship|prompt signoff|blueprint add|blueprint fit|hook pre-push|milestone add|prompt review|prompt verify|relay devices|relay recover|spec fit edit|check accept|relay revoke|relay status|relay tokens|spec approve|spec decline|spec signers|spec signoff|prompt plan|rigor draft|spec answer|view export|relay join|relay pair|runner add|spec apply|spec check|spec draft|spec unmet|blueprint|decisions|lifecycle|milestone|relay off|resources|sentinels|spec show|spec view|doctrine|escalate|gate set|lane add|refreeze|relay on|sentinel|settings|spec fit|takeover|withdraw|worktree|release|roadmap|version|answer|digest|doctor|export|forget|health|import|ledger|merged|prompt|reopen|resume|runner|skills|status|submit|verify|whoami|check|claim|hooks|inbox|lanes|queue|relay|rigor|serve|shout|stats|sweep|watch|done|edit|fact|gate|help|hold|hook|init|join|land|lane|list|next|pass|show|spec|tour|view|add|log|mcp|run|why)(?![\w-])(?: (?:--?[\w-]+|\d+|#\d+|"[^"\n]*"|[A-Z][A-Z0-9_]*|[\w-]*[\/.:@][^\s"]*|[a-z]+-\d+)(?![\w-]))*|--[\w-]+)$/.test(part)) return codeChip(part, 'cmd');
     if (/^(?:\/|\.\.?\/|[\w.-]+\/)\w[\w./-]*\.[A-Za-z0-9]+$/.test(part)) return codeChip(part, 'path');
     if (/^[0-9a-fA-F]{7,40}$/.test(part)) return codeChip(part, 'sha');
     return linked(part, titles, allowLinks, root);
@@ -2423,7 +2471,7 @@ function milestoneItem(entry, p) {
     state: read ? stateOf(read) : null,
     stale: item ? staleChip(item) : '',
     block: item ? roadmapBlock(detail?.item || item, {
-      holds: root === view.root ? source.holds : source.laneHolds, items: source.items, name: (id) => agentName(id, source), time: when, state: stateOf,
+      holds: root === view.root ? source.holds : source.laneHolds, items: source.items, agents: source.agents, state: stateOf,
       address: (id) => itemAddress(id, root), board: root === view.root ? null : root,
       releases: (p.milestones || []).filter((milestone) => milestone.items.some((ref) => ref.id === entry.id)).map((milestone) => milestone.name),
       loading: detail?.loading, error: detail?.error,
@@ -2508,7 +2556,7 @@ function readMilestone(milestone, p) {
   const numeric = value => Number.isInteger(value) && value >= 0 ? value : null;
   const done = numeric(milestone.summary?.landed) ?? numeric(milestone.landed) ?? verified.length;
   const total = numeric(milestone.summary?.total) ?? numeric(milestone.total) ?? rows.length;
-  // Nothing left (every item landed or withdrawn) is finished and sits under Shipped, shipped or not (the person, 18 Oct).
+  // Nothing left (every item landed or withdrawn) is finished and sits under Shipped, shipped or not.
   const left = numeric(milestone.summary?.left), finished = milestone.items.length > 0 && (left !== null ? left === 0 : rows.every((row) => row.stage === 'merged'));
   const shipped = finished || (milestone.shipped !== undefined ? Boolean(milestone.shipped) : rows.length > 0 && verified.length === rows.length);
   return { milestone, rows, done, total, shipped };
@@ -2660,7 +2708,7 @@ function renderReleaseNotes(project) {
 function render() {
   // A refresh that moved the page to another board closes a confirmation opened on the last one.
   closeIfLeft();
-  if (heldClickPointer !== null) { deferredClickRender = true; return; }
+  if (heldClickPointer !== null || pageDialogs.size) { deferredClickRender = true; return; }
   deferredClickRender = false;
   const statsFocus = document.activeElement?.id === 'proof-stats-summary' ? document.activeElement.id : null;
   const p = data.project;
@@ -3584,15 +3632,12 @@ function leaveDialogs() {
  * cannot act on the page, or switch the board, under a question the page is asking.
  */
 function openModal(dialog, focus) {
-  dialog.hidden = false;
-  for (const element of document.body.children || []) if (element !== dialog && element.tagName !== 'SCRIPT') element.inert = true;
-  focus.focus();
+  openPageDialog(dialog, focus, pageDialogs);
 }
 
 /** Hide a page dialog and give the page back its clicks and focus. */
 function closeModal(dialog) {
-  dialog.hidden = true;
-  for (const element of document.body.children || []) element.inert = false;
+  if (closePageDialog(dialog, pageDialogs) && deferredClickRender) requestAnimationFrame(() => { if (!pageDialogs.size && heldClickPointer === null && deferredClickRender) { deferredClickRender = false; render(); } });
 }
 
 /** Keep Tab and Shift+Tab cycling through an open page dialog's own controls. */
@@ -4132,11 +4177,11 @@ let transportLoading = null;
 async function loadTransport() {
   if (transport) return transport;
   if (!transportLoading) transportLoading = (async () => {
-    const module = await import(configuredTransportModule);
+    const module = await pageStartup(document.documentElement).within(() => import(configuredTransportModule), 15_000, 'The relay client did not load within 15 seconds.');
     if (typeof module.createTransport !== 'function') throw new Error('The browser transport must export createTransport({ onUpdate }).');
     const configured = await module.createTransport({
       onUpdate: () => transport ? refresh().catch((error) => { $('live').textContent = 'offline: ' + error.message; }) : Promise.resolve(),
-      onOpenBoard: openApprovedBoard,
+      onOpenBoard: openApprovedBoard, waitForRender: true, // A phone's transport keeps its shell until didRender (#899).
     });
     if (!configured || typeof configured.request !== 'function') throw new Error('The browser transport must provide request(path, body).');
     transportModule = configuredTransportModule;
@@ -4144,7 +4189,7 @@ async function loadTransport() {
     return transport;
   })();
   try { return await transportLoading; }
-  catch (error) { transportLoadError = error; throw error; }
+  catch (error) { transportLoadError = error; pageStartup(document.documentElement).say(error.message + ' Check your connection, then reload this page.'); throw error; }
   finally { transportLoading = null; }
 }
 
