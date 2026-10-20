@@ -1124,9 +1124,9 @@ test('a hosted wait that times out names the page state and Chrome\'s network se
     chrome = namedWaits(await openSnapshotChrome(executable, 'about:blank', profile), profile);
     // A wait that can never pass: its error must carry what the page showed and Chrome's network-service pids (#908).
     const error = await chrome.waitFor('false', 1_000).then(() => null, (failure) => failure); // budget: hang ceiling for a condition that never holds.
-    assert.ok(error, 'the impossible wait failed');
-    assert.match(error.message, /; the hosted page showed \{"origin":"[^"]*","search":"[^"]*","note":[^,]*,"rows":\d+,"detail":"[^"]*","relaySession":/u, 'the failure names the page state');
-    assert.match(error.message, /; chrome \{"networkService":\{"atStart":\[\d*\],"now":\[\d*\]\}/u, 'and Chrome\'s network-service pids, start and now');
+    assert.ok(error, 'the impossible wait failed');  // budget: hang ceiling only; this judges the failure's text, never its timing.
+    assert.match(error.message, /; the hosted page showed \{"origin":"[^"]*","search":"[^"]*","note":[^,]*,"rows":\d+,"detail":"[^"]*","relaySession":/u, 'the failure names the page state');  // budget: hang ceiling only; this judges the failure's text, never its timing.
+    assert.match(error.message, /; chrome \{"networkService":\{"atStart":\[\d*\],"now":\[\d*\]\}/u, 'and Chrome\'s network-service pids, start and now');  // budget: hang ceiling only; this judges the failure's text, never its timing.
   } finally {
     try { if (chrome) await closeSnapshotChrome(chrome); }
     finally { rmSync(profile, { recursive: true, force: true }); }
