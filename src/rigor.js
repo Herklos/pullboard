@@ -7,6 +7,7 @@ import { COORDINATOR } from './config.js';
 import { Refused } from './refused.js';
 import { HEALTH_SENTINEL_ENGINE } from './health-receipts.js';
 import { BOARD_SENTINEL_ENGINE } from './sentinel-engine.js';
+import { NATIVE_FLAKE_ENGINE } from './flake-engine.js';
 
 /** The kinds of cause key and their shapes, in the order help and refusals name them. */
 export const CAUSE_FORMS = Object.freeze(['test:<file>::<title>', 'refusal:<CODE>', 'row:<id>', 'doctrine:<id>', 'sentinel:<name>']);
@@ -97,8 +98,10 @@ export function causeReading(key) {
  * @returns {string[]}
  */
 export function eventCauses(event) {
-  if (!['reject', 'reopen', 'health-failure', 'sentinel-failure'].includes(event.event_kind)) return [];
+  if (!['reject', 'reopen', 'health-failure', 'sentinel-failure', 'flake-observation'].includes(event.event_kind)) return [];
   const detail = JSON.parse(event.event_detail);
+  if (event.event_kind === 'flake-observation') return detail.engine === NATIVE_FLAKE_ENGINE && detail.observation?.classification === 'flake'
+    ? [testCause(detail.observation)] : [];
   if (event.event_kind === 'health-failure' && (event.event_by !== 'sentinel' || detail.engine !== HEALTH_SENTINEL_ENGINE)) return [];
   if (event.event_kind === 'sentinel-failure' && (event.event_by !== 'sentinel' || detail.engine !== BOARD_SENTINEL_ENGINE)) return [];
   const keys = [];
@@ -139,7 +142,7 @@ export function rigorReport(events, { person }) {
   let uncaused = 0;
   /** The running record for one cause key. */
   const entry = (key) => {
-    if (!byKey.has(key)) byKey.set(key, { key, reads: causeReading(key), items: new Map(), occurrences: 0, healthOccurrences: 0, neverAgain: false });
+    if (!byKey.has(key)) byKey.set(key, { key, reads: causeReading(key), items: new Map(), occurrences: 0, healthOccurrences: 0, flakeOccurrences: 0, neverAgain: false });
     return byKey.get(key);
   };
   for (const event of events) {
@@ -147,6 +150,8 @@ export function rigorReport(events, { person }) {
       && (event.event_by !== 'sentinel' || JSON.parse(event.event_detail)?.engine !== HEALTH_SENTINEL_ENGINE)) continue;
     if (event.event_kind === 'sentinel-failure'
       && (event.event_by !== 'sentinel' || JSON.parse(event.event_detail)?.engine !== BOARD_SENTINEL_ENGINE)) continue;
+    if (event.event_kind === 'flake-observation' && (JSON.parse(event.event_detail)?.engine !== NATIVE_FLAKE_ENGINE
+        || JSON.parse(event.event_detail)?.observation?.classification !== 'flake')) continue;
     const never = neverAgainCause(event, person);
     if (never && !isMergeConflict(never)) {
       const found = entry(never);
@@ -154,7 +159,7 @@ export function rigorReport(events, { person }) {
       if (event.item_id !== null && !found.items.has(event.item_id)) found.items.set(event.item_id, new Set());
       continue;
     }
-    if (!['reject', 'reopen', 'health-failure', 'sentinel-failure'].includes(event.event_kind)) continue;
+    if (!['reject', 'reopen', 'health-failure', 'sentinel-failure', 'flake-observation'].includes(event.event_kind)) continue;
     const keys = eventCauses(event);
     if (!keys.length) {
       uncaused += 1;
@@ -164,6 +169,7 @@ export function rigorReport(events, { person }) {
     for (const key of keys.filter((candidate) => !isMergeConflict(candidate))) {
       const found = entry(key);
       found.occurrences += 1;
+      if (event.event_kind === 'flake-observation') found.flakeOccurrences += 1;
       if (['health-failure', 'sentinel-failure'].includes(event.event_kind)) found.healthOccurrences += 1;
       if (event.item_id === null) continue;
       const commits = found.items.get(event.item_id) ?? new Set();
@@ -172,7 +178,7 @@ export function rigorReport(events, { person }) {
     }
   }
   const causes = [...byKey.values()]
-    .filter(found => found.neverAgain || found.healthOccurrences >= 2 || found.items.size >= 2 || [...found.items.values()].some(commits => commits.size >= 2))
+    .filter(found => found.neverAgain || found.healthOccurrences >= 2 || found.flakeOccurrences >= 2 || found.items.size >= 2 || [...found.items.values()].some(commits => commits.size >= 2))
     .map((found) => ({ key: found.key, reads: found.reads, occurrences: found.occurrences, neverAgain: found.neverAgain,
       items: [...found.items].map(([id, commits]) => ({ id, commits: [...commits] })).sort((a, b) => a.id - b.id) }))
     .sort((a, b) => Number(b.neverAgain) - Number(a.neverAgain) || b.items.length - a.items.length || b.occurrences - a.occurrences || a.key.localeCompare(b.key));
