@@ -7,7 +7,7 @@
     "test/refusal-next-steps.test.js"
   ],
   "spec": "SPEC.md",
-  "verify": "any",
+  "verify": { "policy": "any", "unrelatedTrunkMoves": true },
   "lease": "2h",
   "lanes": {
     "core": {
