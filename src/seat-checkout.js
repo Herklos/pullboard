@@ -40,7 +40,7 @@ export function unjoinedRefusal(info, agents) {
  *
  * @param {{ root: string, commonDir: string }} info
  * @param {any[]} agents
- * @param {{ item_id: number, item_status: string, item_owner: string|null }} item
+ * @param {object} item - the item as getItem returns it; its id, status and owner are read
  * @param {string} command - The command to repeat in the holder's checkout.
  */
 export function refuseHeldElsewhere(info, agents, item, command) {
