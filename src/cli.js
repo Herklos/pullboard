@@ -329,7 +329,7 @@ import {
 } from './serve.js';
 import {
   forgetView,
-  portHolder,
+  busyViewPortRefusal,
   rememberView,
   runningView,
 } from './view-session.js';
@@ -1978,10 +1978,7 @@ async function viewHere(io, values) {
       // The background child is handed --port explicitly, so the default is matched by number.
       let hosted = false;
       try { hosted = port !== 0 && port === defaultViewPort(); } catch { /* A malformed override names no default port. */ }
-      const holder = hosted ? portHolder(port) : null;
-      const stop = holder && (process.platform === 'win32' ? `taskkill /PID ${holder.pid} /T` : `kill ${holder.pid}`);
-      error = new Refused('PORT_BUSY', !hosted ? `port ${port} is in use: name another with --port N, or use --port 0 to take a free one`
-        : `port ${port} is in use${holder ? ` by ${holder.name} (pid ${holder.pid})` : ''}, and pullboard.dev looks for your view on that port: stop ${holder ? `it with ${stop}` : 'the other view there'}, then run pullboard view again`);
+      error = busyViewPortRefusal(port, hosted);
     }
     if (process.env.PULLBOARD_VIEW_BACKGROUND_CHILD === '1' && process.send) {
       process.send({ type: 'startup-error', code: error.code ?? 'VIEW_START', message: error.message });
@@ -2649,7 +2646,7 @@ function readCommands(io, { first, second, rest, values }) {
       return 0;
     },
     rigor: () => {
-      if (first === 'draft') { const ctx = context(io); return rigorDraftCommand(io, { second, rest, values }, { root: ctx.info.root, config: ctx.config, read: () => withBoard(ctx, (board) => ({ events: store.events(board), actor: whoAmI(ctx, board).id })), reserve: (row) => reserveRow(ctx, row, true) }); }
+      if (first === 'draft') { const ctx = context(io); return rigorDraftCommand(io, { second, rest, values }, { root: ctx.info.root, config: ctx.config, read: () => withBoard(ctx, (board) => ({ events: store.events(board), actor: whoAmI(ctx, board).id })), reserve: (row) => reserveRow(ctx, row, true), propose: (row, evidence) => withBoard(ctx, async (board) => ordered(ctx, board, 'proposeSentinel', [{ agentId: whoAmI(ctx, board).id, row, evidence }])) }); }
       if (first || second || rest.length) throw new Refused('USAGE', 'pullboard rigor takes no arguments; to draft a rule: pullboard rigor draft <key> "<rule>" --check "<command>" --red <commit> --green <commit>');
       const ctx = context(io);
       const report = withBoard(ctx, (board) => rigorReport(store.events(board), { person: store.PERSON }));
