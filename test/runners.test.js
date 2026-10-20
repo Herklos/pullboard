@@ -1914,3 +1914,65 @@ test('a refused runner checkout names its failed Git step and stderr [C6,C7]', a
     await t.test(mode, child => sourceSetupFailureFixture(child, { cli, git, runThroughGate, gateResult }, mode));
   }
 });
+
+test('a red on a registered runner gets its paired rerun and ledger entry, or stays unclassified without the host load [C7]', { timeout: 300_000 }, async (t) => {
+  for (const mode of ['remote-load', 'no-load', 'paired-no-load']) await t.test(mode, async () => {
+    const helper = createE2eHelpers();
+    t.after(helper.cleanup);
+    const box = helper.project('true');
+    const repo = box.repo;
+    const [fixtureBin, remoteHome, worker] = ['runner-bin', 'runner-home', 'second-machine'].map((name) => join(box.dir, name));
+    const remoteMachineHome = join(remoteHome, '.pullboard');
+    for (const folder of [fixtureBin, remoteMachineHome, worker, join(repo, 'test')]) mkdirSync(folder, { recursive: true });
+    const env = { ...box.env, PATH: fixtureBin + ':' + box.env.PATH };
+    writeFileSync(join(repo, 'package.json'), JSON.stringify({ private: true, type: 'module' }) + '\n');
+    for (const part of ['src', 'bin']) cpSync(resolve(import.meta.dirname, '..', part), join(repo, part), { recursive: true });
+    // Red on its first run, green on its paired rerun: a flake the ledger should record.
+    const runs = join(box.dir, 'flaky-runs');
+    writeFileSync(join(repo, 'test/flaky.test.js'), `import { test } from 'node:test'; import { appendFileSync, existsSync, readFileSync } from 'node:fs';
+test('remote flaky case', () => { const n = existsSync(${JSON.stringify(runs)}) ? readFileSync(${JSON.stringify(runs)}, 'utf8').length : 0; appendFileSync(${JSON.stringify(runs)}, 'x'); if (n === 0) throw new Error('first run fails'); });\n`);
+    const config = JSON.parse(readFileSync(join(repo, 'pullboard.json'), 'utf8'));
+    writeFileSync(join(repo, 'pullboard.json'), JSON.stringify({ ...config, gate: 'node bin/run-tests.js test/flaky.test.js', flakes: { rerun: true } }) + '\n');
+    box.git(repo, 'add', '-A');
+    box.git(repo, 'commit', '-q', '-m', 'test: a remote flaky fixture');
+    // The worker reports a known load, or (as an older worker would) a receipt without one: on every run, or only on
+    // the paired rerun, whose receipt the classification rests on too (#925). A marker file spans worker processes.
+    const preload = join(box.dir, 'worker-preload.mjs');
+    const firstReceipt = join(box.dir, 'first-receipt-seen');
+    const strip = mode === 'no-load' ? 'true' : `existsSync(${JSON.stringify(firstReceipt)}) || (writeFileSync(${JSON.stringify(firstReceipt)}, ''), false)`;
+    writeFileSync(preload, mode === 'remote-load'
+      ? "import { createRequire } from 'node:module'; const require = createRequire(import.meta.url); const os = require('node:os'); os.loadavg = () => [7.25, 7.25, 7.25]; require('node:module').syncBuiltinESMExports();\n"
+      : "import { existsSync, writeFileSync } from 'node:fs'; const write = process.stderr.write.bind(process.stderr); process.stderr.write = (chunk, ...rest) => { const text = String(chunk); const match = /^(PULLBOARD_RUNNER_RESULT \\S+ )(\\S+)\\n$/u.exec(text); if (!match) return write(chunk, ...rest); const body = JSON.parse(Buffer.from(match[2], 'base64').toString('utf8')); if (" + strip + ") delete body.load; return write(match[1] + Buffer.from(JSON.stringify(body)).toString('base64') + '\\n', ...rest); };\n");
+    installSshStandIn({ bin: fixtureBin, worker, home: remoteHome, machineHome: remoteMachineHome, requests: join(box.dir, 'requests.jsonl'), nodeOptions: '--import=' + pathToFileURL(preload).href });
+    assert.equal(cli(repo, env, 'settings', 'gateSlots', '1', '--json').status, 0);
+    const registered = cli(repo, env, 'runner', 'add', HOST, '--slots', '1', '--browser', '1', '--json');
+    assert.equal(registered.status, 0, fixtureResultContext(registered));
+    const prior = { home: process.env.PULLBOARD_HOME, machine: process.env.PULLBOARD_MACHINE_HOME };
+    Object.assign(process.env, { PULLBOARD_HOME: env.PULLBOARD_HOME, PULLBOARD_MACHINE_HOME: env.PULLBOARD_MACHINE_HOME });
+    const held = await takeResource({ name: 'gate', capacity: 1, scope: 'machine', root: repo, agent: 'flake-local-holder', item: 'flake-local-holder', kind: 'force-registered-runner' });
+    try {
+      const run = observe(startToolingCli(repo, env, ['gate', '--json'], { detached: true }));
+      const finished = await awaitRoundTrip(run.child, run.closed, join(box.dir, 'requests.jsonl.phases'), { dispatched: 0, returned: 0 });
+      assert.equal(finished.status, 1, 'the original red stays the gate result');
+    } finally {
+      held.release();
+      for (const [key, value] of [['PULLBOARD_HOME', prior.home], ['PULLBOARD_MACHINE_HOME', prior.machine]]) if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+    const evidence = join(repo, '.git', 'pullboard', 'flake-evidence');
+    const [observation] = readdirSync(evidence).map((id) => JSON.parse(readFileSync(join(evidence, id, 'observation.json'), 'utf8')));
+    assert.equal(observation.main, box.git(repo, 'rev-parse', 'HEAD'), 'the pinned main is recorded');
+    if (mode === 'remote-load') {
+      assert.equal(observation.classification, 'flake', observation.reason);
+      assert.deepEqual(observation.load.average, [7.25, 7.25, 7.25], 'the execution host\'s load is recorded, not the controller\'s');
+      assert.equal(observation.paired?.green, true, 'the one paired rerun ran and passed');
+    } else if (mode === 'no-load') {
+      assert.equal(observation.classification, 'unclassified');
+      assert.match(observation.reason, /does not carry the execution host's load/u);
+      assert.equal(observation.paired, null, 'no rerun is guessed without the host load');
+    } else {
+      assert.equal(observation.paired?.green, true, 'the paired rerun ran and passed, but its receipt lacks the host load');
+      assert.equal(observation.classification, 'unclassified', 'a green pair without its host load never makes a flake: ' + observation.reason);
+      assert.match(observation.reason, /paired remote receipt does not carry the execution host's load/u);
+    }
+  });
+});
