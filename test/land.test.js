@@ -1,6 +1,6 @@
 /** Exercise landing against real private Git worktrees, hooks, SQLite and bare remotes [B3,R3]. */
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { after, test } from 'node:test';
 import * as store from '../src/board.js';
@@ -1324,4 +1324,36 @@ test('landing records replay identically with native sender and engine boundarie
   const forged = prepareEngineMove(boards[0], 'recordLandingWaiver', operations[1][1], { id: 'forged-landing-waiver', actor: 'person' });
   const spoof = applyRelayMove(boards[0], forged, { sequence: 5, at: '2026-10-10T17:32:00.000Z', kind: 'move', sender: { kind: 'agent', userId: 'fixture-person', agent: 'web-1' } });
   assert.equal(spoof.error?.code, 'RELAY_PERSON_ONLY');
+});
+
+test('an item with no spec rows lands under a header its commit hook accepts [B3,R3]', () => {
+  const box = landProject();
+  // A docs-lane item with no spec rows: its commit cites none, and its merge header names its lane's type.
+  const config = JSON.parse(readFileSync(join(box.repo, 'pullboard.json'), 'utf8'));
+  config.lanes.docs = { owns: ['docs/'], specs: [] };
+  writeFileSync(join(box.repo, 'pullboard.json'), JSON.stringify(config, null, 2));
+  box.git(box.repo, 'add', 'pullboard.json');
+  box.git(box.repo, 'commit', '-q', '-m', 'chore: add a docs lane');
+  box.git(box.web, 'merge', '-q', '--ff-only', 'main');
+  const path = join(box.dir, 'docs-land-1');
+  box.git(box.repo, 'worktree', 'add', '-q', '-b', 'docs/land-1', path, 'main');
+  assert.equal(box.run(path, 'join', 'docs').code, 0);
+  const added = box.run(box.repo, 'add', 'docs', 'Docs fixture with no rows', '--criterion', 'the docs fixture is valid',
+    '--check', `node ${JSON.stringify(box.checks)} ${JSON.stringify('docs/land-1.test.js')}`, '--json');
+  assert.equal(added.code, 0, added.err);
+  const item = JSON.parse(added.out).item.item_id;
+  assert.equal(box.run(path, 'claim', String(item)).code, 0);
+  mkdirSync(join(path, 'docs'), { recursive: true });
+  writeFileSync(join(path, 'docs', 'land-1.md'), 'docs\n');
+  writeFileSync(join(path, 'docs', 'land-1.test.js'), 'PASS\n');
+  box.git(path, 'add', '-A');
+  box.git(path, 'commit', '-q', '-m', 'docs(docs): describe the docs fixture');
+  const entry = { path, item, file: 'docs/land-1.test.js', commit: box.git(path, 'rev-parse', 'HEAD') };
+  assert.equal(box.run(path, 'submit', String(item)).code, 0, 'the docs commit submits');
+  acceptItem(box, entry);
+  const base = box.git(box.repo, 'rev-parse', 'main');
+  const result = json(box, box.repo, 'land', '--max', '1');
+  assert.deepEqual(result.landed, [item]);
+  const [subject] = mergeSubjects(box, base, result.batch.tip);
+  assert.equal(subject, 'docs(merge): docs fixture with no rows', 'a docs-lane item with no rows lands under docs(merge)');
 });

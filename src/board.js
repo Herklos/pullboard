@@ -79,8 +79,9 @@ import {
 } from './trunk-conflict.js';
 import {
   HEALTH_SENTINEL_ENGINE,
+  deliverHealthNotices,
   healthFindingIdentity,
-  healthFindingNotice,
+  healthTargets,
   normalizedHealthFindings,
 } from './health-receipts.js';
 import { factReference } from './fact-reference.js';
@@ -1972,20 +1973,17 @@ export function recordHealthFindings(board, { agentId, observedRevision, finding
     if (!added.length && !resolved.length) return { added: [], resolved: [] };
     const agents = listAgents(board);
     const lanes = [...new Set(agents.map(agent => agent.agent_lane))];
+    const engine = board.executionEngineVersion ?? ENGINE_VERSION;
     /** Deliver through ordinary feed/inbox records without registering a synthetic worktree seat. */
-    const notify = (finding, cleared) => {
-      const owner = finding.owner;
-      const targets = new Set([COORDINATOR]);
-      if (owner && (owner === PERSON || lanes.includes(owner) || agents.some(agent => agent.agent_id === owner))) targets.add(owner);
-      for (const to of targets) insertShout(board, { from: 'sentinel', to, text: healthFindingNotice(finding, cleared), lanes });
+    const log = (finding, cleared) => {
       const item = finding.item === null ? null : itemById(board, finding.item);
       logEvent(board, 'sentinel', cleared ? 'health-resolved' : 'health-failure', finding.item, {
         key: finding.key, cause: `refusal:${finding.cause}`, since: finding.since, subject: finding.subject,
-        owner, commit: item?.item_commit ?? null, engine: HEALTH_SENTINEL_ENGINE,
+        owner: finding.owner, commit: item?.item_commit ?? null, engine: HEALTH_SENTINEL_ENGINE,
       });
     };
-    for (const finding of resolved) notify(finding, true);
-    for (const finding of added) notify(finding, false);
+    deliverHealthNotices({ resolved, added, engine, log, coordinator: COORDINATOR, shout: (to, text) => insertShout(board, { from: 'sentinel', to, text, lanes }),
+      targets: finding => healthTargets(finding, { engine, coordinator: COORDINATOR, person: PERSON, lanes, agents }) });
     logEvent(board, agentId, 'health-scan', null, { active, engine: HEALTH_SENTINEL_ENGINE });
     return { added: added.map(finding => finding.key), resolved: resolved.map(finding => finding.key) };
   });

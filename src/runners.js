@@ -445,7 +445,8 @@ function requestFor(root, command, { runner, source, browser = false, pipefail =
       browser: runner.browser, browserRequired: browser, landing: metadata.landing === true,
       ...(stages ? { stageMarker: `PULLBOARD_STAGE_${randomUUID().replaceAll('-', '')}` } : {}), waivers: projection,
       itemCheck: metadata.itemCheck === true, diagnostic: metadata.diagnostic === true,
-      item: String(metadata.item ?? ''), kind: String(metadata.kind ?? ''), ...(runner.root ? { root: runner.root } : {}) };
+      item: String(metadata.item ?? ''), kind: String(metadata.kind ?? ''), ...(runner.root ? { root: runner.root } : {}),
+      ...(typeof metadata.main === 'string' && /^[0-9a-f]{40,64}$/u.test(metadata.main) ? { main: metadata.main } : {}) };
     const encodedSpec = Buffer.from(JSON.stringify(spec));
     if (encodedSpec.length > 1024 ** 2) throw new Refused('RUNNER_REQUEST_LIMIT', 'runner tooling request exceeds its safe transfer limit; keep this run local');
     const remote = remoteWorkerCommand(runner, worker, tooling, runtime);
@@ -501,7 +502,15 @@ function resultFrom(request, result) {
     ...(request.spec.stageMarker ? { stages: staged?.stages ?? null } : {}),
     seconds: Math.round(receipt.wallMs / 1000), exitCode: receipt.code,
     executionRunner: request.runner.host, executionRoot: receipt.root, remoteWallMs: receipt.wallMs,
-    executionSource: { commit: receipt.commit, tree: receipt.tree, tooling: request.spec.tooling } };
+    executionSource: { commit: receipt.commit, tree: receipt.tree, tooling: request.spec.tooling },
+    executionMain: request.spec.main && receipt.main === request.spec.main ? receipt.main : null, executionLoad: remoteLoad(receipt.load) };
+}
+
+/** The execution host's load from a receipt, or null when any part of it is missing or malformed (#925). */
+function remoteLoad(load) {
+  const average = Array.isArray(load?.average) && load.average.length === 3 && load.average.every((value) => Number.isFinite(value) && value >= 0) ? load.average : null;
+  return average && Number.isInteger(load.cpus) && load.cpus > 0 && Number.isInteger(load.freeMB) && load.freeMB >= 0
+    ? { average, cpus: load.cpus, freeMB: load.freeMB } : null;
 }
 
 /** Keep synchronous gate callers on the same negotiated transport as asynchronous comparisons. */

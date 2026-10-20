@@ -509,6 +509,8 @@ export const NEXT_STEPS = Object.freeze({
   SEAL_VERSION: 'upgrade Pullboard on this device: npm install -g pullboard@latest',
   SELF_SHOUT: 'name another agent, a lane or all: pullboard shout all "<text>"',
   SELF_VERIFY: 'ask a different agent to verify it; from main create its worktree with pullboard worktree <lane> --model "<model name>"',
+  SESSION_LEDGER: 'make the agent-session ledger named in the message writable by this user, then run the command again',
+  SELF_SESSION_VERIFY: 'ask another agent session to verify it: pullboard next --verify from that session\'s own worktree',
   SERVICE_ERROR: 'retry the call; if it repeats, restart pullboard serve',
   SHALLOW_BEFORE_OPT_IN: 'git fetch --unshallow, then pullboard spec signers add',
   SHOUT_NOT_AVAILABLE: 'read shouts with pullboard inbox, or refresh the snapshot with a current CLI',

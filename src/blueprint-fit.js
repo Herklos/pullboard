@@ -168,6 +168,9 @@ export function fitTargets(blueprint, spec, items) {
   return targets;
 }
 
+/** The choice that takes a stack no named choice covers (#916). */
+const OTHER_CHOICE = 'Something else';
+
 /**
  * Check one proposal against its target and give the text it would apply: the new row text, the
  * answered question's row text or the item's new criterion, or null for keep and drop.
@@ -190,7 +193,9 @@ function checkProposal(target, { decision, text, reason }) {
   if (!line(text)) throw new Refused('FIT_PROPOSAL', `an ${decision} proposal needs --text, one nonempty line without a | character`);
   if (decision === 'adapt') return { decision, text: text.trim(), reason: reason.trim() };
   if (target.kind !== 'question') throw new Refused('FIT_PROPOSAL', `${target.target} is no question; only a question takes an answer, so use keep, adapt or drop`);
-  if (!target.choices.includes(text.trim())) throw new Refused('FIT_PROPOSAL', `${text.trim()} is not one of ${target.target}'s choices (${target.choices.join(', ')})`);
+  // A stack no named choice covers fits Something else, which takes the stack's name as its answer (#916).
+  const named = target.choices.includes(text.trim()) || target.choices.includes(OTHER_CHOICE);
+  if (!named) throw new Refused('FIT_PROPOSAL', `${text.trim()} is not one of ${target.target}'s choices (${target.choices.join(', ')})`);
   return { decision, text: questionText({ ask: target.ask, choices: target.choices, default: text.trim() }), reason: reason.trim() };
 }
 
