@@ -1,3 +1,4 @@
+/** @pullboard-test-loads test/e2e-helpers.js */
 /**
  * Standalone regression for coordinator resume after a stale verdict is freshly reviewed.
  * Run with PULLBOARD_409_CANDIDATE_ROOT pointing at the source checkout under test.

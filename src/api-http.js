@@ -129,6 +129,13 @@ export function createApiHandler(adapter, { pollMs = 200 } = {}) {
     }
   }
 
+  /** Preserve the legacy primary warning while carrying additional independent notices. */
+  async function warningsFor(board, who) {
+    const primary = await adapter.warning?.(board, who);
+    const additional = await adapter.warnings?.(board, who);
+    return [primary, ...(Array.isArray(additional) ? additional : [])].filter(Boolean);
+  }
+
   /**
    * Replay and follow one or more boards' records on one response, respecting slow clients and
    * revocation between polls. A tagged stream names each frame's board, and each ordinary
@@ -165,11 +172,13 @@ export function createApiHandler(adapter, { pollMs = 200 } = {}) {
           for (const follow of follows) {
             current = follow;
             follow.who = await adapter.authenticate(req, { board: follow.board.id, write: false });
-            const warning = await adapter.warning?.(follow.board, follow.who);
-            const serialized = warning ? frame(follow, { warning }) : null;
+            const warnings = await warningsFor(follow.board, follow.who);
+            const serialized = warnings.length ? JSON.stringify(warnings) : null;
             if (serialized !== follow.lastWarning) {
               follow.lastWarning = serialized;
-              if (serialized && !res.write('event: warning\ndata: ' + serialized + '\n\n')) { blocked = true; return; }
+              for (const warning of warnings) {
+                if (!res.write('event: warning\ndata: ' + frame(follow, { warning }) + '\n\n')) { blocked = true; return; }
+              }
             }
             const records = follow.initial ?? await adapter.events(follow.board, follow.after, follow.who);
             follow.initial = null;
@@ -314,9 +323,10 @@ export function createApiHandler(adapter, { pollMs = 200 } = {}) {
           }
         }
         const initial = await adapter.events(board, after, who);
-        const warning = await adapter.warning?.(board, who);
+        const warnings = await warningsFor(board, who);
         const eventLogVersion = await adapter.eventLogVersion?.(board, who);
-        return json(res, 200, { events: initial, ...(eventLogVersion === undefined ? {} : { eventLogVersion }), ...(warning ? { warning } : {}) });
+        return json(res, 200, { events: initial, ...(eventLogVersion === undefined ? {} : { eventLogVersion }),
+          ...(warnings.length ? { warning: warnings[0], ...(warnings.length > 1 ? { warnings: warnings.slice(1) } : {}) } : {}) });
       }
       if (req.method === 'POST' && route[2] === 'moves') {
         const moved = await adapter.move(board, await readBody(req), who);

@@ -35,6 +35,11 @@ export function storageLimitMessage(storage) {
   return `Account ${storage.account.login} has used ${(storage.usedBytes / 1_000_000).toFixed(1)} MB of its ${(storage.limitBytes / 1_000_000).toFixed(1)} MB relay storage limit. Remove unneeded relay copies or ask the relay operator to increase the account quota.`;
 }
 
+/** Warn before the account reaches its quota while naming exact bytes and the available next step. */
+function storageWarningMessage(storage) {
+  return `Account ${storage.account.login} has used ${storage.usedBytes} of ${storage.limitBytes} bytes of relay storage (over 80%). Remove unneeded relay copies or ask the relay operator to increase the account quota.`;
+}
+
 /** Enforce a net storage change while authentication's shared lifecycle transaction excludes competing board writes. */
 export function createStorageQuota({ directory, auth, limitBytes = ACCOUNT_STORAGE_BYTES }) {
   if (typeof directory !== 'string' || !Number.isSafeInteger(limitBytes) || limitBytes < 1 || !auth?.withBoard) throw new Refused('RELAY_CONFIG', 'Configure a positive account storage quota and the shared relay lifecycle lock.');
@@ -93,9 +98,11 @@ export function createStorageQuota({ directory, auth, limitBytes = ACCOUNT_STORA
     const saved = db.prepare('SELECT storage,needed FROM storage_warning WHERE board=?').get(board);
     const current = usage(board);
     if (!current) return null;
-    if (!saved && current.usedBytes < limitBytes) return null;
-    if (saved && current.usedBytes + saved.needed <= limitBytes) return null;
-    return { code: 'ACCOUNT_STORAGE_LIMIT', message: storageLimitMessage(current), storage: current };
+    if (saved && current.usedBytes + saved.needed > limitBytes || current.usedBytes >= limitBytes) {
+      return { code: 'ACCOUNT_STORAGE_LIMIT', message: storageLimitMessage(current), storage: current };
+    }
+    if (current.usedBytes / current.limitBytes <= 0.8) return null;
+    return { code: 'ACCOUNT_STORAGE_WARNING', message: storageWarningMessage(current), storage: current };
   }
 
   /** A successful checkpoint or explicit unlink clears this board's old refusal notice. */

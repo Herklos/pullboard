@@ -1,3 +1,4 @@
+/** @pullboard-test-loads src/board.js src/engine.js src/machine.js */
 /** Rigor: a repeated failure cause is noticed from structured fields, never from notes [D1,V1]. */
 import { submitFixture } from './board-submit-fixture.js';
 import assert from 'node:assert/strict';
