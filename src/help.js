@@ -357,8 +357,10 @@ function commandHelpRows(fullHelp, commandNames) {
     ...Object.keys(HELP_ALIASES),
     ...Object.keys(HELP_EXAMPLES).filter((name) => /^[a-z][a-z0-9-]*(?: [a-z][a-z0-9-]*)*$/u.test(name)),
     ...rows.map((row) => commandWords(row.usage)[0]).filter(Boolean),
+    // Every printed subcommand phrase (milestone items, relay devices) is a name too, so its help exists [N2].
+    ...lines.filter((line) => line.startsWith('  pullboard ')).flatMap((line) => usagePhrases(line.trim())).filter((phrase) => phrase.includes(' ')),
   ])];
-  return Object.fromEntries(names.map((name) => {
+  const entries = Object.fromEntries(names.map((name) => {
     const parts = name.split(' ');
     const alias = HELP_ALIASES[name];
     const matches = alias?.source ? rows.filter((row) => row.usage === alias.source || row.usage.startsWith(`${alias.source} `)) : alias ? [] : rows.filter((row) => {
@@ -382,6 +384,7 @@ function commandHelpRows(fullHelp, commandNames) {
     const example = exampleFor(name, usages[0]);
     return [name, Object.freeze({ usages, flags, example, notes: HELP_NOTES[name] ?? [] })];
   }));
+  return { ...entries, ...settingFormHelp(entries) };
 }
 
 /** Render the short first-run overview, with command names grouped by when a person needs them. */
@@ -397,7 +400,22 @@ function overviewHelp(groups, firstRun = false) {
   return lines.join('\n');
 }
 
-/** Build help from the actual command declarations, preserving the printed overview and full list. */
+/** The settings forms settingsCommand dispatches with a value; each gets its own help, from this list (N2). */
+export const SETTING_FORMS = Object.freeze(['gateSlots', 'browserSlots', 'gate.shortSlots']);
+
+/** Help for each settings form the printed usage did not already name, so each form is covered (N2). */
+function settingFormHelp(commands) {
+  return Object.fromEntries(SETTING_FORMS.filter((form) => !commands[`settings ${form}`]).map((form) => [`settings ${form}`, Object.freeze({
+    usages: [`pullboard settings ${form} <n>`], flags: [], example: `pullboard settings ${form} 2`, notes: [],
+  })]));
+}
+
+/**
+ * Build help from the actual command declarations, preserving the printed overview and full list.
+ *
+ * @param {string[]} [commandNames]
+ * @returns {Readonly<object>}
+ */
 export function buildHelp(commandNames = []) {
   return Object.freeze({
     overview: overviewHelp(HELP_GROUPS),
@@ -470,6 +488,7 @@ export function commandPhrases(help = HELP) {
   for (const line of help.all.split('\n')) {
     if (line.startsWith('  pullboard ')) for (const phrase of usagePhrases(line.trim())) phrases.add(phrase);
   }
+  for (const form of SETTING_FORMS) phrases.add(`settings ${form}`);
   for (const [name, declaration] of Object.entries(help.commands)) {
     if (/^[a-z][a-z0-9-]*(?: [a-z][a-z0-9-]*)*$/u.test(name)) phrases.add(name);
     for (const usage of declaration.usages) for (const phrase of usagePhrases(usage)) phrases.add(phrase);
