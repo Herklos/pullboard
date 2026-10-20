@@ -17,6 +17,7 @@ export async function sourceSetupFailureFixture(t, { cli, git, runThroughGate, g
   });
   const home = join(dir, 'home'), machineHome = join(home, '.pullboard');
   const remoteHome = join(dir, 'worker-home'), remoteMachineHome = join(remoteHome, '.pullboard');
+  const configuredRoot = mode === 'custom-filesystem' ? join(dir, 'configured-root') : join(remoteHome, '.pullboard-runner');
   const repo = join(dir, 'repo'), worker = join(dir, 'worker'), bin = join(dir, 'bin');
   const requests = join(dir, 'requests.jsonl'), injected = join(dir, 'injected');
   const executed = join(dir, 'command-executed'), preload = join(dir, 'checkout-lock.mjs');
@@ -30,8 +31,8 @@ export async function sourceSetupFailureFixture(t, { cli, git, runThroughGate, g
   writeFileSync(join(repo, 'pullboard.json'), JSON.stringify({ gate: 'true' }));
   writeFileSync(join(repo, 'tracked.txt'), 'source\n');
   git(repo, env, 'add', '.'); git(repo, env, 'commit', '-qm', 'test: source setup fixture');
-  if (mode === 'filesystem') {
-    const state = join(remoteHome, '.pullboard-runner');
+  if (mode.endsWith('filesystem')) {
+    const state = configuredRoot;
     mkdirSync(state, { recursive: true });
     writeFileSync(join(state, 'repos'), 'a file prevents creating the cache directory\n');
     writeFileSync(injected, 'cache directory obstacle injected\n');
@@ -40,6 +41,7 @@ export async function sourceSetupFailureFixture(t, { cli, git, runThroughGate, g
 import { syncBuiltinESMExports } from 'node:module';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+if (${JSON.stringify(mode)} === 'custom-filesystem') process.env.TMPDIR = ${JSON.stringify(join(remoteHome, 'shell-tmp'))};
 const spawn = childProcess.spawn;
 childProcess.spawn = (command, args, options) => {
   const operation = ${JSON.stringify(mode)} === 'index' ? 'index-pack' : 'checkout';
@@ -56,7 +58,9 @@ childProcess.spawn = (command, args, options) => {
 syncBuiltinESMExports();\n`);
   installSshStandIn({ bin, worker, home: remoteHome, machineHome: remoteMachineHome, requests,
     nodeOptions: `--import=${pathToFileURL(preload).href}` });
-  const added = cli(repo, env, 'runner', 'add', HOST, '--slots', '1', '--browser', '1', '--json');
+  mkdirSync(join(remoteHome, 'shell-tmp'), { recursive: true });
+  const rootArgs = mode === 'custom-filesystem' ? ['--root', configuredRoot] : [];
+  const added = cli(repo, env, 'runner', 'add', HOST, '--slots', '1', '--browser', '1', ...rootArgs, '--json');
   assert.equal(added.status, 0, added.context);
   const previous = [process.env.PULLBOARD_HOME, process.env.PULLBOARD_MACHINE_HOME];
   process.env.PULLBOARD_HOME = home; process.env.PULLBOARD_MACHINE_HOME = machineHome;
@@ -68,7 +72,7 @@ syncBuiltinESMExports();\n`);
     assert.equal(gateResult(result.stdout).isGreen, false, 'the failed setup is not a successful run');
     assert.equal(existsSync(injected), true, 'the real checkout Git operation encountered the lock');
     assert.equal(existsSync(executed), false, 'the requested command never ran or fell back locally');
-    if (mode === 'filesystem') {
+    if (mode.endsWith('filesystem')) {
       assert.match(result.stdout, /step: source history checkout.*EEXIST[\s\S]*cause:/u, 'filesystem setup keeps its phase, code and cause');
     } else if (mode === 'index') {
       assert.match(result.stdout, /source cache: git index-pack.*exit \d+[\s\S]*git stderr:.*(?:usage|error)/iu, 'a broken pack command retains Git stderr even when its input pipe fails');
@@ -83,6 +87,7 @@ syncBuiltinESMExports();\n`);
       assert.ok(Buffer.byteLength(result.stdout.split('PULLBOARD_RUN_RESULT ')[0]) < 2_400, 'the diagnostic is bounded in bytes');
     }
     assert.ok(!result.stdout.includes(remoteHome), 'runner-private paths never reach the controller');
+    assert.ok(!result.stdout.includes(configuredRoot), 'a configured runner root outside HOME and TMPDIR stays private too');
     completed = true;
   } finally {
     held?.release();

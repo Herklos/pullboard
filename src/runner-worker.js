@@ -15,6 +15,7 @@ import {
   openSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   readSync,
   renameSync,
   rmSync,
@@ -65,6 +66,7 @@ let cleanupTimer = null;
 let cleanupStage = 'command exit';
 let cleanupDirectory = null;
 let cleanupDetails = null;
+const setupPrivatePaths = new Set();
 
 /** Start the post-run budget once; later cleanup phases cannot extend it. */
 function beginCleanup() {
@@ -837,7 +839,7 @@ async function acquireResourceApi(api, options, machineHomePath) {
 /** Bound Git diagnostics and hide runner-private paths, URL credentials and credential assignments. */
 function safeGitDiagnostic(value, root, env) {
   let text = String(value).replace(/\u001b\[[0-?]*[ -/]*[@-~]/gu, '').replace(/\r\n?/gu, '\n').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/gu, '');
-  for (const [path, label] of [[root, '<source>'], [env.HOME, '<job-home>'], [process.env.HOME, '<runner-home>'], [env.TMPDIR, '<job-tmp>']]) {
+  for (const [path, label] of [[root, '<source>'], [env.HOME, '<job-home>'], [process.env.HOME, '<runner-home>'], [env.TMPDIR, '<job-tmp>'], ...[...setupPrivatePaths].map(path => [path, '<runner-state>'])]) {
     if (path && path.length > 1) text = text.split(path).join(label);
   }
   text = text.replace(/https?:\/\/[^\s"'<>]+/giu, '<url>')
@@ -1250,11 +1252,14 @@ async function main() {
   try {
     const runnerHome = isAbsolute(process.env.HOME || '') ? process.env.HOME : userInfo().homedir;
     const runnerRoot = spec.root ?? join(runnerHome, '.pullboard-runner');
+    setupPrivatePaths.add(runnerRoot);
     mkdirSync(runnerRoot, { recursive: true, mode: 0o700 });
+    setupPrivatePaths.add(realpathSync(runnerRoot));
     chmodSync(runnerRoot, 0o700);
     const configuredMachineHome = process.env.PULLBOARD_MACHINE_HOME;
     if (configuredMachineHome !== undefined && !isAbsolute(configuredMachineHome)) throw new Error('machine home is invalid');
     const machineHomePath = configuredMachineHome ?? join(runnerHome, '.pullboard');
+    setupPrivatePaths.add(machineHomePath);
     setupStep = 'trusted resource API';
     api = loadResourceApi(spec.runtime);
     const previousMachineHome = process.env.PULLBOARD_MACHINE_HOME;

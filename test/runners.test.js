@@ -1910,7 +1910,7 @@ test('review655 a registered runner honors the same live person waiver at landin
   }
 });
 test('a refused runner checkout names its failed Git step and stderr [C6,C7]', async t => {
-  for (const mode of ['lock', 'missing', 'large', 'filesystem', 'index']) {
+  for (const mode of ['lock', 'missing', 'large', 'filesystem', 'index', 'custom-filesystem']) {
     await t.test(mode, child => sourceSetupFailureFixture(child, { cli, git, runThroughGate, gateResult }, mode));
   }
 });
