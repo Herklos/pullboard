@@ -11,6 +11,7 @@ import { snapshotState, presentationState } from '../relay/browser-model.js';
 import { decodeBoardKey, seal, unseal } from '../src/seal.js';
 import { relaySnapshot } from '../src/relay-presentation.js';
 import { ENGINE_VERSION } from '../src/machine.js';
+import { openPagedSnapshot } from '../src/relay-page-layout.js';
 import { addItem, answerDecision, closeBoard, openBoard, shout } from '../src/board.js';
 import { relayClientFixture } from './relay-client-fixture.js';
 import { findChromeExecutable, relayWorkBudgetMs, startChrome } from './relay-browser-fixture.js';
@@ -113,6 +114,7 @@ test('older native snapshots project into read-only API state and reject wrong b
 
 test('conditional sealed snapshots reauthorize before 304 and refresh spec-only presentation [H5,H15]', async t => {
   const box = await relayClientFixture(t);
+  box.legacySnapshotApi(); // This case asserts the historical single-cipher ETag contract.
   await box.link();
   const link = JSON.parse(readFileSync(box.linkFile, 'utf8'));
   const endpoint = box.origin + '/api/v1/boards/' + link.board + '/state';
@@ -422,6 +424,7 @@ test('real Chrome waits for and installs the late snapshot that compacts a legac
   skip: !findChromeExecutable() && 'Chrome is not installed',
 }, async t => {
   const box = await relayClientFixture(t);
+  box.legacySnapshotApi(); // The stand-in deliberately publishes a historical API1 checkpoint below.
   const initialTitle = 'LATE_SNAPSHOT_INITIAL_108';
   const finalTitle = 'LATE_SNAPSHOT_REPAIRED_108';
   assert.equal((await box.cli('add', box.lane, initialTitle)).code, 0);
@@ -679,6 +682,7 @@ test('a signed-in phone waits for its first listing before prescribing a command
 /** A pre-ordered mirror's durable local outbox keeps its final browser projection recoverable. */
 test('legacy queued presentations never disclose later unacknowledged moves [H5,H15]', async t => {
   const box = await relayClientFixture(t);
+  box.legacySnapshotApi(); // Its refused write and queued-link metadata belong to the legacy protocol.
   await box.link();
   const link = JSON.parse(readFileSync(box.linkFile, 'utf8'));
   // Recreate the historical pre-161 link metadata, then commit two local-first rows directly.
@@ -784,7 +788,7 @@ test('a revoked device read is refused as revoked [H5,E16]', {
   const link = JSON.parse(readFileSync(box.linkFile, 'utf8'));
   const session = await box.phoneSession();
   const headers = { cookie: 'pb_session=' + session.token, 'x-pullboard-engine': String(ENGINE_VERSION) };
-  const endpoint = box.origin + '/api/v1/boards/' + link.board + '/state';
+  const endpoint = box.origin + '/api/v2/boards/' + link.board + '/state';
   assert.equal((await fetch(endpoint, { headers })).status, 200, 'the genuine enrolled browser can read before revocation');
   await revokeBrowser(box, chrome, device);
   await box.restartRelay();
@@ -828,6 +832,9 @@ test('revocation clears an already open browser and its cached board request sta
   const { chrome, device } = await enrolledBrowser(box, t);
   const board = JSON.parse(readFileSync(box.linkFile, 'utf8')).board;
   assert.equal(await chrome.evaluate("(window.__removedBoardReference = data.project).items.some(item => item.title === 'private cleanup fixture item')"), true);
+  await chrome.waitFor('data.project?.historyProgress?.complete === true');
+  assert.equal(await chrome.evaluate('window.__removedBoardReference.items === data.project.items'), true,
+    'completed background history retains the shared item collection already held by the cockpit');
   // These are device-local opaque caches, never authority or a relay response. Use the real key/sealer.
   await chrome.evaluate(`(async () => {
     const module = await import('/relay/seal.js');
@@ -859,7 +866,7 @@ test('reviewer: a revoked bound session cannot regain ciphertext through auth ma
  const oldSession = await box.phoneSession();
  const retainedKey = await chrome.evaluate(`JSON.parse(localStorage.getItem('pullboard.relay.keys.v1'))[${JSON.stringify(link.board)}]`);
  assert.equal(typeof retainedKey, 'string', 'the genuinely enrolled browser already received this board key');
- const endpoint = box.origin + '/api/v1/boards/' + link.board + '/state';
+ const endpoint = box.origin + '/api/v2/boards/' + link.board + '/state';
  const oldHeaders = {authorization:'Bearer '+oldSession.token,'x-pullboard-engine':String(ENGINE_VERSION)};
  assert.equal((await fetch(endpoint,{headers:oldHeaders})).status,200,'the bound session has original read access');
  await revokeBrowser(box, chrome, device);
@@ -885,9 +892,19 @@ test('reviewer: a revoked bound session cannot regain ciphertext through auth ma
    delegatedStatus=delegated.status;
    if(delegated.status===200){
      const {state}=await delegated.json();
-     assert.equal(typeof state.sealed,'string','the relay served actual ciphertext, not merely a board name');
-     const plain=await unseal(decodeBoardKey(retainedKey),Buffer.from(state.sealed,'base64url'),{boardId:link.board,kind:'snapshot',sequence:state.sequence});
-     const snapshot=snapshotDocument(plain);
+     const page=await openPagedSnapshot(state.root,{
+       key:decodeBoardKey(retainedKey),boardId:link.board,sequence:state.sequence,
+       /** Prove any wrongly delegated access reaches the real pinned ciphertext graph with that new credential. */
+       async get(id,parents){
+         const response=await fetch(box.origin+'/api/v2/boards/'+link.board+'/objects/'+id+'?pin='+encodeURIComponent(state.read.id)+'&via='+parents.join(','),{
+           headers:{authorization:'Bearer '+document.token,'x-pullboard-engine':String(ENGINE_VERSION)},
+         });
+         assert.equal(response.status,200);
+         const value=await response.json();
+         return Uint8Array.from(Buffer.from(value.page.sealed,'base64url'));
+       },
+     },{maxEngine:ENGINE_VERSION});
+     const snapshot=await page.native();
      decryptedOriginal=JSON.stringify(snapshot).includes('private cleanup fixture item');
      assert.equal(decryptedOriginal,true,'the previously received browser key decrypts the regained board');
    }

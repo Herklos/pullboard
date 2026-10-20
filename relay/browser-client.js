@@ -122,6 +122,22 @@ export async function createTransport({ onUpdate = () => {}, onOpenBoard = () =>
   if (pair && (!BOARD.test(pair.board ?? '') || typeof pair.key !== 'string')) pair = null;
   try { if (pair) decodeBoardKey(pair.key); } catch { pair = null; }
 
+  /** Preserve shared collections across updates: the cockpit shallow-copies state and revocation must clear those arrays too. */
+  function installState(entry, value) {
+    if (!entry.state) { entry.state = value; return; }
+    for (const [field, previous] of Object.entries(entry.state)) {
+      if (Array.isArray(previous) && previous !== value[field]) {
+        previous.length = 0;
+        if (Array.isArray(value[field])) {
+          for (const row of value[field]) previous.push(row);
+          Object.defineProperty(value, field, { ...Object.getOwnPropertyDescriptor(value, field), value: previous });
+        }
+      }
+      if (!Object.hasOwn(value, field)) delete entry.state[field];
+    }
+    Object.defineProperties(entry.state, Object.getOwnPropertyDescriptors(value));
+  }
+
   /** Discard decrypted memory and this document when relay authorization is lost. */
   async function denied(error) {
     if (accessLost) return;
@@ -232,7 +248,7 @@ export async function createTransport({ onUpdate = () => {}, onOpenBoard = () =>
       install(full, details) {
         const state = presentationState(full, entry.id);
         if (details) state.items = state.items.map(item => details.get(item.id) ?? item);
-        entry.state = { ...state, historyProgress: entry.history.status() };
+        installState(entry, { ...state, historyProgress: entry.history.status() });
         entry.historyChanged = true;
       },
       changed() {
@@ -283,7 +299,7 @@ export async function createTransport({ onUpdate = () => {}, onOpenBoard = () =>
       if (row.sequence >= entry.cursor && !unchanged) {
         const value = await page.presentation();
         if (accessLost) throw accessError;
-        entry.state = presentationState(value, entry.id);
+        installState(entry, presentationState(value, entry.id));
         entry.shouts = null; entry.cursor = row.sequence;
       }
       entry.pages = page;
@@ -300,7 +316,7 @@ export async function createTransport({ onUpdate = () => {}, onOpenBoard = () =>
     entry.snapshotTag = response.headers.get('etag');
     if (row.sequence >= entry.cursor) {
       entry.history?.close(); entry.history = null; entry.pages = null; entry.pageCache?.clear();
-      entry.state = state;
+      installState(entry, state);
       entry.shouts = Array.isArray(value.presentation?.shouts) ? value.presentation.shouts : null;
       entry.cursor = row.sequence;
     }
@@ -349,7 +365,7 @@ export async function createTransport({ onUpdate = () => {}, onOpenBoard = () =>
     if (move.engine !== ENGINE_VERSION) throw new Refused('RELAY_ENGINE_VERSION', 'This board needs engine ' + move.engine + '; this browser reads engine ' + ENGINE_VERSION + '. Upgrade the browser client.');
     if (move.presentation) {
       entry.history?.close(); entry.history = null; entry.pages = null; entry.pageCache?.clear();
-      entry.state = presentationState(move.presentation, entry.id);
+      installState(entry, presentationState(move.presentation, entry.id));
       entry.shouts = Array.isArray(move.presentation.shouts) ? move.presentation.shouts : null;
       entry.cursor = row.event_id;
     } else {

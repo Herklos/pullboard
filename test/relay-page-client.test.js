@@ -12,6 +12,8 @@ import { pagedSnapshotRequest, relaySnapshotRequest, relayStorage, relayStorageL
 import { generateBoardKey } from '../src/seal.js';
 import { writeSealedValue } from '../src/sealed-pages.js';
 import { Refused } from '../src/refused.js';
+import { createServer } from 'node:http';
+import { relayFixtureChild, cliChildDeadlineMs } from './relay-client-fixture.js';
 
 /** Use only an isolated device home, restoring the surrounding test process after its cache closes. */
 function privateHome(t) {
@@ -97,6 +99,26 @@ test('a lost object ACK resumes the exact durable graph and native restore prese
   assert.equal(box.state.storage.account.login, 'fixture-login');
 });
 
+test('a fresh device reuses authenticated restored history instead of uploading it again [H15,H17]', async t => {
+  const box = await fixture(t);
+  await pagedSnapshotRequest(box.state, { method: 'PUT', body: { sequence: 0, sealed: 'first-device-cipher' } }, box.adapter);
+  const initialObjects = box.calls.filter(call => call.method === 'PUT').map(call => call.path.split('/').at(-1));
+  assert.ok(initialObjects.length > 8, 'the fixture has several genuine historical cipher pages');
+  // Change only the private device home: the second device has none of the writer's cache or ACKs.
+  process.env.PULLBOARD_HOME = join(process.env.PULLBOARD_HOME, 'independent-reader');
+  const read = await pagedSnapshotRequest(box.state, {}, box.adapter);
+  assert.deepEqual(JSON.parse(read.state.sealed), box.document, 'the fresh device authenticates and restores every native row');
+  const afterRead = box.calls.length;
+  box.document.presentation.state.name = 'New device presentation';
+  const result = await pagedSnapshotRequest(box.state, { method: 'PUT', body: { sequence: 0, sealed: 'second-device-cipher' } }, box.adapter);
+  const writes = box.calls.slice(afterRead).filter(call => call.method === 'PUT');
+  assert.ok(writes.length < initialObjects.length / 2, 'changing only current presentation must not upload retained history again');
+  assert.equal(writes.filter(call => initialObjects.includes(call.path.split('/').at(-1))).length, 0, 'no authenticated historical object is uploaded again');
+  assert.equal(result.state.sealed, 'second-device-cipher');
+  assert.deepEqual(JSON.parse((await pagedSnapshotRequest(box.state, {}, box.adapter)).state.sealed), box.document,
+    'the independently published checkpoint still restores all native rows and the changed presentation');
+});
+
 test('a collected remote subtree is restaged despite old cached ACKs, without replacing the source graph [H15,H17]', async t => {
   const box = await fixture(t);
   const pending = { sequence: 0, sealed: 'synthetic-stable-pending-cipher' };
@@ -128,6 +150,41 @@ test('private reuse authenticates the fingerprint binding rather than trusting a
     cache.remember('f'.repeat(64), ref);
     await assert.rejects(cache.lookup('f'.repeat(64), context), { code: 'RELAY_PAGE_CACHE' });
   } finally { cache.close(); }
+});
+
+test('a stalled API2 upload is killed at its finite work-derived deadline and names the stall [C7,H15,H17]', async t => {
+  const work = { legacyUploads: 0, pageUploadBytes: 0, pageSessions: 0, pageCheckpointAttempts: 0 };
+  let held = false;
+  const api = '/api/v2/boards/' + 'b'.repeat(32);
+  const objectPath = api + '/uploads/stalled-fixture/objects/' + 'c'.repeat(64);
+  const server = createServer((request, response) => {
+    if (request.method === 'POST' && request.url === api + '/uploads') {
+      work.pageSessions++; response.writeHead(200, { 'content-type': 'application/json' }); response.end('{}'); return;
+    }
+    if (request.method === 'PUT' && request.url === objectPath) {
+      request.on('data', bytes => { work.pageUploadBytes += bytes.byteLength; });
+      request.on('end', () => { held = true; }); // Deliberately never acknowledge this genuinely received page.
+      return;
+    }
+    response.writeHead(404); response.end();
+  });
+  await new Promise(resolveListen => server.listen(0, '127.0.0.1', resolveListen));
+  t.after(async () => { server.closeAllConnections(); await new Promise(resolveClose => server.close(resolveClose)); });
+  const origin = 'http://127.0.0.1:' + server.address().port;
+  const script = `await (await fetch(${JSON.stringify(origin + api + '/uploads')}, {method:'POST'})).arrayBuffer();
+    await fetch(${JSON.stringify(origin + objectPath)}, {method:'PUT',body:new Uint8Array(1024)});`;
+  let failure;
+  try { await relayFixtureChild(process.cwd(), process.env, ['--input-type=module', '-e', script], () => work, 0); }
+  catch (error) { failure = error; }
+  assert.equal(held, true, 'the stand-in really received the upload and withheld its ACK');
+  assert.equal(work.pageSessions, 1);
+  assert.equal(work.pageUploadBytes, 1024);
+  assert.ok(failure, 'a real stalled child must fail rather than complete or wait without a bound');
+  assert.match(failure.message, /signal: SIGKILL/u);
+  assert.match(failure.message, /API2 page upload stalled/u);
+  assert.ok(failure.message.includes('upload-derived child deadline ' + cliChildDeadlineMs(2) + 'ms exceeded'),
+    'the observed session and one bounded byte unit determine the unchanged allowance');
+  t.diagnostic(JSON.stringify({ stalledUploadWork: work, derivedDeadlineMs: cliChildDeadlineMs(2), stalledUploadKilled: true }));
 });
 
 test('account status has a validated identity, exact byte counts and a clear operator-set limit [H15,H17]', () => {

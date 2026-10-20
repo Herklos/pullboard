@@ -77,12 +77,20 @@ test('private reuse preserves authenticated old pages without disclosing their f
 test('wrong board, position, ciphertext and subtree lengths cannot become snapshot data [H15,H17]', async () => {
   const box = await storage();
   const reference = await writeSealedValue({ marker: 'authenticated synthetic data' }, box.context);
-  await assert.rejects(readSealedValue(reference, { ...box.context, boardId: 'b'.repeat(32) }), { code: 'SEAL_AUTH_FAILED' });
-  await assert.rejects(readSealedValue({ ...reference, sequence: 8 }, box.context), { code: 'SEAL_AUTH_FAILED' });
-  await assert.rejects(readSealedValue({ ...reference, bytes: reference.bytes + 1 }, box.context), { code: 'SNAPSHOT_PAGE_FORMAT' });
+  const remembered = [];
+  const context = { ...box.context, rememberRead: (...args) => { remembered.push(args); } };
+  await assert.rejects(readSealedValue(reference, { ...context, boardId: 'b'.repeat(32) }), { code: 'SEAL_AUTH_FAILED' });
+  await assert.rejects(readSealedValue({ ...reference, sequence: 8 }, context), { code: 'SEAL_AUTH_FAILED' });
+  await assert.rejects(readSealedValue({ ...reference, bytes: reference.bytes + 1 }, context), { code: 'SNAPSHOT_PAGE_FORMAT' });
+  assert.equal(remembered.length, 0, 'neither misbound nor structurally invalid data can seed private reuse or remote-custody ACKs');
+  assert.deepEqual(await readSealedValue(reference, context), { marker: 'authenticated synthetic data' });
+  assert.equal(remembered.length, 1, 'a complete valid read can seed the private device cache');
+  assert.equal(remembered[0][0].id, reference.id);
+  assert.deepEqual(remembered[0][0].children, []);
   const bytes = box.objects.get(reference.id).bytes;
   bytes[bytes.length - 1] ^= 1;
-  await assert.rejects(readSealedValue(reference, box.context), { code: 'SNAPSHOT_PAGE_FORMAT' });
+  await assert.rejects(readSealedValue(reference, context), { code: 'SNAPSHOT_PAGE_FORMAT' });
+  assert.equal(remembered.length, 1, 'tampered ciphertext cannot add or replace cached evidence');
 });
 
 test('a selected-value reader stops fetching when its consumer stops or has no allocation budget [H15,H17]', async () => {

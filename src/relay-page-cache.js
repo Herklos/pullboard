@@ -133,7 +133,9 @@ export function createRelayPageCache(state) {
 
   /** Stream only objects not yet acknowledged by this relay, without an aggregate request body. */
   function* pending(source) {
-    for (const row of db.prepare('SELECT object.id FROM object JOIN job_object USING(id) WHERE source=? AND ack=0 ORDER BY object.rowid').iterate(source)) yield object(row.id);
+    // Node 22.13 may finalize an unreferenced statement while its iterator is suspended across a yield.
+    const statement = db.prepare('SELECT object.id FROM object JOIN job_object USING(id) WHERE source=? AND ack=0 ORDER BY object.rowid');
+    for (const row of statement.iterate(source)) yield object(row.id);
   }
 
   /** A lost ACK safely retries the same immutable object; only an actual ACK marks it done. */

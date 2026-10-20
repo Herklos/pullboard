@@ -263,7 +263,13 @@ test('thirty thousand events open on the phone within three seconds and stream a
   const before = relaySnapshot(box.root);
   assert.ok(before.tables.event.length >= 30_000 && before.tables.event.length < 31_000);
   assert.ok(gzipSync(Buffer.from(JSON.stringify(before))).byteLength > RELAY_LIMIT * 3, 'even compressed whole-board state is several times the old limit');
-  assert.equal((await box.cli('status')).code, 0, 'the actual opted-in CLI publishes through bounded pages');
+  const uploadedStatus = await box.cli('status');
+  assert.equal(uploadedStatus.code, 0, 'the actual opted-in CLI publishes through bounded pages');
+  assert.equal(uploadedStatus.snapshotWork.observed, true);
+  assert.ok(uploadedStatus.snapshotWork.pageUploadBytes > 0 && uploadedStatus.snapshotWork.pageCheckpointAttempts > 0,
+    'API2 page bytes and actual checkpoint attempts contribute non-zero recorded work');
+  assert.ok(uploadedStatus.snapshotWork.budgetUnits <= 6 && !uploadedStatus.snapshotWork.overLimit, 'observed attempts and bytes stay bounded without raising the existing time allowance');
+  t.diagnostic(JSON.stringify({ api2UploadWork: uploadedStatus.snapshotWork, derivedChildDeadlineMs: uploadedStatus.snapshotDeadlineMs }));
   const link = JSON.parse(readFileSync(box.linkFile, 'utf8'));
   assert.equal(link.snapshotApiVersion, 2);
   assert.equal(link.checkpoint, undefined);
