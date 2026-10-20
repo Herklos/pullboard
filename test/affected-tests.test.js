@@ -247,3 +247,16 @@ test('a change to one test file selects only what reads it [V4,C7]', (t) => {
   assert.equal(selection.full, true, 'an undeclared computed import falls back to the whole suite');
   assert.match(selection.reason, /test\/guess\.test\.js/u, 'the fallback names the file that cannot be read');
 });
+
+test('a computed import with an environment fallback reads every candidate, not one literal [V4,C7]', (t) => {
+  const box = graph(t);
+  box.put('src/b.js', 'export const value = 1;\n');
+  // The loader reads src/b.js whenever CASE_MODULE names it, so the literal fallback alone is not its read set.
+  box.put('test/loader.test.js', "await import(new URL(process.env.CASE_MODULE || '../src/api.js', import.meta.url).href);\n");
+  const base = box.commit();
+  box.put('src/b.js', 'export const value = 2;\n');
+  const commit = box.commit();
+  const selection = selectAffectedTests(box.root, { base, commit, changed: ['src/b.js'] });
+  assert.equal(selection.full, true, 'an unresolved branch falls back to the whole suite instead of a partial read set');
+  assert.match(selection.reason, /test\/loader\.test\.js/u, 'the fallback names the loader it cannot read');
+});

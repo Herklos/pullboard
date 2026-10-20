@@ -25,10 +25,38 @@ function declaredLoads(source) {
 }
 
 /**
- * The repository modules a computed import names by literal path, such as join(root, 'src/x.js'). Every computed
- * import in the file must name at least one; a literal that matches no module, or a computed import with no
- * literal, leaves the file unreadable, so the caller falls back to the whole suite. Matching by the path's tail
- * can select a module too many, never too few.
+ * Whether a computed import's argument leaves its target open: a fallback (||, ??) or a ternary, an environment
+ * variable, a template interpolation, or a bare variable that picks the file. A variable that only supplies the
+ * directory, as the first argument of join or resolve, does not pick the file, so it stays readable.
+ *
+ * @param {string} argument the source text between the import call's parentheses
+ * @returns {boolean} true when some branch of the target is unresolved
+ */
+function unresolvedBranch(argument) {
+  if (/\|\||\?\?|\?|process\s*\.\s*env|\$\{/u.test(argument)) return true;
+  // Remove literal text, then directory variables, then calls and members; what is left is a bare variable.
+  const bare = argument
+    .replace(/(['"`])(?:\\[\s\S]|(?!\1)[^\\\r\n])*\1/gu, '""')
+    .replace(/\b(join|resolve)\(\s*[A-Za-z_$][\w$.]*\s*,/gu, '$1(');
+  for (const match of bare.matchAll(/[A-Za-z_$][\w$]*/gu)) {
+    const before = bare[match.index - 1] ?? '';
+    const after = bare.slice(match.index + match[0].length).trimStart()[0] ?? '';
+    if (before === '.' || after === '(' || after === '.' || match[0] === 'new') continue;
+    return true;
+  }
+  return false;
+}
+
+/**
+ * The repository modules a computed import names by literal path, such as join(root, 'src/x.js'). A computed
+ * import whose target has any unresolved branch (see unresolvedBranch) is not read from its literal; neither is
+ * one with no literal module path. Either leaves the file unreadable, so the caller falls back to the whole suite.
+ * Matching by the path's tail can select a module too many, never too few.
+ *
+ * @param {string} source the test file's text
+ * @param {string} path the test file's repository path
+ * @param {string[]} modulePaths every module path in the committed tree
+ * @returns {string[] | null} the modules it reads, or null when some computed import cannot be read
  */
 function literalLoads(source, path, modulePaths) {
   const targets = new Set();
@@ -38,6 +66,7 @@ function literalLoads(source, path, modulePaths) {
     let depth = 1, end = start;
     for (; end < source.length && depth; end += 1) depth += source[end] === '(' ? 1 : source[end] === ')' ? -1 : 0;
     const argument = source.slice(start, end);
+    if (unresolvedBranch(argument)) return null;
     const values = [...argument.matchAll(/(['"`])((?:\\.|(?!\1)[^\\\r\n])*)\1/gu)].map(match => match[2].split(/[?#]/u)[0]);
     const modules = values.filter(value => MODULE.test(value) && posix.basename(value).replace(MODULE, '') !== '');
     if (!modules.length) return null;
