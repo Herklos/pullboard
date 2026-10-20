@@ -15,6 +15,7 @@ import {
   mainCheckout,
   tryGit,
 } from './git.js';
+import { gateControlFindings } from './gate-control.js';
 import {
   boardBusyError,
   buildOrder,
@@ -82,6 +83,8 @@ export function healthReport({ db, root, config, now }) {
   const limits = healthThresholds(config);
   const asOf = now.toISOString();
   const report = { asOf, thresholds: { stuck: limits.stuck, holds: limits.holds, release: limits.release }, stuck: [], waiting: [] };
+  // Gate alarms read the git directory, so they report even before a board exists (U41).
+  report.stuck.push(...gateControlFindings(root, config ?? {}, now));
   if (!db) return report;
   const at = now.getTime();
   const age = (iso) => at - Date.parse(iso);

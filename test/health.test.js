@@ -5,7 +5,7 @@
 import { submitFixture } from './board-submit-fixture.js';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { test } from 'node:test';
@@ -14,6 +14,7 @@ import { pathToFileURL } from 'node:url';
 import * as store from '../src/board.js';
 import { main } from '../src/cli.js';
 import { boardHealth } from '../src/health.js';
+import { gateRuns } from '../src/gate-control.js';
 import { JSON_SHAPES } from '../src/json.js';
 import { runFixtureChild, runFixtureGit } from './fixture-child.js';
 
@@ -423,4 +424,65 @@ test('every printed next step runs as pasted through main() [N2,B13]', async (t)
   const after = JSON.parse((await cli(box.root, ['health', '--json'])).stdout);
   assert.ok(!after.stuck.some((entry) => entry.key === 'ROUTE_UNSERVED:route:strong'), 'the worktree the next step starts serves the strong route');
   assert.ok(!after.stuck.some((entry) => entry.key === `RANK_INVERSION:item:${later}`), 'the release the next step names clears the rank inversion');
+});
+
+/** Commit a pullboard.json whose gate, and optional positive control, the next gate run reads. */
+function commitPolicy(box, policy) {
+  writeFileSync(join(box.root, 'pullboard.json'), `${JSON.stringify({ gate: 'true', lanes: { core: { owns: ['src/'] }, docs: { owns: ['docs/'] }, review: { owns: [] } }, ...policy }, null, 2)}\n`);
+  box.git(['add', 'pullboard.json']);
+  box.git(['commit', '-q', '-m', 'chore: gate policy']);
+}
+
+/** Health at the real clock, since a gate run records the moment it actually ran. */
+async function healthNow(cwd) {
+  let stdout = '';
+  const code = await main(['health', '--json'], {
+    cwd, stdout: { isTTY: false, write: (text) => { stdout += text; } }, stderr: { write: () => {} },
+  });
+  return { code, report: JSON.parse(stdout) };
+}
+
+test('health reports a gate whose positive control fails [C7,D1]', async (t) => {
+  const box = repo(t);
+  commitPolicy(box, { gate: 'true', positiveControl: 'false' });
+  const ran = await cli(box.root, ['gate']);
+  assert.equal(ran.code, 0, 'the gate itself is green, so only its known-good case betrays it');
+  const { code, report } = await healthNow(box.root);
+  assert.equal(code, 1, 'a failing positive control is stuck work, not green');
+  const alarm = report.stuck.find((entry) => entry.cause === 'GATE_CONTROL_FAILED');
+  assert.ok(alarm, 'health names the gate whose positive control failed');
+  assert.equal(alarm.subject, 'gate');
+  assert.match(alarm.why, /positive control/u);
+  assert.equal(alarm.detail.positiveControl, 'false');
+  assert.equal(alarm.detail.runs.at(-1).control, false, 'the finding carries the last run and its control result');
+});
+
+test('health reports a gate that refused every run [C7,D1]', async (t) => {
+  const box = repo(t);
+  commitPolicy(box, { gate: 'false' });
+  for (let run = 1; run <= 2; run += 1) assert.equal((await cli(box.root, ['gate'])).code, 1, `run ${run} is refused`);
+  assert.equal((await healthNow(box.root)).report.stuck.some((entry) => entry.cause === 'GATE_REFUSED_EVERY_RUN'), false, 'two refusals are not yet an alarm');
+  assert.equal((await cli(box.root, ['gate'])).code, 1, 'run 3 is refused');
+  const { code, report } = await healthNow(box.root);
+  assert.equal(code, 1);
+  const alarm = report.stuck.find((entry) => entry.cause === 'GATE_REFUSED_EVERY_RUN');
+  assert.ok(alarm, 'health names a gate that refused every run in its window');
+  assert.equal(alarm.subject, 'gate');
+  assert.deepEqual(alarm.detail.runs.map((run) => run.green), [false, false, false], 'the finding lists the last runs, all refused');
+});
+
+test('a positive control inherits the gate slot it runs under [C7,D1]', async (t) => {
+  const box = repo(t);
+  const resources = pathToFileURL(resolve('src/resources.js')).href;
+  // The control asks whether it inherited the gate's admission; a child that does not is refused and reads red.
+  const probe = `node --input-type=module -e "const { inheritedGateSlot } = await import('${resources}'); process.exit(inheritedGateSlot({ root: process.cwd() }) ? 0 : 1)"`;
+  commitPolicy(box, { gate: 'true', positiveControl: probe });
+  const { runGate } = await import('../src/gate.js');
+  const config = JSON.parse(readFileSync(join(box.root, 'pullboard.json'), 'utf8'));
+  const gate = await runGate(box.root, config, { trustStamp: false });
+  assert.equal(gate.isGreen, true, 'the gate itself is green');
+  const run = gateRuns(box.root).at(-1);
+  assert.equal(run.control, true, 'the positive control saw the inherited gate slot and passed');
+  assert.ok(run.controlLog && existsSync(run.controlLog), 'the control keeps its raw output in the gate evidence');
+  assert.ok(run.controlProfile && existsSync(run.controlProfile), 'the control keeps its timing profile in the gate evidence');
 });
