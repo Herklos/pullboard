@@ -353,8 +353,6 @@ const drawHosted = (${drawHosted.toString()});
  * page names before first paint (#757), and it hears nothing about this computer.
  */
 function localNote(state, facts = {}) {
-  // Until the page knows which screen applies, the neutral mark stays and no other screen shows.
-  if (!['looking', 'asking'].includes(state)) document.body.classList.remove('loading');
   drawHosted(document, hostedState(state, { browser: hostedBrowser(navigator), phone: document.documentElement.dataset.relayDevice === 'phone', ...facts }), { view: localSession?.origin || LOCAL_VIEW, signIn: hosted.signIn, session: hosted.relaySession });
 }
 
@@ -3971,15 +3969,17 @@ async function startPage() {
   if (hosted.local && !relayPairing) {
     if (localProblem) localNote('problem', { detail: localProblem });
     else local = await connectLocal();
-    if (local === 'away') return;
-    if (local === 'unreachable' && !hosted.relaySession) { hideRelayNotice(); return; }
+    if (local === 'away') { document.body.classList.remove('loading'); return; }
+    if (local === 'unreachable' && !hosted.relaySession) { document.body.classList.remove('loading'); hideRelayNotice(); return; }
   }
   if (hosted.local && local === 'local') transportModule = null;
   else if (configuredTransportModule) {
     // Signed out, a pairing link waits for sign-in, which its own state asks for.
-    try { await loadTransport(); } catch (error) { if (!hosted.local || hosted.relaySession) throw error; localNote('signed-out'); return; }
+    try { await loadTransport(); } catch (error) { if (!hosted.local || hosted.relaySession) throw error; document.body.classList.remove('loading'); localNote('signed-out'); return; }
   }
+  // The page shows its screen only once the remote list has answered or failed, so the mark holds until then (#932).
   await refresh();
+  document.body.classList.remove('loading');
 }
 startPage().catch((error) => {
   document.body.classList.remove('loading');
