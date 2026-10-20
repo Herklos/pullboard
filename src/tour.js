@@ -189,7 +189,8 @@ export async function tour(io) {
     pb('app-1', ['claim', '1'], { show: /^claimed/ });
     write('app-1', { 'src/greet.mjs': FIXED, 'src/greet.test.mjs': EDGE_TEST });
     run('app-1', 'git', ['commit', '-q', '-am', 'fix(app): a blank name greets the world [G1]']);
-    const second = pb('app-1', ['submit', '1', '--infra', 'add the blank-name regression the independent review exposed'], { show: /^submitted/ }).match(/at ([0-9a-f]{12})/)[1];
+    // The fix edits a test that existed at the claim, so the submit says why (#814).
+    const second = pb('app-1', ['submit', '1', '--infra', 'pins the blank-name edge the verifier found'], { show: /^submitted/ }).match(/at ([0-9a-f]{12})/)[1];
 
     step(7, 'The verifier breaks the fix on purpose, to prove the new test can fail, then restores it and accepts.');
     run('review-1', 'git', ['switch', '-q', '--detach', second]);
