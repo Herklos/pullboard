@@ -576,12 +576,16 @@ export async function withGateSlot(root, action, { landing = false, itemCheck = 
  * @param {{ trustStamp?: boolean, onWait?: (state: object) => void, landing?: boolean, agent?: string, item?: string|number }} [options]
  * @returns {Promise<{ isGreen: boolean, isCached: boolean, output: string, seconds: number, log: string, profile?: object, profilePath?: string }>}
  */
-export async function runGate(root, config, { trustStamp = true, onWait, landing = false, agent, item = '', stages = false, waivers = [] } = {}) {
+export async function runGate(root, config, { trustStamp = true, onWait, landing = false, agent, item = '', stages = false, waivers = [], onFailure } = {}) {
   if (!config.gate.trim()) {
     throw missingGate(root);
   }
   if (trustStamp && isStampedGreen(root)) return { isGreen: true, isCached: true, output: '', seconds: 0, log: '' };
-  return await withGateSlot(root, (lease) => fullGateRun(root, config, trustStamp, { waitMs: lease.waitMs, gateLease: lease, landing, stages, waivers }), {
+  return await withGateSlot(root, async (lease) => {
+    const run = fullGateRun(root, config, trustStamp, { waitMs: lease.waitMs, gateLease: lease, landing, stages, waivers });
+    if (!run.isGreen && onFailure) await onFailure(run, { root, command: config.gate, lease });
+    return run;
+  }, {
     landing, browser: true, agent, item, kind: landing ? 'landing' : 'gate', onWait,
   });
 }
@@ -649,7 +653,7 @@ export async function runStaticChecks(root, config, { agent, item = '', onWait, 
  * @param {{base:string|null, trunk?:string, changed?:string[], check:string, agent?:string, item?:string|number, kind?:string, onWait?:(state:object)=>void, onBrowserFallback?:(decision:{file:string,reason:string})=>void}} options
  * @returns {Promise<any>}
  */
-export async function runSubmitGate(root, config, { base, trunk, changed, check, agent, item = '', kind = 'submit', onWait, onBrowserFallback }) {
+export async function runSubmitGate(root, config, { base, trunk, changed, check, agent, item = '', kind = 'submit', onWait, onBrowserFallback, onFailure }) {
   if (!config.gate.trim()) throw missingGate(root);
   await runStaticChecks(root, config, { agent, item, onWait, onBrowserFallback });
   const selection = config.affectedTests
@@ -673,7 +677,7 @@ export async function runSubmitGate(root, config, { base, trunk, changed, check,
     ? (proofFiles.length > 0 && (!allowBrowserFreeChecks || await testsNeedBrowser(root, proofFiles, { onFallback: onBrowserFallback })))
     : (selection.full || !allowBrowserFreeChecks || await testsNeedBrowser(root, proofFiles, { onFallback: onBrowserFallback }));
   const browser = checkUsesBrowser || proofUsesBrowser;
-  return await withGateSlot(root, (lease) => {
+  return await withGateSlot(root, async (lease) => {
     const startedAt = Date.now();
     const log = gitPath(root, 'pullboard-submit.log');
     const checkLog = `${log}.check.log`;
@@ -703,6 +707,7 @@ export async function runSubmitGate(root, config, { base, trunk, changed, check,
     };
     if (!criterion.isGreen) {
       writeFileSync(log, criterion.output);
+      if (onFailure) await onFailure({ ...criterion, log: checkLog }, { root, command: check, lease });
       return finish({ isGreen: false, sandboxBlocked: criterion.sandboxBlocked, isCached: false, output: criterion.output, seconds: 0, log: '' });
     }
     // The proof already owns this lease: its phase profile has no additional queue wait.
@@ -718,6 +723,8 @@ export async function runSubmitGate(root, config, { base, trunk, changed, check,
     }
     const phase = deferFullFallback ? `submit invariants: ${invariants.length ? invariants.join(', ') : 'none'}; full suite deferred to the landing gate` : selection.full ? 'full gate' : 'affected tests';
     writeFileSync(log, `item check:\n${criterion.output}\n${phase}:\n${proof.output}`);
+    if (!proof.isGreen && onFailure) await onFailure(proof, { root,
+      command: !deferFullFallback && selection.full ? config.gate : `${config.affectedTests.trimEnd()} ${proofFiles.map(path => commandWord('./' + path)).join(' ')}`, lease });
     return finish(proof);
   }, { browser, agent, item, kind, itemCheck: true, onWait });
 }
