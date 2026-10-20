@@ -21,6 +21,22 @@ import { relayWorkBudgetMs, MAX_SNAPSHOT_ATTEMPTS } from './relay-budget.js';
 const CLI = resolve(import.meta.dirname, '../bin/pullboard.js');
 const MAX_OBSERVED_SNAPSHOT_UPLOADS = MAX_SNAPSHOT_ATTEMPTS;
 const DEFAULT_SNAPSHOT_UPLOADS = 3;
+// One former whole-snapshot wire allowance is a finite unit of observed API2 transfer work too.
+const PAGE_WORK_BYTES = 10_000_000;
+
+/** Keep legacy attempts exact while counting received API2 wire bytes and checkpoint attempts, never elapsed activity. */
+function uploadWork(value) {
+  const work = typeof value === 'number' ? { legacyUploads: value } : value;
+  const result = Object.fromEntries(['legacyUploads', 'pageUploadBytes', 'pageSessions', 'pageCheckpointAttempts'].map(key => [key, work?.[key] ?? 0]));
+  assert.ok(Object.values(result).every(number => Number.isSafeInteger(number) && number >= 0), 'fixture upload work has bounded integer counters');
+  result.units = result.legacyUploads + Math.max(result.pageSessions, result.pageCheckpointAttempts) + Math.ceil(result.pageUploadBytes / PAGE_WORK_BYTES);
+  // Attempt and byte ceilings are independent: bytes do not consume a checkpoint attempt. Time still has the released six-unit cap.
+  result.budgetUnits = Math.min(result.units, MAX_OBSERVED_SNAPSHOT_UPLOADS);
+  result.overLimit = result.legacyUploads > MAX_OBSERVED_SNAPSHOT_UPLOADS || result.pageSessions > MAX_OBSERVED_SNAPSHOT_UPLOADS
+    || result.pageCheckpointAttempts > MAX_OBSERVED_SNAPSHOT_UPLOADS || result.pageUploadBytes > PAGE_WORK_BYTES * MAX_OBSERVED_SNAPSHOT_UPLOADS;
+  return result;
+}
+
 
 /** Derive a private CLI child deadline from observed uploads, with a finite runaway guard. */
 export function cliChildDeadlineMs(observedUploads) {
@@ -67,19 +83,21 @@ function childResult(root, env, argv, observedSnapshotUploads, initialSnapshotUp
   return new Promise((resolveResult, reject) => {
     const startedAt = performance.now();
     let deadlineMs = cliChildDeadlineMs(initialSnapshotUploads);
+    let work = uploadWork(initialSnapshotUploads);
     const child = spawn(process.execPath, argv, { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
     let exceededDeadline = false;
+    let exceededWork = false;
     let settled = false;
     const timer = setInterval(() => {
-      const count = observedSnapshotUploads?.() ?? initialSnapshotUploads;
-      if (count > MAX_OBSERVED_SNAPSHOT_UPLOADS) {
-        exceededDeadline = true;
+      work = uploadWork(observedSnapshotUploads?.() ?? initialSnapshotUploads);
+      if (work.overLimit) {
+        exceededWork = true;
         child.kill('SIGKILL');
         return;
       }
-      deadlineMs = Math.max(deadlineMs, cliChildDeadlineMs(count));
+      deadlineMs = Math.max(deadlineMs, cliChildDeadlineMs(work.budgetUnits));
       if (performance.now() - startedAt >= deadlineMs) { exceededDeadline = true; child.kill('SIGKILL'); }
     }, 20);
     child.stdout.setEncoding('utf8').on('data', part => { stdout += part; });
@@ -99,20 +117,25 @@ function childResult(root, env, argv, observedSnapshotUploads, initialSnapshotUp
       if (settled) return;
       settled = true;
       clearInterval(timer);
-      if (signal) return reject(new Error(reportFailure(code, signal, exceededDeadline
-        ? `upload-derived child deadline ${deadlineMs}ms exceeded` : '')));
+      const phase = work.pageUploadBytes > 0 ? 'API2 page upload' : work.pageSessions || work.pageCheckpointAttempts ? 'API2 checkpoint' : 'snapshot upload';
+      if (signal) return reject(new Error(reportFailure(code, signal, exceededWork
+        ? `declared upload work limit exceeded: at most ${MAX_OBSERVED_SNAPSHOT_UPLOADS} attempts and ${PAGE_WORK_BYTES * MAX_OBSERVED_SNAPSHOT_UPLOADS} page bytes; recorded work ${JSON.stringify(work)}`
+        : exceededDeadline ? `${phase} stalled: upload-derived child deadline ${deadlineMs}ms exceeded; recorded work ${JSON.stringify(work)}` : '')));
       const failure = code === 0 ? null : reportFailure(code, signal);
       let document;
       try { document = JSON.parse(stdout); }
       catch (error) { return reject(new Error(reportFailure(code, signal, `private relay fixture child did not return JSON: ${error.message}`))); }
-      resolveResult({ code, document, failure, snapshotUploads: observedSnapshotUploads?.() ?? initialSnapshotUploads,
-        snapshotDeadlineMs: deadlineMs });
+      work = uploadWork(observedSnapshotUploads?.() ?? initialSnapshotUploads);
+      resolveResult({ code, document, failure, snapshotUploads: work.legacyUploads,
+        snapshotWork: { ...work, observed: typeof observedSnapshotUploads === 'function' }, snapshotDeadlineMs: deadlineMs });
     });
   });
 }
 
+export { childResult as relayFixtureChild };
+
 /** Start an isolated board and authorized loopback relay; a null coordinatorModel keeps its initial identity unknown. */
-export async function relayClientFixture(t, { cliChildren, coordinatorModel } = {}) {
+export async function relayClientFixture(t, { cliChildren, coordinatorModel, accountStorageBytes } = {}) {
   const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'pullboard-relay-cleanup-')));
   const root = join(scratch, 'repo');
   const home = join(scratch, 'home');
@@ -129,6 +152,7 @@ export async function relayClientFixture(t, { cliChildren, coordinatorModel } = 
   const env = {
     ...process.env, HOME: home, PULLBOARD_HOME: join(home, '.pullboard'),
     PULLBOARD_MACHINE_HOME: join(scratch, 'machine'), PATH: privateBin,
+    TERM_SESSION_ID: createHash('sha256').update(scratch).digest('hex'),
     GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1',
     GIT_AUTHOR_NAME: 'Relay Fixture', GIT_AUTHOR_EMAIL: 'relay-fixture@example.com',
     GIT_COMMITTER_NAME: 'Relay Fixture', GIT_COMMITTER_EMAIL: 'relay-fixture@example.com',
@@ -201,6 +225,7 @@ globalThis.fetch = function tracedFetch(input, init) {
   let snapshotWriteDelayMs = 0;
   let oneSnapshotDelay = null;
   let snapshotWriteCount = 0;
+  const pageWork = { pageUploadBytes: 0, pageSessions: 0, pageCheckpointAttempts: 0 };
   const snapshotWriteDelays = [];
   const snapshotWriteRecords = [];
   let stateReadDelayMs = 0;
@@ -209,6 +234,7 @@ globalThis.fetch = function tracedFetch(input, init) {
   let refuseSnapshotWrites = false;
   let rejectSnapshotWrites = null;
   let rejectedStateReads = null;
+  let legacySnapshotApi = false;
   let beforeSnapshotWrite = null;
   let refuseRequestWrites = false;
   let refuseBoardLinks = false;
@@ -266,6 +292,10 @@ globalThis.fetch = function tracedFetch(input, init) {
   const server = createServer(async (req, res) => {
     const snapshotWrite = req.method === 'PUT' && /\/api\/v1\/boards\/[0-9a-f]{32}\/state$/.test(req.url ?? '');
     if (snapshotWrite) snapshotWriteCount += 1;
+    const pageObject = req.method === 'PUT' && /^\/api\/v2\/boards\/[0-9a-f]{32}\/uploads\/[^/]+\/objects\/[0-9a-f]{64}$/u.test(req.url ?? '');
+    if (req.method === 'POST' && /^\/api\/v2\/boards\/[0-9a-f]{32}\/uploads$/u.test(req.url ?? '')) pageWork.pageSessions++;
+    if (req.method === 'POST' && /^\/api\/v2\/boards\/[0-9a-f]{32}\/uploads\/[^/]+\/publish$/u.test(req.url ?? '')) pageWork.pageCheckpointAttempts++;
+
     const requestChunks = [];
     const responseChunks = [];
     const acceptedApprovalCompletionRefusal = refuseNextAcceptedApprovalCompletionResponse
@@ -278,6 +308,7 @@ globalThis.fetch = function tracedFetch(input, init) {
     const request = new Transform({
       transform(chunk, _encoding, callback) {
         requestChunks.push(Buffer.from(chunk));
+        if (pageObject) pageWork.pageUploadBytes += chunk.byteLength;
         callback(null, chunk);
       },
     });
@@ -331,6 +362,13 @@ globalThis.fetch = function tracedFetch(input, init) {
       request: Buffer.concat(requestChunks), response: Buffer.concat(responseChunks) }));
     calls.push({ method: req.method, path: req.url, accept: req.headers.accept ?? '', engine: req.headers['x-pullboard-engine'],
       browser: String(req.headers.cookie ?? '').includes('pb_session=') });
+    if (legacySnapshotApi && req.method === 'GET' && req.url === '/api/v2') {
+      res.writeHead(legacySnapshotApi === 'bad-route' ? 400 : 200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(legacySnapshotApi === 'bad-route'
+        ? { version: 1, error: { code: 'BAD_REQUEST', message: 'Use API1 on this legacy relay.' } }
+        : { version: 1, apiVersion: 1, snapshot: 'legacy' }));
+      request.resume(); return;
+    }
     if (req.method === 'POST' && req.url === '/auth/device/confirmation/status' && nextConfirmationStatusHold) {
       const hold = nextConfirmationStatusHold;
       nextConfirmationStatusHold = null;
@@ -400,7 +438,8 @@ globalThis.fetch = function tracedFetch(input, init) {
       res.end(JSON.stringify({ version: 1, error: { code: rejectSnapshotWrites.code, message: rejectSnapshotWrites.message } }));
       return;
     }
-    if (beforeSnapshotWrite && req.method === 'PUT' && /\/api\/v1\/boards\/[0-9a-f]{32}\/state$/.test(req.url ?? '')) {
+    // The next snapshot starts with an API1 state write or, for paged snapshots, the API2 upload session (#903).
+    if (beforeSnapshotWrite && (snapshotWrite || (req.method === 'POST' && /^\/api\/v2\/boards\/[0-9a-f]{32}\/uploads$/u.test(req.url ?? '')))) {
       const before = beforeSnapshotWrite;
       beforeSnapshotWrite = null;
       await before(req.headers);
@@ -429,7 +468,7 @@ globalThis.fetch = function tracedFetch(input, init) {
   const origin = 'http://127.0.0.1:' + relayPort;
   auth = createRelayAuth({ database: authDatabase, github: createGitHubClient({ ...provider.config, callbackURL: origin + '/auth/github/callback' }) });
   signIn = createAuthHandler({ auth, publicOrigin: origin });
-  api = createRelayHandler({ directory: join(scratch, 'relay'), auth, publicOrigin: origin, pollMs: 10, maintenanceMs: 0, now: () => Date.now() + timeOffsetMs });
+  api = createRelayHandler({ directory: join(scratch, 'relay'), auth, publicOrigin: origin, pollMs: 10, maintenanceMs: 0, accountStorageBytes, now: () => Date.now() + timeOffsetMs });
   /** Sign a separate phone in over actual OAuth HTTP; its person session stays only in fixture RAM. */
   async function phoneSession() {
     if (phone) return phone;
@@ -485,6 +524,10 @@ globalThis.fetch = function tracedFetch(input, init) {
     const plannedUploads = plannedSnapshotUploads(args);
     const snapshotUploads = plannedUploads ?? requestedUploads;
     const writesBefore = snapshotWriteCount;
+    const pagesBefore = { ...pageWork };
+    /** Observe only this child's received work; retries consume the same finite six-unit allowance. */
+    const observedWork = () => ({ legacyUploads: snapshotWriteCount - writesBefore,
+      ...Object.fromEntries(Object.entries(pageWork).map(([name, count]) => [name, count - pagesBefore[name]])) });
     const childEnv = traceSnapshotWrites ? { ...env, PULLBOARD_TEST_RELAY_TRACE_FILE: traceFile,
       PULLBOARD_TEST_RELAY_TRACE_ORIGIN: origin,
       NODE_OPTIONS: [env.NODE_OPTIONS, '--import=' + pathToFileURL(tracePreload).href].filter(Boolean).join(' ') } : env;
@@ -498,11 +541,10 @@ globalThis.fetch = function tracedFetch(input, init) {
     }
     let result;
     try {
-      result = await childResult(root, childEnv, [CLI, ...args, '--json'],
-        traceSnapshotWrites ? () => snapshotWriteCount - writesBefore : undefined, initialUploads);
+      result = await childResult(root, childEnv, [CLI, ...args, '--json'], observedWork, initialUploads);
     } catch (error) {
       if (traceSnapshotWrites) {
-        const evidence = JSON.stringify({ fetches: childTrace(), relayReceives: snapshotWriteRecords.slice(writesBefore) });
+        const evidence = JSON.stringify({ fetches: childTrace(), relayReceives: snapshotWriteRecords.slice(writesBefore), uploadWork: observedWork() });
         const message = error instanceof Error ? error.message : String(error);
         throw new Error(`${message}; safe snapshot transport evidence: ${evidence}`, { cause: error });
       }
@@ -601,8 +643,10 @@ globalThis.fetch = function tracedFetch(input, init) {
 
   /** Start a saved real relay link without exposing the pairing fragment. */
   async function link() {
-    assert.equal((await cli('relay', 'on', '--url', origin)).code, 0, 'real device sign-in links the board');
+    const result = await cli('relay', 'on', '--url', origin);
+    assert.equal(result.code, 0, 'real device sign-in links the board');
     privateKeys.add(readFileSync(keyFile, 'utf8').trim());
+    return result;
   }
   /** Raise this fixture board's durable minimum to the current engine before compatibility checks. */
   async function requireEngineThree() {
@@ -696,8 +740,17 @@ globalThis.fetch = function tracedFetch(input, init) {
     overrideDelete(value) { override = value; },
     failTokenMints(count) { mintFailures = count; },
     refuseSnapshotWrites(value) { refuseSnapshotWrites = value; },
+    /** Restart only the private service with a changed operator quota, retaining real journals and credentials. */
+    setStorageQuota(bytes) {
+      assert.ok(Number.isSafeInteger(bytes) && bytes > 0);
+      api.close();
+      api = createRelayHandler({ directory: join(scratch, 'relay'), auth, publicOrigin: origin, pollMs: 10,
+        maintenanceMs: 0, accountStorageBytes: bytes, now: () => Date.now() + timeOffsetMs });
+    },
     /** Return a chosen HTTP refusal for snapshot writes, without inspecting the sealed body. */
     rejectSnapshots(value) { rejectSnapshotWrites = value ? { ...value } : null; },
+    /** Model an older relay's capability response without changing the real API1 request and journal bounds. */
+    legacySnapshotApi(value = true) { legacySnapshotApi = value; },
     /** Order a competing real HTTP upload before the next native snapshot reaches the journal. */
     beforeNextSnapshot(value) { beforeSnapshotWrite = value; },
     /** Return a chosen real HTTP state refusal to exercise uncertain-baseline safety. */
@@ -746,4 +799,12 @@ globalThis.fetch = function tracedFetch(input, init) {
       boardsWithoutSnapshots.set(id, new Set(paths));
     },
   };
+}
+
+
+/** Preserve explicit API1 wire-contract cases while the default fixture exercises current API2 writers. */
+export async function legacyRelayClientFixture(t, options) {
+  const box = await relayClientFixture(t, options);
+  box.legacySnapshotApi();
+  return box;
 }

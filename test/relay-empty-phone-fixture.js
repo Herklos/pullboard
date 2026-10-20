@@ -4,7 +4,7 @@ import { createRelayBrowserHandler } from '../relay/browser-page.js';
 import { startChrome } from './relay-browser-fixture.js';
 
 /** Serve only synthetic authorized metadata and keep the production browser transport and device storage. */
-export async function emptyPhoneFixture(t, { linked = true, savedKey = false, enrolled = false, delayed = false, phone = true } = {}) {
+export async function emptyPhoneFixture(t, { linked = true, savedKey = false, enrolled = false, delayed = false, phone = true, warnings = [] } = {}) {
   const board = { id: 'a'.repeat(32), repository: 'fixture/empty-project' };
   let releaseListing;
   const listingReady = delayed ? new Promise(resolve => { releaseListing = resolve; }) : Promise.resolve();
@@ -17,7 +17,7 @@ export async function emptyPhoneFixture(t, { linked = true, savedKey = false, en
     if (path.startsWith('/api/')) {
       let body = { version: 1 };
       let status = 200;
-      if (path === '/api/v1/boards') { await listingReady; body.boards = linked ? [board] : []; }
+      if (path === '/api/v1/boards') { await listingReady; body.boards = linked ? [board] : []; body.warnings = warnings; }
       else if (path === '/api/v1/devices/session') body.account = 'fixture-account';
       else if (/\/devices\/[^/]+\/boards$/u.test(path)) body.wraps = [];
       else if (/\/devices\/[^/]+\/approvals$/u.test(path)) body.approvals = [];

@@ -320,7 +320,7 @@ test('ordered agent joins mint scoped tokens and retain authenticated native act
   assertMetadataOnly(apiRevoke, [firstToken, secondToken, personState.token, boardKey], 'local API refusal contains no credential');
 
   // Capture authenticated journal records before a person command checkpoints their prefix.
-  const remoteState = await fetch(`${box.origin}/api/v1/boards/${personState.board}/state`, {
+  const remoteState = await fetch(`${box.origin}/api/v2/boards/${personState.board}/state`, {
     headers: { authorization: `Bearer ${secondToken}`, 'x-pullboard-engine': String(ENGINE_VERSION) },
   });
   assert.equal(remoteState.status, 200, 'the second scoped token can read the sealed relay snapshot');

@@ -1,4 +1,5 @@
-/** Over the real relay, only an authenticated person sender records a never-again fact [D1,H16,B26]. */
+/** Over the real relay, only an authenticated person sender records a never-again fact [D1,H16,B26]. The case reads the
+ * API1 state sequence, so it runs on the legacy wire (#903). */
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -9,7 +10,7 @@ import { exportBoard, importBoard } from '../src/exchange.js';
 import { ENGINE_VERSION } from '../src/machine.js';
 import { rigorReport } from '../src/rigor.js';
 import { decodeBoardKey, seal, unseal } from '../src/seal.js';
-import { relayClientFixture } from './relay-client-fixture.js';
+import { legacyRelayClientFixture as relayClientFixture } from './relay-client-fixture.js';
 
 /** Call the real relay API with one bearer credential and the current engine header. */
 async function relay(box, path, token, { method = 'GET', body } = {}) {
