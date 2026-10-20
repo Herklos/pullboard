@@ -1,4 +1,5 @@
-/** Recover a native checkpoint timeout through the actual relay page [H16]. */
+/** Recover a native checkpoint timeout through the actual relay page [H16]. The timeout is an API1 checkpoint PUT, so
+ * the case runs on the legacy wire (#903). */
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -8,7 +9,7 @@ import { prepareEngineMove, applyRelayMove } from '../src/engine.js';
 import { ENGINE_VERSION } from '../src/machine.js';
 import { relaySnapshot } from '../src/relay-presentation.js';
 import { decodeBoardKey, generateBoardKey, seal } from '../src/seal.js';
-import { relayClientFixture } from './relay-client-fixture.js';
+import { legacyRelayClientFixture as relayClientFixture } from './relay-client-fixture.js';
 import { findChromeExecutable, startChrome } from './relay-browser-fixture.js';
 
 /** Seal a real native document for an exact authenticated relay position. */
