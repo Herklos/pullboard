@@ -57,3 +57,5 @@ The owner hears about a watch only when its result changes. A red result sends "
 ### How Rigor uses a sentinel
 
 Each red run counts as a failure with the cause `sentinel:<name>`. Two red runs of the same watch make a repeated cause, and Rigor lists it in `pullboard rigor`. From there it follows the same path as any other repeated cause, so the coordinator can draft a rule and the person decides on it. See [Rigor](rigor.md) for how that works.
+
+The path can also run the other way. When a repeated cause is one a check can watch, Rigor drafts it as a pending board watch, citing its repeats and the proof that the check fails and then passes. The person approves it from Needs you, the same way as any Rigor draft, and until then it does not run.

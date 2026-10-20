@@ -45,6 +45,8 @@ Drafting approves nothing. The person reviews each draft with its evidence and i
 
     pullboard spec approve <ids> | decline <ids> --reason "why"
 
+A repeated cause that a check can watch is drafted as a pending board watch instead, citing its repeats and the proof. It appears in Needs you with the other drafts, and it runs only after the person approves it.
+
 Once a doctrine row is approved, every submit runs the doctrine check, so the rule holds from then on. Check the current rules and their counts with:
 
     pullboard doctrine check
