@@ -38,6 +38,41 @@ export function sentinelDefinition(value) {
     timeoutMs, next: next.trim() };
 }
 
+/**
+ * The evidence a proposal cites, kept beside the row and outside its digest: the person approves the watch,
+ * and the evidence says why it was proposed (#776). A Rigor draft cites its repeated cause, the items it
+ * failed on and the red and green commits that prove its check; an agent's own proposal cites none.
+ */
+export function sentinelEvidence(value) {
+  if (value === undefined || value === null) return null;
+  const commit = (side) => side && typeof side.commit === 'string' && /^[0-9a-f]{7,64}$/u.test(side.commit) && Number.isSafeInteger(side.exit);
+  if (typeof value !== 'object' || typeof value.key !== 'string' || !value.key.trim() || value.key.length > 512
+      || !Array.isArray(value.items) || value.items.length > 100 || value.items.some(item => !Number.isSafeInteger(item?.id))
+      || !Number.isSafeInteger(value.occurrences) || value.occurrences < 0
+      || value.proof !== undefined && !(value.proof && typeof value.proof.check === 'string' && commit(value.proof.red) && commit(value.proof.green))) {
+    throw new Refused('BAD_SENTINEL', 'a sentinel cites its evidence as a repeated cause, its items and a proven check; draft it with pullboard rigor draft <key> --sentinel');
+  }
+  return { key: value.key, items: value.items.map(item => ({ id: item.id, commits: Array.isArray(item.commits) ? item.commits.filter(commit => typeof commit === 'string').slice(0, 20) : [] })),
+    occurrences: value.occurrences, ...(value.proof ? { proof: { check: value.proof.check,
+      red: { commit: value.proof.red.commit, exit: value.proof.red.exit }, green: { commit: value.proof.green.commit, exit: value.proof.green.exit } } } : {}) };
+}
+
+/** A watch name for a repeated cause: lower case, safe characters, at most 64 long. */
+export function rigorSentinelName(key) {
+  const slug = String(key).toLowerCase().replace(/[^a-z0-9._-]+/gu, '-').replace(/^[^a-z0-9]+|-+$/gu, '');
+  return ('rigor-' + slug).slice(0, 64).replace(/[-._]+$/u, '');
+}
+
+/** Pending watches are the person's calls: one Needs-you entry each, with the evidence that proposed it. */
+export function sentinelDraftNeeds(rows) {
+  return rows.filter(row => row.status === 'pending').map(row => ({
+    kind: 'sentinel-draft', id: `sentinel:${row.name}`, ref: row.name,
+    text: `Sentinel draft: ${row.name} runs ${row.check} ${row.every === 'daily' || row.every === 'hourly' ? row.every : 'every ' + row.every}, reporting to ${row.owner}`,
+    what: `pullboard sentinel approve ${row.name}, or decline it with --reason`, target: `sentinel:${row.name}`,
+    ...(row.evidence ? { cause: row.evidence.key, evidence: row.evidence } : {}),
+  }));
+}
+
 /** Bind approval to every execution and notification field, including schedule and timeout. */
 export function sentinelDigest(value) {
   return createHash('sha256').update(JSON.stringify(sentinelDefinition(value))).digest('hex');
@@ -52,7 +87,7 @@ export function sentinels(board) {
     if (detail.engine !== BOARD_SENTINEL_ENGINE) continue;
     if (event.event_kind === 'sentinel-proposal') {
       rows.set(detail.row.name, { ...detail.row, digest: detail.digest, status: 'pending', proposedBy: event.event_by,
-        proposedAt: event.event_at, lastRun: null, activeRun: null, history: [] });
+        proposedAt: event.event_at, evidence: detail.evidence ?? null, lastRun: null, activeRun: null, history: [] });
       continue;
     }
     const row = rows.get(detail.name);
@@ -90,16 +125,17 @@ function currentSentinel(board, name, digest) {
 }
 
 /** Propose or replace a watch; every replacement becomes pending and loses all prior approval. */
-export function proposeSentinel(board, { agentId, row: value }) {
+export function proposeSentinel(board, { agentId, row: value, evidence: cited }) {
   return atomic(board, () => {
     requireSentinelActor(board, agentId);
     const row = sentinelDefinition(value);
+    const evidence = sentinelEvidence(cited);
     const agents = listAgents(board);
     if (row.owner !== 'coordinator' && !agents.some(agent => [agent.agent_id, agent.agent_lane].includes(row.owner))) {
       throw new Refused('BAD_SENTINEL', 'choose the coordinator, a registered seat or a lane as the sentinel owner');
     }
     const digest = sentinelDigest(row);
-    logEvent(board, agentId, 'sentinel-proposal', null, { row, digest, engine: BOARD_SENTINEL_ENGINE });
+    logEvent(board, agentId, 'sentinel-proposal', null, { row, digest, engine: BOARD_SENTINEL_ENGINE, ...(evidence ? { evidence } : {}) });
     return sentinels(board).find(entry => entry.name === row.name);
   });
 }

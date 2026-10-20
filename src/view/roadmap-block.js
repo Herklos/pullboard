@@ -2,7 +2,11 @@
 export function roadmapBlock(item, context = {}) {
   if (!item) return null;
   const escape = text => String(text ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
-  const items = context.items || [], name = context.name || (id => id), time = context.time || (at => at);
+  const items = context.items || [], boardAgents = context.agents || [];
+  // An agent's name: its display name with the model, or its name alone when the model is unknown (the display name would carry an "unknown" placeholder).
+  const name = context.name || (id => { const agent = boardAgents.find(entry => entry.agent_id === id), model = agent?.model || agent?.agent_model; return !model || model === 'unknown' ? id : agent.displayName || id + ' (' + model + ')'; });
+  // A time as the viewer's locale writes it with hours and minutes (7:09 PM in English), with the date first when it is not today.
+  const time = context.time || (iso => { const moment = new Date(iso), clock = moment.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }); return moment.toDateString() === new Date().toDateString() ? clock : moment.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + clock; });
   const waits = (item.blockedBy || []).map(id => items.find(other => other.id === id) || {id,status:'unavailable'});
   const hold = (context.holds || []).find(h => h.hold_lane === item.lane);
   const blocked = item.status === 'open' && Boolean(waits.length || hold);
@@ -22,6 +26,15 @@ export function roadmapBlock(item, context = {}) {
   const ref = other => {const [word,color] = words[state(other)] || [other.status,''];return '<span class="chip roadmap-ref '+color+'">#'+escape(other.id)+' '+escape(word || (other.merged || other.stage === 'merged' ? 'landed' : 'verified'))+'</span>';};
   const field = (key,value,extra='') => value ? '<dt>'+icon(key)+escape(key)+'</dt><dd'+(extra?' class="'+extra+'"':'')+'>'+value+'</dd>' : '';
   const first = text => String(text || '').split('\n').find(line => line.trim())?.trim() || '';
+  /**
+   * The first sentence of a send-back note, cut at 160 characters. An ellipsis marks any text left out,
+   * so a reader knows the full note is one click away in Items (the row never shows it all).
+   */
+  const shortNote = text => {
+    const line = first(text), sentence = line.match(/^.*?[.!?](?=\s|$)/u)?.[0] || line;
+    const short = sentence.length > 160 ? sentence.slice(0, 160).trimEnd() : sentence;
+    return short.length < text.length ? short + '…' : short;
+  };
   const criterion = first(item.criterion).match(/^.*?[.!?](?:\s|$)|^.*$/u)?.[0]?.trim() || '';
   const agents = [];
   const builder = item.status === 'claimed' ? item.claim?.by || item.owner : item.builtBy;
@@ -38,7 +51,7 @@ export function roadmapBlock(item, context = {}) {
   const reasons = {TEST_FAILURE:'A test failed',BEHAVIOR_MISMATCH:'Behavior differs from the criterion',INSUFFICIENT_EVIDENCE:'More evidence is needed',STALE_HEAD:'The submitted commit is out of date',OTHER:'Sent back'};
   let returned = '';
   if (reject) {
-    const note = first(reject.note).replace(new RegExp('^'+String(reject.reason || '')+'(?::|\\s*[-–—])?\\s*','u'),'');
+    const note = shortNote(String(reject.note ?? '').trim().replace(new RegExp('^'+String(reject.reason || '')+'(?::|\\s*[-–—])?\\s*','u'),''));
     returned = (reject.at?escape(time(reject.at))+' ':'')+(reject.by?'by <b>'+escape(name(reject.by))+'</b>: ':'')+escape(note || reasons[reject.reason] || 'Sent back');
   }
   let claims = 0;
