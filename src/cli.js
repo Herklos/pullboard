@@ -41,6 +41,8 @@ import {
   refuseNextIdle,
 } from './next-steps.js';
 import { reviewerStartup } from './next-steps.js';
+import { gateWaitStats } from './gate-receipt.js';
+import { receiptLine } from './gate-receipt.js';
 import * as store from './board.js';
 import {
   CONFIG_FILE,
@@ -2614,7 +2616,8 @@ function readCommands(io, { first, second, rest, values }) {
     stats: () => {
       const ctx = context(io);
       const { stats, agents } = withBoard(ctx, (board) => ({ stats: proofStats(board, { since: values.since }), agents: store.listAgents(board) }));
-      io.result?.({ stats });
+      const waits = gateWaitStats(ctx.info.root);
+      io.result?.({ stats, gateWaits: waits.stats });
       io.say(`${stats.submissions} submissions · ${stats.rejections} rejections · ${(stats.rejectionShare * 100).toFixed(1)}% sent back`);
       io.say(`${stats.merged} items merged · ${stats.mergedWithoutAccept} merged without an accept`);
       io.say(`${stats.agentCount} agents · ${stats.familyCount} family buckets: ${stats.families.map((family) => `${family.name} (${family.agents} agents, ${family.moves} moves)`).join('; ') || 'none'}`);
@@ -2622,6 +2625,7 @@ function readCommands(io, { first, second, rest, values }) {
       io.say(`events: ${stats.firstEventAt ?? 'none'} to ${stats.lastEventAt ?? 'none'}${stats.since ? ` (since ${stats.since})` : ''}`);
       for (const line of barStatsLines(stats.bars)) io.say(line);
       for (const line of flowLines(stats.flow)) io.say(line);
+      for (const line of waits.lines) io.say(line);
       return 0;
     },
     ledger: () => {
@@ -2744,7 +2748,7 @@ async function submitHere(ctx, id) {
   // Doctrine counts only fall: accepted main's rules, at this exact commit (D1). No rule, no change.
   const doctrine = hasSubmitRules(root, acceptedMain.commit, acceptedMain.config.practice)
     ? await withGateSlot(root, () => holdDoctrine(root, { mainCommit: acceptedMain.commit, commit, practice: acceptedMain.config.practice, timeoutMs: acceptedMain.config.check?.timeoutMs }),
-      { itemCheck: true, agent: me.id, item: String(id), kind: 'doctrine', onWait: queuedItemLease(ctx, held, me.id, 'build') })
+      { itemCheck: true, agent: me.id, item: String(id), kind: 'doctrine', onWait: queuedItemLease(ctx, held, me.id, 'build'), onReceipt: (receipt) => ctx.io.say(`doctrine hold ${receiptLine(receipt)}`) })
     : [];
   for (const rule of doctrine) ctx.io.say(`doctrine: ${ruleLine(rule)}`);
   // Every submit proves its frozen check and reachable tests anew on this exact commit (V4,V16).
@@ -3584,7 +3588,7 @@ function workCommands(io, args) {
       const shortEligible = Boolean(await explicitCheckFiles(ctx.info.root, check));
       const run = await withGateSlot(ctx.info.root, (lease) => runProfiledShell(ctx.info.root, check, { waitMs: lease.waitMs, artifactPrefix: `pullboard-check-${item.item_id}`, persistLog: true, gateLease: lease }), { browser, agent: caller, item: String(item.item_id), kind: 'check', itemCheck: true, shortEligible, onWait: queuedItemLease(ctx, item, caller, 'build') });
       refuseSandboxBlocked(run);
-      io.result?.({ id: item.item_id, green: run.isGreen, seconds: run.seconds, check, by, report: run.isGreen ? '' : digestOf(run.output) });
+      io.result?.({ id: item.item_id, green: run.isGreen, seconds: run.seconds, check, by, receipt: run.profile?.receipt, report: run.isGreen ? '' : digestOf(run.output) });
       const timings = timingDigest(run.profile);
       const compact = timings && !run.profile.files.length
         ? `; ${timings.replaceAll('\n', '; ')}; timing profile: ${run.profilePath}` : '';

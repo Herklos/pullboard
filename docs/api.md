@@ -36,6 +36,8 @@ For a stale acceptance, merge current main into the submitted work and commit a 
 
 `pullboard stats [--since <date>] --json` returns `{version: 1, stats: {...}}` from the append-only event log. `submissions` and `rejections` count moves, including repeated attempts; `rejectionShare` is rejections divided by submissions (zero when the window has no submissions). `merged` counts distinct items with a merge move; `mergedWithoutAccept` counts those whose merge lacks an earlier acceptance of the latest submitted commit. That audit uses earlier history even when the acceptance falls before the selected window. Current item and verdict rows do not replace event evidence.
 
+`stats.gateWaits` lists, for each kind of gated run in the last day (`check`, `review`, `doctrine`, `gate`, `landing`), its `runs`, `medianWaitMs`, `slowestWaitMs` and `medianRunMs`, read from the board's gate receipts; text `stats` prints them under `gate waits, last day:`. A gate receipt is written for every run that takes a gate slot. Its fields are `waitMs` (queued for a slot), `admissionMs` (deciding and queueing, then handing over), `setupMs`, `runMs` and `evidenceMs` (reading the result and writing its record), and `slot: {kind, reason}`, where `kind` is `ordinary`, `browser`, `short`, `runner` or `inherited`. A timing profile carries it as `receipt`, `check --json` returns it as `receipt`, and the timing lines print it as `phases: ...; slot: <kind> (<reason>)`. A doctrine hold at submit prints its own `doctrine hold phases:` line.
+
 `stats.bars` counts bar corrections, keyed by agent: `{corrections, barRejects, buildRejects}`. A correction is an `edit --criterion` or `--check` on an item that was ever claimed. It must carry `--reason "what the old bar got wrong"` (HTTP `args.reason`); without one it is refused with `BAR_REASON`. A correction that follows the item's newest, unexplained reject marks that reject as caused by the bar, counted to the correcting agent; every other reject counts to the build, under the agent who added the item. Text `stats` prints one `bars:` line per agent, and text `show` prints each correction with its reason.
 
 `stats.flow` adds the flow through the board:
@@ -96,7 +98,7 @@ For example: `flow: review wait average 61 min (1 measured; > 60 min); bottlenec
 | `milestone remove` | `version:number`, `milestone:object` |
 | `milestone ship` | `version:number`, `milestone:object`, `into:string|null`, `moved:array`, `notMoved:array` |
 | `show` | `version:number`, `item_id:number`, `item_title:string`, `item_lane:string`, `item_status:string`, `verdicts:array`, `thread:array` |
-| `stats` | `version:number`, `stats:object` |
+| `stats` | `version:number`, `stats:object`, `gateWaits:array` |
 | `status` | `version:number`, `me:object`, `mine:array`, `stats:object`, `reviewQueue:object`, `unread:number`, `relay:object` |
 | `doctor` | `version:number`, `problems:array` |
 | `health` | `version:number`, `asOf:string`, `thresholds:object`, `stuck:array`, `waiting:array` |
@@ -115,7 +117,7 @@ For example: `flow: review wait average 61 min (1 measured; > 60 min); bottlenec
 | `run` | `version:number`, `messages:array` |
 | `sweep` | `version:number`, `messages:array` |
 | `next` | `version:number`, `item:object`, `review:boolean`, `held:boolean`, `shared:array` |
-| `check` | `version:number`, `id:number`, `green:boolean`, `seconds:number`, `check:string`, `report:string` |
+| `check` | `version:number`, `id:number`, `green:boolean`, `seconds:number`, `check:string`, `receipt:object`, `report:string` |
 | `check accept` | `version:number`, `id:number`, `digest:string`, `check:string` |
 | `claim` | `version:number`, `id:number`, `renewed:boolean`, `leaseUntil:string`, `digest:string` |
 | `hold` | `version:number`, `lane:string`, `held:boolean` |
