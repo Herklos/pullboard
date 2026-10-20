@@ -1,3 +1,4 @@
+/** @pullboard-test-loads src/board.js src/engine.js src/exchange.js src/machine.js */
 /** Preserve released person-waiver receipts on independent current replicas [B3,R3,H16]. */
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';

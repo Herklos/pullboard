@@ -211,3 +211,52 @@ test('the browser launch guard keeps affected selection exact [C7,O5]', (t) => {
     assert.match(fallback.reason, /CommonJS/u, 'the fallback names the unresolved module-loader boundary');
   }
 });
+
+test('a change to one test file selects only what reads it [V4,C7]', (t) => {
+  const box = graph(t);
+  // A computed import whose target the file declares: it reads src/api.js and nothing else.
+  box.put('test/loader.test.js', "/** @pullboard-test-loads src/api.js */\nconst name = 'api';\nawait import(new URL(`../src/${name}.js`, import.meta.url).href);\n");
+  const base = box.commit();
+  box.put('test/api.test.js', "import '../src/api.js'; // one test file changed\n");
+  let commit = box.commit();
+  let selection = selectAffectedTests(box.root, { base, commit });
+  assert.equal(selection.full, false, 'a change to one test file keeps focused selection');
+  assert.deepEqual(selection.files, ['test/api.test.js'], 'an unrelated computed-import test is not selected');
+
+  box.put('src/api.js', 'export const version = 2;\n');
+  commit = box.commit();
+  selection = selectAffectedTests(box.root, { base, commit, changed: ['src/api.js'] });
+  assert.equal(selection.full, false);
+  assert.deepEqual(selection.files, ['test/api.test.js', 'test/loader.test.js'], 'the declared reader of a changed module is selected');
+
+  selection = selectAffectedTests(box.root, { base, commit, changed: ['src/labels.js'] });
+  assert.deepEqual(selection.files, ['test/unrelated.test.js'], 'a module it does not declare leaves the loader out');
+
+  // A computed import with no declaration still reads what its literal path names.
+  box.put('test/literal.test.js', "await import(new URL('../src/labels.js', import.meta.url).href);\n");
+  commit = box.commit();
+  selection = selectAffectedTests(box.root, { base, commit, changed: ['src/labels.js'] });
+  assert.deepEqual(selection.files, ['test/literal.test.js', 'test/unrelated.test.js'], 'a literal path names the module the import reads');
+  selection = selectAffectedTests(box.root, { base, commit, changed: ['src/api.js'] });
+  assert.deepEqual(selection.files, ['test/api.test.js', 'test/loader.test.js'], 'the literal reader is left out of an unrelated change');
+
+  // A computed import that declares nothing cannot be read, so the whole suite runs and says why.
+  box.put('test/guess.test.js', 'await import(process.env.GUESS);\n');
+  commit = box.commit();
+  selection = selectAffectedTests(box.root, { base, commit, changed: ['test/api.test.js'] });
+  assert.equal(selection.full, true, 'an undeclared computed import falls back to the whole suite');
+  assert.match(selection.reason, /test\/guess\.test\.js/u, 'the fallback names the file that cannot be read');
+});
+
+test('a computed import with an environment fallback reads every candidate, not one literal [V4,C7]', (t) => {
+  const box = graph(t);
+  box.put('src/b.js', 'export const value = 1;\n');
+  // The loader reads src/b.js whenever CASE_MODULE names it, so the literal fallback alone is not its read set.
+  box.put('test/loader.test.js', "await import(new URL(process.env.CASE_MODULE || '../src/api.js', import.meta.url).href);\n");
+  const base = box.commit();
+  box.put('src/b.js', 'export const value = 2;\n');
+  const commit = box.commit();
+  const selection = selectAffectedTests(box.root, { base, commit, changed: ['src/b.js'] });
+  assert.equal(selection.full, true, 'an unresolved branch falls back to the whole suite instead of a partial read set');
+  assert.match(selection.reason, /test\/loader\.test\.js/u, 'the fallback names the loader it cannot read');
+});

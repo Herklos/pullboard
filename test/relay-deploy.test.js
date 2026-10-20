@@ -1,3 +1,4 @@
+/** @pullboard-test-loads relay/client.js src/changelog.js */
 /** Exercise the deploy smoke script against a private loopback relay [H5,H18]. */
 import assert from 'node:assert/strict';
 import { startFixtureChild as spawn, reportFixtureChildFailure, safeFixtureDiagnostic } from './fixture-child.js';

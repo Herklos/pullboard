@@ -14,7 +14,72 @@ const DOC = /^docs\/.+\.md$/u;
 const TEST_TREE_INPUT = '/** @pullboard-test-input test-tree */';
 const SOURCE_TREE_INPUT = '/** @pullboard-test-input source-tree */';
 const DOCS_TREE_INPUT = '/** @pullboard-test-input docs-tree */';
+// A computed-import test may declare the repository modules it can load; a comment anywhere in the file counts.
+const LOADS = /^\/\*\* @pullboard-test-loads (.+?) \*\/$/gmu;
 const GLOBAL = new Set(['bin/run-tests.js', 'package.json', 'package-lock.json', 'npm-shrinkwrap.json', 'yarn.lock', 'pnpm-lock.yaml', 'src/gate.js', 'src/cli.js', 'src/hooks.js', 'src/trusted-policy.js', 'src/affected-tests.js', 'src/module-imports.js']);
+
+/** The repository modules a computed-import test declares it can load, normalized; anything outside the repository is ignored. */
+function declaredLoads(source) {
+  return [...source.matchAll(LOADS)].flatMap(match => match[1].trim().split(/\s+/u)).map(path => posix.normalize(path))
+    .filter(path => MODULE.test(path) && !path.startsWith('../') && !path.startsWith('/'));
+}
+
+/**
+ * Whether a computed import's argument leaves its target open: a fallback (||, ??) or a ternary, an environment
+ * variable, a template interpolation, or a bare variable that picks the file. A variable that only supplies the
+ * directory, as the first argument of join or resolve, does not pick the file, so it stays readable.
+ *
+ * @param {string} argument the source text between the import call's parentheses
+ * @returns {boolean} true when some branch of the target is unresolved
+ */
+function unresolvedBranch(argument) {
+  if (/\|\||\?\?|\?|process\s*\.\s*env|\$\{/u.test(argument)) return true;
+  // Remove literal text, then directory variables, then calls and members; what is left is a bare variable.
+  const bare = argument
+    .replace(/(['"`])(?:\\[\s\S]|(?!\1)[^\\\r\n])*\1/gu, '""')
+    .replace(/\b(join|resolve)\(\s*[A-Za-z_$][\w$.]*\s*,/gu, '$1(');
+  for (const match of bare.matchAll(/[A-Za-z_$][\w$]*/gu)) {
+    const before = bare[match.index - 1] ?? '';
+    const after = bare.slice(match.index + match[0].length).trimStart()[0] ?? '';
+    if (before === '.' || after === '(' || after === '.' || match[0] === 'new') continue;
+    return true;
+  }
+  return false;
+}
+
+/**
+ * The repository modules a computed import names by literal path, such as join(root, 'src/x.js'). A computed
+ * import whose target has any unresolved branch (see unresolvedBranch) is not read from its literal; neither is
+ * one with no literal module path. Either leaves the file unreadable, so the caller falls back to the whole suite.
+ * Matching by the path's tail can select a module too many, never too few.
+ *
+ * @param {string} source the test file's text
+ * @param {string} path the test file's repository path
+ * @param {string[]} modulePaths every module path in the committed tree
+ * @returns {string[] | null} the modules it reads, or null when some computed import cannot be read
+ */
+function literalLoads(source, path, modulePaths) {
+  const targets = new Set();
+  for (const call of source.matchAll(/\bimport\s*\(/gu)) {
+    const start = call.index + call[0].length;
+    if (/^\s*(?:'[^'\\\r\n]*'|"[^"\\\r\n]*")\s*\)/u.test(source.slice(start))) continue;
+    let depth = 1, end = start;
+    for (; end < source.length && depth; end += 1) depth += source[end] === '(' ? 1 : source[end] === ')' ? -1 : 0;
+    const argument = source.slice(start, end);
+    if (unresolvedBranch(argument)) return null;
+    const values = [...argument.matchAll(/(['"`])((?:\\.|(?!\1)[^\\\r\n])*)\1/gu)].map(match => match[2].split(/[?#]/u)[0]);
+    const modules = values.filter(value => MODULE.test(value) && posix.basename(value).replace(MODULE, '') !== '');
+    if (!modules.length) return null;
+    for (const value of modules) {
+      const relative = posix.normalize(posix.join(posix.dirname(path), value));
+      const tail = posix.normalize(value).replace(/^(?:\.\.?\/)+/u, '');
+      const matches = modulePaths.filter(candidate => candidate === relative || candidate === tail || candidate.endsWith('/' + tail));
+      if (!matches.length) return null;
+      for (const match of matches) targets.add(match);
+    }
+  }
+  return [...targets];
+}
 
 /** Read exact objects from this checkout, ignoring ambient Git selectors and replacement refs. */
 function selectionGit(root, args) {
@@ -166,7 +231,7 @@ function graphAt(root, commit, changedDocs = []) {
   const synchronizers = knownBuiltinSynchronizers(sources, imports);
   const reverse = new Map();
   const unknown = new Map();
-  const always = new Set();
+  const undeclared = new Map();
   const testTreeReaders = new Set();
   const sourceTreeReaders = new Set();
   const docInputs = new Map();
@@ -186,7 +251,16 @@ function graphAt(root, commit, changedDocs = []) {
         continue;
       }
       if (target.startsWith('node:')) continue;
-      if (target === '(computed)' && TEST.test(path)) { always.add(path); continue; }
+      if (target === '(computed)' && TEST.test(path)) {
+        const declared = declaredLoads(modules.get(path));
+        const loads = declared.length ? declared : literalLoads(modules.get(path), path, paths) ?? [];
+        if (!loads.length) undeclared.set(path, 'a computed import declares no @pullboard-test-loads and names no module it can read');
+        for (const load of loads) {
+          if (!reverse.has(load)) reverse.set(load, new Set());
+          reverse.get(load).add(path);
+        }
+        continue;
+      }
       if (!target.startsWith('.')) {
         unknown.set(path, target === '(computed)' ? 'non-literal dynamic import' : 'unresolved package import');
         continue;
@@ -203,7 +277,7 @@ function graphAt(root, commit, changedDocs = []) {
       reverse.get('bin/pullboard.js').add(path);
     }
   });
-  return { paths, reverse, unknown, always, testTreeReaders, sourceTreeReaders, docInputs };
+  return { paths, reverse, unknown, undeclared, testTreeReaders, sourceTreeReaders, docInputs };
 }
 
 /**
@@ -238,6 +312,8 @@ export function selectAffectedTests(root, { base, trunk, commit = 'HEAD', change
     const unsupported = changed.find(path => !MODULE.test(path) && !DOC.test(path));
     if (unsupported) return { full: true, reason: `import selection cannot compute the effect of ${unsupported}`, files };
     const before = graphAt(root, base, changedDocs);
+    const [unreadable] = [...before.undeclared, ...after.undeclared];
+    if (unreadable) return { full: true, reason: `${unreadable[0]}: ${unreadable[1]}`, files };
     const reached = new Set(changed);
     const queue = [...changed];
     for (const doc of changed.filter(path => DOC.test(path))) {
@@ -260,7 +336,7 @@ export function selectAffectedTests(root, { base, trunk, commit = 'HEAD', change
     }
     const changedTestInput = changed.some(path => path.startsWith('test/') || TEST.test(path) || /^test\.[cm]?js$/u.test(path));
     const changedSourceInput = changed.some(path => path.startsWith('src/') || path.startsWith('bin/'));
-    const selected = files.filter(path => reached.has(path) || before.always.has(path) || after.always.has(path)
+    const selected = files.filter(path => reached.has(path)
       || (changedTestInput && (before.testTreeReaders.has(path) || after.testTreeReaders.has(path)))
       || (changedSourceInput && (before.sourceTreeReaders.has(path) || after.sourceTreeReaders.has(path))));
     if (selected.length === files.length) return { full: true, reason: 'the change reaches every test file', files };
