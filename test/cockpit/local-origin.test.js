@@ -11,8 +11,34 @@ import { VERSION } from '../../src/help.js';
 import { Refused } from '../../src/refused.js';
 import { createRelayBrowserHandler } from '../../relay/browser-page.js';
 import { BIN, machine, project, startView, chromeExecutable, openSnapshotChrome, closeSnapshotChrome, styleOf, proofShot } from './fixture.js';
+import {
+  chromeHealth,
+  networkServicePids,
+} from './chrome-health.js';
 
 const HOSTED = 'https://app.pullboard.dev';
+
+/** What the hosted page showed, for a wait that failed: its address, state, rows, detail and sessions (#908). */
+const HOSTED_FACTS = `JSON.stringify({ origin: location.origin, search: location.search,
+  note: document.querySelector('#local-note')?.hidden ? null : document.querySelector('#local-note')?.dataset.state ?? null,
+  rows: document.querySelectorAll('#proj-list .proj.repo, #chain .row').length, detail: (document.querySelector('#detail')?.textContent || '').trim().slice(0, 120),
+  relaySession: typeof hosted === 'undefined' ? null : hosted.relaySession, localSession: typeof localSession === 'undefined' ? null : Boolean(localSession),
+  transport: typeof transport === 'undefined' ? null : Boolean(transport) })`;
+
+/** Make each failed wait on this Chrome name the hosted page state it saw and Chrome's network-service health (#908). */
+function namedWaits(chrome, profile) {
+  const networkAtStart = networkServicePids(profile);
+  const waitFor = chrome.waitFor.bind(chrome);
+  chrome.waitFor = async (...args) => {
+    try { return await waitFor(...args); }
+    catch (error) {
+      try { error.message += '; the hosted page showed ' + await chrome.stable(HOSTED_FACTS); } catch { /* the page may be gone */ }
+      try { error.message += '; chrome ' + JSON.stringify(chromeHealth(chrome, profile, networkAtStart)); } catch { /* the wait's own error stays the result */ }
+      throw error;
+    }
+  };
+  return chrome;
+}
 const LOCAL = 'http://127.0.0.1:4890';
 
 /** Start the real view on a named port, as pullboard view does, and wait until it answers its printed link. */
@@ -161,7 +187,7 @@ test('a pullboard.dev page reads the local board [N26,A2]', { timeout: 120_000 }
     view = await startView(box);
     const port = view.link.port;
     const local = { own: view.base, target: null };
-    chrome = await openSnapshotChrome(executable, 'about:blank', profile);
+    chrome = namedWaits(await openSnapshotChrome(executable, 'about:blank', profile), profile);
     // Each fetch the hosted page makes, with what the page showed and where its address stood as it made it.
     await chrome.send('Page.addScriptToEvaluateOnNewDocument', { source: `(() => {
       if (location.origin !== ${JSON.stringify(HOSTED)}) return;
@@ -323,7 +349,7 @@ test('the hosted page says how far behind this machine\'s Pullboard is [N26,A2]'
   try {
     view = await startView(box);
     const local = { own: view.base, target: view.base, versionOverride: '0.8.20' };
-    chrome = await openSnapshotChrome(executable, 'about:blank', profile);
+    chrome = namedWaits(await openSnapshotChrome(executable, 'about:blank', profile), profile);
     for (const permissions of [['loopbackNetwork', 'localNetwork', 'localNetworkAccess'], ['localNetworkAccess']]) {
       try { await chrome.send('Browser.grantPermissions', { origin: HOSTED, permissions }); break; } catch { /* Chrome versions expose different permission names */ }
     }
@@ -481,7 +507,7 @@ test('the hosted relay never treats a remote board version as this machine\'s ve
   let view, chrome, stopStandIn;
   try {
     view = await startView(box);
-    chrome = await openSnapshotChrome(executable, 'about:blank', profile);
+    chrome = namedWaits(await openSnapshotChrome(executable, 'about:blank', profile), profile);
     for (const permissions of [['loopbackNetwork', 'localNetwork', 'localNetworkAccess'], ['localNetworkAccess']]) {
       try { await chrome.send('Browser.grantPermissions', { origin: HOSTED, permissions }); break; } catch { /* Chrome versions expose different permission names */ }
     }
@@ -535,7 +561,7 @@ test('a signed-in local view with linked metadata and no paired transport says h
     const direct = await call(view, '/api/v1/boards', { headers: { 'x-pullboard-key': view.key } });
     assert.equal(direct.status, 200, 'the real private view answers with its valid session key');
     assert.deepEqual(JSON.parse(direct.body).boards, [], 'the private view genuinely has no boards');
-    chrome = await openSnapshotChrome(executable, 'about:blank', profile);
+    chrome = namedWaits(await openSnapshotChrome(executable, 'about:blank', profile), profile);
     await chrome.send('Page.addScriptToEvaluateOnNewDocument', { source: `(() => {
       if (location.origin !== ${JSON.stringify(HOSTED)}) return;
       const nativeFetch = window.fetch.bind(window);
@@ -680,7 +706,7 @@ test('every hosted page state says what it is and what to do next [N26,H5]', { t
   const failures = [];
   try {
     view = await startView(box);
-    chrome = await openSnapshotChrome(executable, 'about:blank', profile);
+    chrome = namedWaits(await openSnapshotChrome(executable, 'about:blank', profile), profile);
     listener = ({ data }) => {
       const message = JSON.parse(String(data));
       if (message.method !== 'Fetch.requestPaused') return;
@@ -932,7 +958,7 @@ test('a phone never waits without a deadline at startup [N26,H5]', { timeout: 90
   let chrome, listener;
   const failures = [];
   try {
-    chrome = await openSnapshotChrome(executable, 'about:blank', profile);
+    chrome = namedWaits(await openSnapshotChrome(executable, 'about:blank', profile), profile);
     listener = ({ data }) => {
       const message = JSON.parse(String(data));
       if (message.method !== 'Fetch.requestPaused') return;
@@ -1006,7 +1032,7 @@ test('the page tells its transport when the board drew, and today\'s transport n
   let chrome, listener;
   const failures = [];
   try {
-    chrome = await openSnapshotChrome(executable, 'about:blank', profile);
+    chrome = namedWaits(await openSnapshotChrome(executable, 'about:blank', profile), profile);
     listener = ({ data }) => {
       const message = JSON.parse(String(data));
       if (message.method !== 'Fetch.requestPaused') return;
@@ -1063,7 +1089,7 @@ test('an item whose detail read is dropped once loads on its own [N26]', { timeo
   const reads = [];
   try {
     view = await startView(box);
-    chrome = await openSnapshotChrome(executable, 'about:blank', profile);
+    chrome = namedWaits(await openSnapshotChrome(executable, 'about:blank', profile), profile);
     // The first read of the item's detail fails at the network, as CI's 'Failed to fetch' did (#908); later ones go through.
     listener = ({ data }) => {
       const message = JSON.parse(String(data));
