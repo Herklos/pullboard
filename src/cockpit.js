@@ -31,6 +31,8 @@ import {
   roadmapSummary,
 } from './view/roadmap-summary.js';
 import { roadmapBlock } from './view/roadmap-block.js';
+import { openPageDialog } from './view/page-dialog.js';
+import { closePageDialog } from './view/page-dialog.js';
 import { applyStateDelta } from './api-http.js';
 
 /** The CLI's default phrases, ordered by depth for the existing prose inventory guard. */
@@ -323,7 +325,7 @@ let data = null;
 let seen = '';
 let addressReady = false;
 let heldClickPointer = null;
-let deferredClickRender = false;
+let deferredClickRender = false; const pageDialogs = new Set(); // open page dialogs; the page holds its redraws while one is open
 // Detail replies stay with an unchanged summary, while search results are keyed by board and words.
 const itemDetails = new Map();
 const itemSearches = new Map();
@@ -613,6 +615,7 @@ const chip = (s) => '<span class="chip ' + STATES[s][1] + '">' + STATES[s][0] + 
 const staleChip = (${staleChip.toString()});
 // A roadmap item's blocker dot and unfolded reason from src/view/roadmap-block.js (#605), read from the summaries held.
 const roadmapBlock = (${roadmapBlock.toString()});
+const openPageDialog = (${openPageDialog.toString()}), closePageDialog = (${closePageDialog.toString()});
 /** Parse the bounded reference syntax before requesting additional committed line windows. */
 function codeReferenceParts(ref) {
   const match = /^(.+):(\\d+)(?:-(\\d+))?@([0-9a-f]{7,40})$/.exec(String(ref));
@@ -1576,14 +1579,15 @@ function detailOf(project, item, ask, root = view.root) {
   /** Keep the prior detail visible during a refresh, or return the short initial loading state. */
   const waiting = (entry) => (entry?.shown ? { item: { ...item, ...entry.shown } } : { loading: true });
   if (kept?.loading) return waiting(kept);
-  if (kept && kept.summary === summary && !movedSince(project, item.id, kept.cursor)) {
+  if (kept && kept.summary === summary && !movedSince(project, item.id, kept.cursor) && !(ask && kept.error && Date.now() - kept.failedAt >= 2_500)) {
     return kept.error ? { error: kept.error } : { item: { ...item, ...kept.detail } };
   }
   if (!ask) return waiting(kept && { shown: kept.detail });
   const entry = { loading: true, summary, cursor: project.events?.[0]?.event_id ?? 0, detail: null, error: null, shown: kept?.detail ?? null };
   itemDetails.set(key, entry);
   detailRead = api(boardPath(root) + '/items/' + encodeURIComponent(String(item.id))).then((reply) => { entry.detail = reply.item; },
-    (error) => { entry.error = String(error.message || error); }).finally(() => {
+    // A failed read is not the answer: while this item stays open it reads again in 3 s, so a dropped request recovers (#908).
+    (error) => { entry.error = String(error.message || error); entry.failedAt = Date.now(); setTimeout(() => { if (view.root === drawnRoot && view.item === item.id) render(); }, 3_000); }).finally(() => {
     entry.loading = false;
     if (view.root === drawnRoot && ((root === view.root && view.item === item.id) || view.tab === 'roadmap')) render();
   });
@@ -2240,7 +2244,7 @@ function milestoneItem(entry, p) {
     state: read ? stateOf(read) : null,
     stale: item ? staleChip(item) : '',
     block: item ? roadmapBlock(detail?.item || item, {
-      holds: root === view.root ? source.holds : source.laneHolds, items: source.items, name: (id) => agentName(id, source), time: when, state: stateOf,
+      holds: root === view.root ? source.holds : source.laneHolds, items: source.items, agents: source.agents, state: stateOf,
       address: (id) => itemAddress(id, root), board: root === view.root ? null : root,
       releases: (p.milestones || []).filter((milestone) => milestone.items.some((ref) => ref.id === entry.id)).map((milestone) => milestone.name),
       loading: detail?.loading, error: detail?.error,
@@ -2477,7 +2481,7 @@ function renderReleaseNotes(project) {
 function render() {
   // A refresh that moved the page to another board closes a confirmation opened on the last one.
   closeIfLeft();
-  if (heldClickPointer !== null) { deferredClickRender = true; return; }
+  if (heldClickPointer !== null || pageDialogs.size) { deferredClickRender = true; return; }
   deferredClickRender = false;
   const statsFocus = document.activeElement?.id === 'proof-stats-summary' ? document.activeElement.id : null;
   const p = data.project;
@@ -3401,15 +3405,12 @@ function leaveDialogs() {
  * cannot act on the page, or switch the board, under a question the page is asking.
  */
 function openModal(dialog, focus) {
-  dialog.hidden = false;
-  for (const element of document.body.children || []) if (element !== dialog && element.tagName !== 'SCRIPT') element.inert = true;
-  focus.focus();
+  openPageDialog(dialog, focus, pageDialogs);
 }
 
 /** Hide a page dialog and give the page back its clicks and focus. */
 function closeModal(dialog) {
-  dialog.hidden = true;
-  for (const element of document.body.children || []) element.inert = false;
+  if (closePageDialog(dialog, pageDialogs) && deferredClickRender) requestAnimationFrame(() => { if (!pageDialogs.size && heldClickPointer === null && deferredClickRender) { deferredClickRender = false; render(); } });
 }
 
 /** Keep Tab and Shift+Tab cycling through an open page dialog's own controls. */
