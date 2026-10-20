@@ -13,11 +13,19 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { CHECKOUT_SESSION_TOKEN_ENV } from './agent-session.js';
 import { displayAgentName } from './agent-names.js';
 import { loadConfig } from './config.js';
+import { AGENT_SESSION_IDS, AGENT_SHELL_MARKERS } from './person.js';
 import { registerProjectAndLink } from './projects.js';
+
+/**
+ * The caller's agent-session identity and checkout lease. A scripted seat must never inherit them: a seat that did
+ * would be recorded under the caller's session, and its verify would then be refused as self-verification (#952).
+ */
+const CALLER_SESSION_NAMES = new Set([...AGENT_SHELL_MARKERS, ...AGENT_SESSION_IDS, CHECKOUT_SESSION_TOKEN_ENV]);
 
 const BIN = fileURLToPath(new URL('../bin/pullboard.js', import.meta.url));
 
@@ -97,13 +105,22 @@ export async function tour(io) {
   writeFileSync(join(shims, 'pullboard'), `#!/bin/sh\nexec "${process.execPath}" "${BIN}" "$@"\n`);
   chmodSync(join(shims, 'pullboard'), 0o755);
   // Nothing of the person's git setup reaches the tour: no config files, and no GIT_ variable, such
-  // as GIT_DIR from a hook or GIT_CONFIG_COUNT pairs, which git reads as config too.
-  const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith('GIT_') && name !== 'NODE_TEST_CONTEXT'));
+  // as GIT_DIR from a hook or GIT_CONFIG_COUNT pairs, which git reads as config too. The caller's agent session
+  // stays out as well, so each seat is judged as its own session below (#952).
+  const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith('GIT_') && name !== 'NODE_TEST_CONTEXT' && !CALLER_SESSION_NAMES.has(name)));
   Object.assign(env, { PATH: `${shims}:${process.env.PATH}`, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', PULLBOARD_HOME: join(dir, '.pullboard') });
   const repo = join(dir, 'greeter');
   const app = `${repo}-app-1`;
   const review = `${repo}-review-1`;
   const where = { coordinator: repo, 'app-1': app, 'review-1': review };
+  /**
+   * The agent session a scripted seat runs as (#952). Each seat has its own session identifier, derived from this
+   * run's unique folder, so the builder and the reviewer are two sessions and neither is the caller's.
+   *
+   * @param {string} who
+   * @returns {Record<string, string>}
+   */
+  const seatSession = (who) => ({ CLAUDECODE: '1', CLAUDE_CODE_SESSION_ID: `${basename(dir)}-${who}` });
 
   /**
    * Run one command as an agent, show it and the lines of its output worth reading.
@@ -114,7 +131,7 @@ export async function tour(io) {
     const result = spawnSync(file, args, {
       cwd: where[who],
       encoding: 'utf8',
-      env: { ...env, GIT_AUTHOR_NAME: who, GIT_AUTHOR_EMAIL: `${who}@tour.invalid`, GIT_COMMITTER_NAME: who, GIT_COMMITTER_EMAIL: `${who}@tour.invalid` },
+      env: { ...env, ...seatSession(who), GIT_AUTHOR_NAME: who, GIT_AUTHOR_EMAIL: `${who}@tour.invalid`, GIT_COMMITTER_NAME: who, GIT_COMMITTER_EMAIL: `${who}@tour.invalid` },
     });
     if ((result.status === 0) === fails) {
       const said = `${result.stdout ?? ''}${result.stderr ?? ''}${result.error?.message ?? ''}`;
