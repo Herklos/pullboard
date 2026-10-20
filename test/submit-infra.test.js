@@ -130,7 +130,9 @@ test('a new test file needs no note [C7,V4]', (t) => {
 
 test('a gate named by a quoted path or a shell separator needs a note [C7,V4]', (t) => {
   // Each gate names a script the change then edits: a quoted path with a space, and a path followed by a separator.
-  for (const [gate, file] of [["node 'src/check gate.js'", 'src/check gate.js'], ['node src/check.js; true', 'src/check.js']]) {
+  // An unnormalized path names the same file Git reports, so it needs the note too (#814 review).
+  for (const [gate, file] of [["node 'src/check gate.js'", 'src/check gate.js'], ['node src/check.js; true', 'src/check.js'],
+    ['node src/../src/check.js', 'src/check.js'], ['node ./src/./check.js', 'src/check.js']]) {
     let box = privateRepo(t);
     put(box.root, 'pullboard.json', JSON.stringify({ gate, spec: 'SPEC.md' }));
     put(box.root, file, 'process.exit(0);\n');

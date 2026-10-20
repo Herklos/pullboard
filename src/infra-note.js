@@ -3,6 +3,9 @@
  * agent once swapped real listeners for in-memory parsers to get past a sandbox, and nobody asked the person.
  * The note and the files it covers are recorded on the submit event, and the reviewer reads them in show.
  */
+import { isAbsolute } from 'node:path';
+import { posix } from 'node:path';
+import { relative } from 'node:path';
 import { Refused } from './refused.js';
 import { tryGit } from './git.js';
 
@@ -44,16 +47,21 @@ function shellWords(command) {
 
 /**
  * The gate files the gate commands name, relative to the checkout. A flag or a URL names nothing; a word that ends in a
- * script extension, or holds a path separator, names a file.
+ * script extension, or holds a path separator, names a file. Each is normalized as the file system resolves it, so
+ * src/../src/check.js, ./src/check.js and an absolute path inside the checkout all name src/check.js, the spelling
+ * Git uses for changed files (#814).
  *
  * @param {string[]} commands the gate commands in force
+ * @param {string} root the builder's checkout
  * @returns {Set<string>}
  */
-function namedByGates(commands) {
+function namedByGates(commands, root) {
   const named = new Set();
   for (const command of commands) {
     for (const word of shellWords(String(command ?? ''))) {
-      if (word && !word.startsWith('-') && !word.includes('://') && GATE_FILE.test(word)) named.add(word.replace(/^\.\//u, ''));
+      if (!word || word.startsWith('-') || word.includes('://') || !GATE_FILE.test(word)) continue;
+      const path = posix.normalize(isAbsolute(word) ? relative(root, word).split('\\').join('/') : word);
+      if (path !== '..' && !path.startsWith('../') && !posix.isAbsolute(path)) named.add(path);
     }
   }
   return named;
@@ -70,7 +78,7 @@ function namedByGates(commands) {
  * @returns {string[]} the sorted files that need a note
  */
 export function existingGuardedEdits(root, claimHead, files, gates) {
-  const named = namedByGates(gates);
+  const named = namedByGates(gates, root);
   const guarded = files.filter((path) => TEST_FILE.test(path) || path === 'pullboard.json' || path.startsWith('.githooks/') || named.has(path));
   return guarded.filter((path) => tryGit(root, ['cat-file', '-e', `${claimHead}:${path}`]).status === 0).sort();
 }
