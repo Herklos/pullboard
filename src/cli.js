@@ -167,6 +167,7 @@ import {
 import { lifecycleMarkdown } from './machine.js';
 import {
   buildHelp,
+  SETTING_FORMS,
   VERSION,
 } from './help.js';
 import {
@@ -341,6 +342,7 @@ import {
   reportView,
 } from './background-view.js';
 import { rigorDraftCommand } from './rigor-draft.js';
+import { nextReview } from './next-review.js';
 import { serveApi } from './api.js';
 import { watchCommand } from './watch.js';
 import { serveMcp } from './mcp.js';
@@ -3173,13 +3175,7 @@ async function nextOnce(ctx, values) {
   return await withBoard(ctx, async (board) => {
     if (values.verify) checkMainVerifier(ctx, board, values);
     const me = whoAmI(ctx, board);
-    if (values.verify) {
-      const reservation = { agentId: me.id, leaseMs: ctx.config.reviewLeaseMs, policy: ctx.config.verify.policy, familyPolicy: ctx.config.verify.family };
-      if (values.verifyId !== undefined) {
-        return { item: await ordered(ctx, board, 'reserveReview', [idArg(values.verifyId, 'an item id after --verify'), reservation]), reasons: [] };
-      }
-      return await ordered(ctx, board, 'reserveNextReview', [{ agentId: me.id, lane: me.lane, leaseMs: ctx.config.reviewLeaseMs, policy: ctx.config.verify.policy, familyPolicy: ctx.config.verify.family, runnable: values.runnable, routes: values.routes }]);
-    }
+    if (values.verify) return nextReview(ctx, board, me, values, { ordered: (operation, args) => ordered(ctx, board, operation, args), idArg, trunkMerge });
     const warm = warmFiles(ctx, board, me);
     const seats = nextSessionSeats(ctx, board);
     const owners = new Set(seats?.map((seat) => seat.agent_id));
@@ -3855,7 +3851,7 @@ function settingsCommand(io, { first, second, rest }) {
     io.say(`gate.shortSlots: ${shortSlots}${shortSlots ? '' : ' (off; runs that name their test files wait for a gate slot)'}`);
     return 0;
   }
-  if (!['gateSlots', 'browserSlots', 'gate.shortSlots'].includes(first) || !second || rest.length) {
+  if (!SETTING_FORMS.includes(first) || !second || rest.length) {
     throw new Refused('USAGE', 'pullboard settings gateSlots <n> | browserSlots <n> | gate.shortSlots <n>');
   }
   if (first === 'gate.shortSlots') {
