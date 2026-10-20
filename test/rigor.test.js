@@ -667,7 +667,6 @@ test('a timed-out proof drains only its captured process group before removing i
   const { parseProcessCensus } = await import('../src/process-census.js');
   const box = freshBoard();
   const helper = join(box.repo, 'hold-proof.mjs');
-  const parserUrl = new URL('../src/process-census.js', import.meta.url).href;
   let resolveMarker;
   let rejectMarker;
   const marker = new Promise((resolve, reject) => { resolveMarker = resolve; rejectMarker = reject; });
@@ -685,18 +684,13 @@ test('a timed-out proof drains only its captured process group before removing i
   const port = ready.address().port;
   const timeoutMs = 1000;
   writeFileSync(helper, `
-    import { spawn, spawnSync } from 'node:child_process';
+    import { spawn } from 'node:child_process';
     import { createConnection } from 'node:net';
-    import { parseProcessCensus } from ${JSON.stringify(parserUrl)};
     const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)']);
     await new Promise((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject); });
-    const ps = spawnSync('/bin/ps', ['-axo', 'pid=,ppid=,pgid=,lstart=,stat=,comm='], { encoding: 'utf8', timeout: 2000, env: { ...process.env, LC_ALL: 'C' } });
-    const rows = ps.status === 0 ? parseProcessCensus(ps.stdout) : null;
-    const owned = rows && [process.pid, child.pid].map(pid => rows.get(pid));
-    if (!owned?.every(Boolean) || owned[0].pgid !== owned[1].pgid) process.exit(32);
     const socket = createConnection({ host: '127.0.0.1', port: ${port} });
     socket.on('error', () => process.exit(33));
-    socket.end(JSON.stringify({ rows: owned }));
+    socket.end(JSON.stringify({ pids: [process.pid, child.pid] }));
     setInterval(() => {}, 1000);
   `);
   let runOutcome;
@@ -711,16 +705,20 @@ test('a timed-out proof drains only its captured process group before removing i
       executable: process.execPath, args: ['hold-proof.mjs'],
     }, { timeoutMs }).then(value => ({ value }), error => ({ error }));
     const recorded = await marker;
+    assert.equal(recorded.pids?.length, 2, 'the real helper reports itself and its child');
+    assert.ok(recorded.pids.every(pid => Number.isInteger(pid) && pid > 0) && recorded.pids[0] !== recorded.pids[1]);
     const pre = spawnSync('/bin/ps', ['-axo', 'pid=,ppid=,pgid=,lstart=,stat=,comm='], { encoding: 'utf8', timeout: 2000, env: { ...process.env, LC_ALL: 'C' } });
     assert.equal(pre.status, 0, 'the pre-timeout census completed');
     const live = parseProcessCensus(pre.stdout);
     assert.ok(live, 'the pre-timeout census is parseable');
-    assert.equal(recorded.rows[0].pgid, recorded.rows[1].pgid, 'both captured processes belong to one group');
-    for (const identity of recorded.rows) {
-      const current = live.get(identity.pid);
-      assert.ok(current && current.pgid === identity.pgid && current.started === identity.started
-        && current.processSha256 === identity.processSha256 && !current.state.startsWith('Z'),
-      'each real process identity is still present before timeout');
+    // One parent census proves both live identities; do not spend a second two-second census inside the one-second proof.
+    const rows = recorded.pids.map(pid => live.get(pid));
+    assert.ok(rows.every(Boolean), 'both reported processes exist in the actual parent census');
+    assert.equal(rows[0].pgid, rows[1].pgid, 'both captured processes belong to one group');
+    assert.equal(rows[0].pgid, rows[0].pid, 'the proof owns its detached group');
+    for (const [index, identity] of rows.entries()) {
+      assert.equal(identity.pid, recorded.pids[index], 'the actual census identifies the reported process');
+      assert.equal(identity.state.startsWith('Z'), false, 'each process is live before timeout');
     }
     const outcome = await runOutcome;
     if (outcome.error) throw outcome.error;
@@ -729,7 +727,7 @@ test('a timed-out proof drains only its captured process group before removing i
     assert.equal(post.status, 0, 'the post-timeout census completed');
     const drained = parseProcessCensus(post.stdout);
     assert.ok(drained, 'the post-timeout census is parseable');
-    for (const identity of recorded.rows) {
+    for (const identity of rows) {
       const current = drained.get(identity.pid);
       assert.ok(!current || current.state.startsWith('Z') || current.pgid !== identity.pgid
         || current.started !== identity.started || current.processSha256 !== identity.processSha256,

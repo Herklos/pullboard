@@ -155,12 +155,15 @@ test('init grants the agent the permissions the Pullboard loop needs [I1,I2]', t
   assert.deepEqual(codexPrefixes(codexRules), [['pullboard'], ['git', 'status'], ['git', 'diff'], ['git', 'log'], ['git', 'add'], ['git', 'commit'], ['git', 'merge'], ['git', 'rebase'], ['git', 'switch'], ['git', 'checkout'], ['git', 'worktree'], ['npm', 'test']], 'Codex rules stay scoped to the exact loop commands');
   assert.ok(initialized.document.notes.some(note => /Claude Code.*Pullboard loop/u.test(note)), 'init says what Claude rules it added');
   assert.ok(initialized.document.notes.some(note => /trusted-project Codex rules.*trust this project and restart the session/u.test(note)), 'init explains trust and session restart for Codex rules');
-  const expectedLegacyCodex = `sandbox_mode = "workspace-write"\n\n[sandbox_workspace_write]\nwritable_roots = ${JSON.stringify([machineHomePath])}`;
+  // The board folder under .git is granted beside the machine home, since Codex keeps .git read-only (#913).
+  const expectedLegacyCodex = `sandbox_mode = "workspace-write"\n\n[sandbox_workspace_write]\nwritable_roots = ${JSON.stringify([machineHomePath, join(box.root, '.git', 'pullboard')])}`;
   assert.ok(initialized.document.notes.some(note => note.includes(expectedLegacyCodex)), 'Codex setup prints exact legacy workspace-write values scoped to the machine home');
-  assert.ok(initialized.document.notes.some(note => /sandbox_mode at the TOML top level before any table, append this exact path to any existing writable_roots array while keeping its entries, and do not duplicate the table or replace unrelated settings/u.test(note)), 'Codex setup explains the top-level key and exact append without replacing settings or duplicating the TOML table');
+  assert.ok(initialized.document.notes.some(note => /sandbox_mode at the TOML top level before any table, append these exact paths to any existing writable_roots array while keeping its entries, and do not duplicate the table or replace unrelated settings/u.test(note)), 'Codex setup explains the top-level key and exact append without replacing settings or duplicating the TOML table');
   assert.ok(initialized.document.notes.some(note => /https:\/\/learn\.chatgpt\.com\/docs\/config-file\/config-reference.*https:\/\/learn\.chatgpt\.com\/docs\/permissions/u.test(note)), 'Codex setup cites the official sandbox and permission-profile references');
   assert.equal(readFileSync(codexConfigPath, 'utf8'), existingCodexConfig, 'init prints Codex configuration guidance without rewriting a project config');
   assert.ok(initialized.document.notes.some(note => /permission-profile users.*existing \[permissions\.<active-profile>\.filesystem\].*do not mix/iu.test(note)), 'Codex setup explains the permission-profile alternative without mixing config systems');
+  const profileBoard = `${JSON.stringify(machineHomePath)} = "write" and ${JSON.stringify(join(box.root, '.git', 'pullboard'))} = "write" under their existing [permissions.<active-profile>.filesystem] table instead, since a named profile ignores writable_roots`;
+  assert.ok(initialized.document.notes.some(note => note.includes(profileBoard)), 'the permission-profile step grants the board folder too (#913)');
 
   const settingsBytes = readFileSync(settingsPath, 'utf8');
   const codexBytes = readFileSync(codexPath, 'utf8');

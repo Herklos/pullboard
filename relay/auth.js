@@ -78,6 +78,9 @@ export function createRelayAuth({ database, github, now = Date.now, sessionTTL =
     if (!db.prepare('PRAGMA table_info(relay_boards)').all().some((column) => column.name === 'linked_at')) {
       db.exec('ALTER TABLE relay_boards ADD COLUMN linked_at INTEGER');
     }
+    if (!db.prepare('PRAGMA table_info(relay_boards)').all().some((column) => column.name === 'storage_account')) {
+      db.exec('ALTER TABLE relay_boards ADD COLUMN storage_account TEXT REFERENCES relay_users(id)');
+    }
     db.prepare('UPDATE relay_boards SET linked_at=? WHERE linked_at IS NULL').run(now());
     db.prepare('DELETE FROM relay_deleted_credentials WHERE expires<=?').run(now());
     db.exec('COMMIT');
@@ -506,7 +509,7 @@ export function createRelayAuth({ database, github, now = Date.now, sessionTTL =
         if (db.prepare('SELECT 1 FROM relay_cleanup WHERE board=?').get(board)) throw new Refused('RELAY_CLEANUP', 'finish pending board cleanup before linking again');
         const existing = db.prepare('SELECT * FROM relay_boards WHERE id=?').get(board);
         if (existing && existing.repository_id !== String(repo.id)) throw new Refused('BOARD_LINK_CONFLICT', 'use a new board identifier for a different repository');
-        db.prepare('INSERT INTO relay_boards (id,repository,repository_id,linked_at) VALUES (?,?,?,?) ON CONFLICT(id) DO UPDATE SET repository=excluded.repository').run(board, repo.name, String(repo.id), now());
+        db.prepare('INSERT INTO relay_boards (id,repository,repository_id,linked_at,storage_account) VALUES (?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET repository=excluded.repository,storage_account=COALESCE(relay_boards.storage_account,excluded.storage_account)').run(board, repo.name, String(repo.id), now(), row.user_id);
         permissions.delete(row.user_id + ':' + board);
       });
       return { id: board, repository: repo.name, repositoryID: String(repo.id) };
@@ -515,6 +518,25 @@ export function createRelayAuth({ database, github, now = Date.now, sessionTTL =
     linkedBoards() {
       open();
       return db.prepare('SELECT id,repository,linked_at AS linkedAt FROM relay_boards ORDER BY id').all();
+    },
+    /** Resolve a stable storage account; only the service's authenticated writer may assign an older unassigned link. */
+    storageAccount(board, authenticatedUserId) {
+      identifier(board, 'BAD_BOARD');
+      return lifecycle(() => {
+        const saved = db.prepare('SELECT storage_account FROM relay_boards WHERE id=?').get(board);
+        if (!saved) throw new Refused('BOARD_NOT_LINKED', 'Link this board before using relay storage.');
+        if (saved.storage_account === null && authenticatedUserId !== undefined) {
+          if (typeof authenticatedUserId !== 'string' || !db.prepare('SELECT 1 FROM relay_users WHERE id=?').get(authenticatedUserId)) throw new Refused('BAD_SENDER', 'Use the authenticated account when assigning existing relay storage.');
+          db.prepare('UPDATE relay_boards SET storage_account=? WHERE id=? AND storage_account IS NULL').run(authenticatedUserId, board);
+        }
+        return db.prepare('SELECT id,login FROM relay_users WHERE id=(SELECT storage_account FROM relay_boards WHERE id=?)').get(board) ?? null;
+      });
+    },
+    /** Internal account inventory for quota checks; repository authorization still governs every public board request. */
+    storageBoards(account) {
+      open();
+      if (typeof account !== 'string' || !account) throw new Refused('BAD_SENDER', 'Name the authenticated storage account.');
+      return db.prepare('SELECT id FROM relay_boards WHERE storage_account=? ORDER BY id').all(account).map(row => row.id);
     },
     /** Hold one shared lifecycle lock through every journal use and expiry decision. */
     withBoard(board, work) {

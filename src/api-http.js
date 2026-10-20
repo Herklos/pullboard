@@ -1,5 +1,6 @@
 /** API v1's shared HTTP boundary; local and relay adapters supply the same board operations (A2). */
 import { Refused } from './refused.js';
+import { relayStorage } from './relay-storage.js';
 import { refusalDocument } from './json.js';
 import { withGitFacts } from './git.js';
 
@@ -7,7 +8,10 @@ const BODY_BYTES = 100_000;
 
 /** Keep unexpected internal failures out of the public refusal document. */
 function refusal(error) {
-  return refusalDocument(error instanceof Refused ? error : new Refused('SERVICE_ERROR', 'the board service could not complete the call; retry or check the service'));
+  const document = refusalDocument(error instanceof Refused ? error : new Refused('SERVICE_ERROR', 'the board service could not complete the call; retry or check the service'));
+  const storage = error instanceof Refused && error.code === 'ACCOUNT_STORAGE_LIMIT' ? relayStorage(error.storage) : null;
+  if (storage) document.error.storage = storage;
+  return document;
 }
 
 /** Emit exactly one versioned JSON response with no caching or content sniffing. */
@@ -352,6 +356,7 @@ export function applyStateDelta(state, delta) {
 
 /** Choose the same HTTP refusal class for local and sealed relay adapters. */
 export function apiStatus(error) {
+  if (error instanceof Refused && error.code === 'ACCOUNT_STORAGE_LIMIT') return 507;
   return { RELAY_BOARD_DELETED: 410, AUTH_REQUIRED: 401, DEVICE_REVOKED: 403, TOKEN_BOARD: 403, API_ORIGIN: 403, BAD_ORIGIN: 403, WRITE_REQUIRED: 403, HUMAN_REQUIRED: 403, NO_REPO_ACCESS: 403, NO_BOARD: 404, NO_SHOUT: 404, BOARD_NOT_LINKED: 404, NO_SNAPSHOT: 404, BASELINE_EXISTS: 412, SNAPSHOT_REQUIRED: 409, SEQUENCE_REPEAT: 409, SEQUENCE_GAP: 409 }[error.code] ?? (error instanceof Refused ? 400 : 500);
 }
 

@@ -1,9 +1,10 @@
-/** Real Chrome fixture diagnostics and timeout boundary [H16,C7]. */
+/** Real Chrome fixture diagnostics and timeout boundary [H16,C7]. The probes hold API1 state reads, so they run on the
+ * legacy wire (#903). */
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { ENGINE_VERSION } from '../src/machine.js';
-import { relayClientFixture } from './relay-client-fixture.js';
+import { legacyRelayClientFixture as relayClientFixture } from './relay-client-fixture.js';
 import { findChromeExecutable, relayWorkBudgetMs, startChrome } from './relay-browser-fixture.js';
 
 /** Assert the fixed CDP bound reports its command context and relay-request state. */

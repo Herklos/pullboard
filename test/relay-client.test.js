@@ -27,6 +27,7 @@ import { presentationShout } from '../src/relay-presentation.js';
 import { fetchFresh } from './http-fixture.js';
 import { relayResetSample } from './relay-reset-fixture.js';
 import { request as relayRequest } from '../src/relay.js';
+import { openPagedSnapshot } from '../src/relay-page-layout.js';
 import { AGENT_SHELL_MARKERS, SSH_SHELL_MARKERS } from '../src/person.js';
 
 const SIGN_INS = new Map();
@@ -186,7 +187,7 @@ function threeReplicaPhaseCapture(t) {
 }
 
 /** Run the real auth and opaque board handlers together on a private loopback port. */
-async function relayServer(t, directory, auth) {
+async function relayServer(t, directory, auth, { legacyRelay = false } = {}) {
   let signIn;
   let api;
   let refuseMoves = false;
@@ -198,6 +199,12 @@ async function relayServer(t, directory, auth) {
   const uploads = [];
   const server = createServer(async (req, res) => {
     calls.push({ method: req.method, path: req.url });
+    // A historical relay has no pages router. Keep that protocol an explicit fixture choice rather than
+    // making a current paged board pretend its API1 whole-snapshot endpoint still has the same representation.
+    if (legacyRelay && /^\/api\/v2(?:\/|$)/u.test(req.url)) {
+      res.writeHead(404, { 'content-type': 'application/json' }).end('{"version":1,"error":{"code":"NOT_FOUND","message":"legacy relay has no pages router"}}');
+      return;
+    }
     if (req.method === 'POST' && /\/moves$/.test(req.url)) {
       const drop = loseReply;
       loseReply = false;
@@ -279,7 +286,7 @@ function seedDoctrine(seed) {
   }
 }
 
-test('[H1,H3,H7,H15,H16] relay on snapshots and orders ciphertext, refuses offline moves, and off preserves the board', async (t) => {
+test('[H1,H3,H7,H15,H16] relay on snapshots and orders ciphertext, refuses offline moves, and off preserves the board (legacy relay)', async (t) => {
   const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'pullboard-relay-client-')));
   const root = join(scratch, 'repo');
   const home = join(scratch, 'home');
@@ -316,7 +323,9 @@ test('[H1,H3,H7,H15,H16] relay on snapshots and orders ciphertext, refuses offli
   t.after(() => SIGN_INS.delete(root));
   const auth = createRelayAuth({ database: join(scratch, 'auth.sqlite'), github: createGitHubClient(provider.config) });
   t.after(() => { auth.close(); });
-  const relay = await relayServer(t, relayDirectory, auth);
+  // This scenario also installs and migrates historical single-record checkpoints later in its body.
+  // Its original full-native, privacy, ordering, retry and unlink assertions remain unchanged.
+  const relay = await relayServer(t, relayDirectory, auth, { legacyRelay: true });
   t.after(() => { rmSync(scratch, { recursive: true, force: true }); });
   const flow = auth.beginWeb();
   const authorization = await fetch(flow.authorizationURL, { redirect: 'manual' });
@@ -366,6 +375,7 @@ test('[H1,H3,H7,H15,H16] relay on snapshots and orders ciphertext, refuses offli
   assert.match(on.link, /^https:\/\/app\.pullboard\.dev\/#board=/);
   assert.match(on.link, /(?:^|&)key=[A-Za-z0-9_-]{43}(?:&|$)/);
   assert.equal(on.url, relay.origin);
+  assert.ok(relay.calls.some(call => call.path === '/api/v2'), 'the current client probes the legacy relay before preserving its supported API1 flow');
   const keyFile = join(pullboardHome, 'relay-keys', `${boardId}.key`);
   assert.equal(statSync(keyFile).mode & 0o777, 0o600);
   const keyText = readFileSync(keyFile, 'utf8').trim();
@@ -620,6 +630,49 @@ function recoveryLines(result) {
 
 /** Escape text for a literal match inside a regular expression. */
 function literal(text) { return text.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'); }
+
+test('a current paged relay keeps the complete native board while a legacy reader is told to upgrade [H1,H3,H15,H16]', async t => {
+  const box = await lostReplyFixture(t);
+  const marker = 'PAGED_CURRENT_NATIVE_PRIVATE_ITEM';
+  await cli(box.root, box.env, 'add', box.lane, marker);
+  const expected = await cli(box.root, box.env, 'export');
+  const link = JSON.parse(readFileSync(join(box.root, '.git/pullboard/relay.json'), 'utf8'));
+  assert.equal(link.snapshotApiVersion, 2, 'the unmodified current relay advertises and receives the paged protocol');
+  const key = decodeBoardKey(readFileSync(join(box.pullboardHome, 'relay-keys', link.board + '.key'), 'utf8').trim());
+  const headers = { 'x-pullboard-engine': String(ENGINE_VERSION), authorization: `Bearer ${link.token}` };
+  const legacy = await fetch(box.relay.origin + '/api/v1/boards/' + link.board + '/state', { headers });
+  assert.equal(legacy.status, 400);
+  const upgrade = await legacy.json();
+  assert.equal(upgrade.error.code, 'RELAY_API_VERSION', 'a legacy reader is explicitly told to upgrade, never given a partial native snapshot');
+  assert.match(upgrade.error.message, /npm i -g pullboard@latest/u, 'the legacy refusal gives the concrete upgrade command');
+  const response = await fetch(box.relay.origin + '/api/v2/boards/' + link.board + '/state', { headers });
+  assert.equal(response.status, 200, 'the same actual machine credential can read the current protocol');
+  const document = await response.json();
+  assert.equal(document.apiVersion, 2);
+  const saved = document.state;
+  const opened = await openPagedSnapshot(saved.root, {
+    key, boardId: link.board, sequence: saved.sequence,
+    /** Read exactly the authenticated pinned graph, using the real server's object membership checks. */
+    async get(id, parents) {
+      const reply = await fetch(box.relay.origin + '/api/v2/boards/' + link.board + '/objects/' + id
+        + '?pin=' + encodeURIComponent(saved.read.id) + '&via=' + parents.join(','), { headers });
+      assert.equal(reply.status, 200);
+      const page = await reply.json();
+      assert.equal(page.apiVersion, 2);
+      assert.equal(page.page.id, id);
+      return Uint8Array.from(Buffer.from(page.page.sealed, 'base64url'));
+    },
+  }, { maxEngine: ENGINE_VERSION });
+  const native = await opened.native();
+  assert.deepEqual(native.tables, expected.tables, 'paged restore retains every native row and counter, not just the first-screen summary');
+  assert.ok(native.presentation.state.items.some(item => item.title === marker));
+  assert.ok(box.relay.calls.some(call => call.method === 'PUT' && /\/api\/v2\/boards\/[^/]+\/uploads\/[^/]+\/objects\//u.test(call.path)),
+    'the current client uploaded bounded sealed objects through the real pages API');
+  // The native export is verified after decryption; the server's stored bytes must remain opaque.
+  const relayDirectory = join(box.root, '..', 'relay');
+  const stored = Buffer.concat(readdirSync(relayDirectory).map(name => readFileSync(join(relayDirectory, name))));
+  assert.equal(stored.includes(Buffer.from(marker)), false);
+});
 
 test('[H16,C7] a relay transport failure names its cause', async (t) => {
   const fixture = await lostReplyFixture(t);

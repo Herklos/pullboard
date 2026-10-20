@@ -89,7 +89,7 @@ test('[H7,H15] format-2 opaque history migrates to machine attribution without c
     sender: PERSON, bytes: Buffer.from([7, 0, 255, 3]),
   }, 'the historical person snapshot remains unchanged');
   const migrated = databaseContents(path);
-  assert.equal(migrated.tables.journal_meta.find(row => row.key === 'format').value, '3');
+  assert.equal(migrated.tables.journal_meta.find(row => row.key === 'format').value, '4');
   assert.equal(migrated.tables.journal_meta.find(row => row.key === 'board').value, ID);
   assert.equal(migrated.tables.journal_record.length, legacy.tables.journal_record.length);
   assert.equal(migrated.tables.journal_snapshot.length, legacy.tables.journal_snapshot.length);
