@@ -4019,7 +4019,7 @@ async function specCommand(io, { first, second, rest, values }) {
     });
   }
   if (first === 'answer') {
-    requirePersonChannel(io.personChannel, process.env, { command: personCommand(ctx.info, ['spec', 'answer', second, rest.join(' ')]) });
+    requirePersonChannel(io.personChannel, process.env, { command: personCommand(primaryCheckoutRoot(ctx.info) ?? ctx.info.root, ['spec', 'answer', second, rest.join(' ')]) });
     return withBoard(ctx, async (board) => {
       const me = whoAmI(ctx, board);
       if (!ctx.info.isMain || me.id !== COORDINATOR) throw new Refused('B26_PERSON_APPROVAL', 'only the person answers a pending question, from the main checkout or the view', 'ask the person to answer it in pullboard view, or in their own terminal at the main checkout');

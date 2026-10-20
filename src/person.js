@@ -1,7 +1,5 @@
 /** Person actions use the view when a terminal is remote or belongs to an agent [B26]. */
 import { createHash } from 'node:crypto';
-import { basename } from 'node:path';
-import { dirname } from 'node:path';
 import { COORDINATOR } from './config.js';
 import { Refused } from './refused.js';
 
@@ -40,13 +38,14 @@ function shellWord(word) {
 
 /**
  * The exact command a person runs for a person-only action an agent proposed (#915): it changes to the main checkout,
- * where person answers are taken, and quotes every word, so an agent relays it verbatim instead of a placeholder.
+ * where person answers are taken, and quotes every word, so an agent relays it verbatim instead of a placeholder. The
+ * caller resolves the main checkout from Git's worktree list, since a --separate-git-dir repository keeps its metadata
+ * apart from its files.
  *
- * @param {{ commonDir: string }} info
+ * @param {string} main - the main checkout's folder
  * @param {string[]} words - the pullboard arguments, e.g. ['spec', 'answer', 'G3', 'Next.js']
  */
-export function personCommand(info, words) {
-  const main = basename(info.commonDir) === '.git' ? dirname(info.commonDir) : info.commonDir;
+export function personCommand(main, words) {
   return `cd ${shellWord(main)} && pullboard ${words.filter((word) => word !== undefined && word !== '').map(shellWord).join(' ')}`;
 }
 
@@ -71,7 +70,7 @@ export function requireRelayOnChannel(channel = 'terminal', environment = proces
     throw new Refused('B26_PERSON_CHANNEL', 'person actions use the terminal or the view; run pullboard view, the person’s channel');
   }
   if (channel === 'terminal' && AGENT_SHELL_MARKERS.some((name) => Boolean(environment[name]))) {
-    throw new Refused('B26_PERSON_CHANNEL', `this terminal belongs to an agent; ${command ? 'relay the command below to the person verbatim' : 'run pullboard view, the person’s channel, and let the person act there'}`, relay);
+    throw new Refused('B26_PERSON_CHANNEL', 'this terminal belongs to an agent; run pullboard view, the person’s channel, and let the person act there');
   }
   return channel;
 }
