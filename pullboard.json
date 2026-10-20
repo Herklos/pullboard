@@ -22,7 +22,6 @@
         "docs/api.md",
         "docs/api.test.js",
         "docs/lifecycle.md",
-        "docs/img/lifecycle.svg",
         "docs/formats.md",
         "docs/formats.test.js"
       ],
