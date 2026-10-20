@@ -7,6 +7,7 @@
  * Also here: the frozen criterion an item is verified against (V2), and sign-offs, a person's word
  * that a row is met, kept with the text they read (S5).
  */
+import { posix } from 'node:path';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import {
@@ -254,13 +255,14 @@ const GATE_FILE_RE = /(?:^|\s)((?:[\w.-]+\/)*[\w.-]+\.(?:js|mjs|cjs|sh|md|json|y
 
 /**
  * The repo files a row's gate names, such as `test/board.test.js` or `bin/checks/file-size.js`. A gate
- * word without a path, such as `review` or `true`, names no file to check.
+ * word without a path, such as `review` or `true`, names no file to check. Each path is normalized, so
+ * ./test/a.test.js and test/x/../a.test.js name test/a.test.js, the spelling Git reports for a deletion (#809).
  *
  * @param {string | undefined} gate
  * @returns {string[]}
  */
 export function gateFiles(gate) {
-  return [...String(gate ?? '').matchAll(GATE_FILE_RE)].map((match) => match[1]);
+  return [...String(gate ?? '').matchAll(GATE_FILE_RE)].map((match) => posix.normalize(match[1]));
 }
 
 /**

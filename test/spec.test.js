@@ -1099,3 +1099,18 @@ test('a commit that deletes an approved row test is refused [S4]', (t) => {
   const repointed = preCommitProblems({ root: box.root, isMain: true, config, agent: null });
   assert.ok(!repointed.some((problem) => problem.includes('G9 names')), `the same commit repoints the row: ${repointed.join('\n')}`);
 });
+
+test('a gate path written another way still guards its test [S4]', (t) => {
+  // ./test/proof.test.js and test/x/../proof.test.js name the file Git reports as test/proof.test.js (#809 review).
+  for (const gate of ['./test/proof.test.js', 'test/x/../proof.test.js']) {
+    const box = specBox(t, { specSource: `${SPEC}- G9 [approved, must] A rule keeps its proof. | gate: ${gate}\n` });
+    mkdirSync(join(box.root, 'test'));
+    writeFileSync(join(box.root, 'test/proof.test.js'), 'export {};\n');
+    box.git('add', '-A');
+    box.git('commit', '-q', '-m', 'test: the proof');
+    const config = configFromSource(readFileSync(join(box.root, 'pullboard.json'), 'utf8'));
+    box.git('rm', '-q', 'test/proof.test.js');
+    const refused = preCommitProblems({ root: box.root, isMain: true, config, agent: null });
+    assert.ok(refused.some((problem) => problem.includes('G9 names test/proof.test.js, which this commit deletes')), `${gate}: ${refused.join('\n')}`);
+  }
+});
