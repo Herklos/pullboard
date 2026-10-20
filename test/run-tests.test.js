@@ -1689,3 +1689,12 @@ test('a focused test run holds a gate slot [C7]', async (t) => {
   if (testFailure) throw testFailure;
   if (cleanupFailure) throw cleanupFailure;
 });
+
+test('a test name pattern after the file selects only its case [C7]', () => {
+  const root = mkdtempSync(join(tmpdir(), 'pullboard-pattern-after-')); try {
+    writeFileSync(join(root, 'pattern.test.mjs'), "import { test } from 'node:test';\ntest('alpha case runs', () => {});\ntest('beta case runs', () => {});\n");
+    for (const args of [['pattern.test.mjs', '--test-name-pattern', 'alpha'], ['pattern.test.mjs', '--test-name-pattern=alpha']]) {
+      const result = runFixtureChild(process.execPath, [runner, ...args], { cwd: root, encoding: 'utf8' }); assert.equal(result.status, 0, result.context);
+      assert.match(result.stdout, /ok [0-9]+ - alpha case runs[\s\S]*# tests 1\b/u, `${args.join(' ')} selects one case`); assert.doesNotMatch(result.stdout, /beta case runs/u, `${args.join(' ')} ran the unselected case`); }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});

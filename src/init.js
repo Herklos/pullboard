@@ -42,6 +42,7 @@ import {
   settingCommand,
 } from './gate-config.js';
 export { detectGate } from './gate-config.js';
+import { gitPath } from './git.js';
 import { machineHome } from './machine-home.js';
 import { Refused } from './refused.js';
 import { reviewerStartup } from './next-steps.js';
@@ -125,8 +126,8 @@ function laneNameFor(folder) {
 /**
  * The lanes init proposes from the repo's layout (I1, I2): one lane per top-level package for a
  * packages/* or apps/* layout, and one app lane owning the top-level folders otherwise. Nothing is
- * proposed once any lane owns a folder. Proposals are never written: the person accepts each one
- * by running its `pullboard lane add` command.
+ * proposed once any lane owns a folder. Init never writes them: the agent in the main checkout adds them
+ * with the printed `pullboard lane add` command and tells the person (#914).
  *
  * @param {string} root
  * @param {any} [config] - The repo's config; read from root when omitted.
@@ -156,7 +157,7 @@ export function proposeLanes(root, config = loadConfig(root)) {
  * so a starter filed there had to be withdrawn and filed again (blueprint trial, finding 3). In
  * order: the starter's own lane when it exists or is proposed, else the first declared lane that
  * owns folders, else the first lane init proposes. A proposed lane is used by name and never
- * written: the person accepts it with its `pullboard lane add` command, and the starters are
+ * written: the agent adds it with its `pullboard lane add` command, and the starters are
  * waiting in it from then on.
  *
  * @param {string | undefined} wanted - The lane the blueprint names for this starter, if any.
@@ -202,7 +203,7 @@ export function askedLaneNotes(placed, config) {
 
 /**
  * The lines blueprint add prints when its starters went into a proposed lane: where they are,
- * and the one command that accepts the lane.
+ * and the one command that adds the lane.
  *
  * @param {{ name: string, owns: string[] }[]} proposed - The proposed lanes starters were filed in.
  * @returns {string[]}
@@ -210,7 +211,7 @@ export function askedLaneNotes(placed, config) {
 export function starterLaneNotes(proposed) {
   if (!proposed.length) return [];
   const [, accept] = laneProposalNotes(proposed);
-  return [`starter items filed in the ${proposed.map((lane) => lane.name).join(' and ')} lane, proposed, not written until the person accepts`, accept];
+  return [`starter items filed in the ${proposed.map((lane) => lane.name).join(' and ')} lane, proposed; add it to start them`, accept];
 }
 
 /**
@@ -222,7 +223,7 @@ export function starterLaneNotes(proposed) {
 const shellWord = (word) => (/^[A-Za-z0-9_./,@%+=:-]+$/u.test(word) ? word : `'${word.replaceAll("'", "'\\''")}'`);
 
 /**
- * The init lines that show proposed lanes and the one command that accepts them.
+ * The init lines that show proposed lanes and the one command that adds them; the agent runs it and tells the person.
  *
  * @param {{ name: string, owns: string[] }[]} proposals
  * @returns {string[]}
@@ -230,8 +231,9 @@ const shellWord = (word) => (/^[A-Za-z0-9_./,@%+=:-]+$/u.test(word) ? word : `'$
 export function laneProposalNotes(proposals) {
   if (!proposals.length) return [];
   return [
-    `proposed lanes, not written until the person accepts: ${proposals.map((lane) => `${lane.name} owns ${lane.owns.join(' ')}`).join('; ')}`,
-    `ask the person; to accept, run: ${proposals.map((lane) => `pullboard lane add ${shellWord(lane.name)} --owns ${shellWord(lane.owns.join(','))}`).join(' && ')}`,
+    `proposed lanes: ${proposals.map((lane) => `${lane.name} owns ${lane.owns.join(' ')}`).join('; ')}`,
+    // An agent adds the first lanes itself and says so; stopping to ask stalled every model in the #849 trial (#914).
+    `add them from the main checkout, then tell the person which lanes you made: ${proposals.map((lane) => `pullboard lane add ${shellWord(lane.name)} --owns ${shellWord(lane.owns.join(','))}`).join(' && ')}`,
   ];
 }
 
@@ -542,9 +544,10 @@ function writeCodexLoopRules(root, gate, onWrite) {
   if (!machineHomeWriteScopeIsNarrow(machinePath)) {
     return `${rulesNote}; trust this project and restart the session to load rules. Machine-home write was not granted because the path is the OS home, an ancestor of it, or a filesystem root; choose a narrower PULLBOARD_MACHINE_HOME`;
   }
-  const workspaceWrite = `sandbox_mode = "workspace-write"\n\n[sandbox_workspace_write]\nwritable_roots = ${JSON.stringify([machinePath])}`;
-  const profileWrite = `${JSON.stringify(machinePath)} = "write"`;
-  return `${rulesNote}; trust this project and restart the session to load rules. For machine-home access, merge these exact values into legacy Codex settings: put sandbox_mode at the TOML top level before any table, append this exact path to any existing writable_roots array while keeping its entries, and do not duplicate the table or replace unrelated settings:\n${workspaceWrite}\nPermission-profile users add ${profileWrite} under their existing [permissions.<active-profile>.filesystem] table instead; do not mix the two configuration formats. Official docs: https://learn.chatgpt.com/docs/config-file/config-reference and https://learn.chatgpt.com/docs/permissions`;
+  // The board folder sits under .git, which Codex keeps read-only, so it is granted beside the machine home (#913).
+  const workspaceWrite = `sandbox_mode = "workspace-write"\n\n[sandbox_workspace_write]\nwritable_roots = ${JSON.stringify([machinePath, gitPath(root, 'pullboard')])}`;
+  const profileWrite = `${JSON.stringify(machinePath)} = "write" and ${JSON.stringify(gitPath(root, 'pullboard'))} = "write"`;
+  return `${rulesNote}; trust this project and restart the session to load rules. For machine-home access, merge these exact values into legacy Codex settings: put sandbox_mode at the TOML top level before any table, append these exact paths to any existing writable_roots array while keeping its entries, and do not duplicate the table or replace unrelated settings:\n${workspaceWrite}\nPermission-profile users add ${profileWrite} under their existing [permissions.<active-profile>.filesystem] table instead, since a named profile ignores writable_roots; do not mix the two configuration formats. Official docs: https://learn.chatgpt.com/docs/config-file/config-reference and https://learn.chatgpt.com/docs/permissions`;
 }
 
 /**

@@ -72,6 +72,18 @@ test('a signed-in second computer names a linked board blocker without asking to
   });
 });
 
+test('a phone shows its account quota warning while its already-linked board still needs pairing [H5,H17]', chromeOptions, async t => {
+  const message = 'Fixture relay storage is full. Run pullboard relay status on the computer with this board.';
+  const box = await emptyPhoneFixture(t, { warnings: [{ code: 'ACCOUNT_STORAGE_LIMIT', message }] });
+  await box.chrome.waitFor("document.querySelector('#relay-notice')?.textContent.includes('Fixture relay storage is full')");
+  const shown = await emptyPhoneScreen(box.chrome);
+  assert.equal(shown.visible, true);
+  assert.ok(shown.text.includes(message), 'the actual quota warning is visible in the phone screen, not hidden under it');
+  assert.match(shown.text, /not paired/iu, 'the independently observed pairing blocker still names its own step');
+  assert.ok(shown.commands.includes('pullboard relay pair'));
+  assert.equal(shown.text.includes('pullboard relay on --all'), false, 'a linked board is not asked to share again');
+});
+
 /** Wait for a private native setup transition without repeating its command or weakening an assertion. */
 async function phoneSetupState(read, message) {
   const deadline = Date.now() + 20_000; // budget: declared hang ceiling for a private enrollment/approval metadata transition.
@@ -114,7 +126,7 @@ window.fetch = (input, options) => {
 window.fetch = async (input, options) => {
   const url = new URL(typeof input === 'string' ? input : input.url, location.href);
   const response = await authorizedPhoneFetch(input, options);
-  if (url.pathname === ${JSON.stringify('/api/v1/boards/' + publisher + '/state')} && response.ok) {
+  if (${JSON.stringify(['/api/v1/boards/' + publisher + '/state', '/api/v2/boards/' + publisher + '/state'])}.includes(url.pathname) && response.ok) {
     return new Response(JSON.stringify({ version: 1, error: { code: 'NO_SNAPSHOT', message: 'This private phone snapshot is unavailable.' } }), {
       status: 404, headers: { 'content-type': 'application/json' },
     });
@@ -203,6 +215,20 @@ window.fetch = (input, options) => {
   });
   await chrome.navigate(box.origin);
   await chrome.waitFor("document.readyState === 'complete'");
+  const panelOwnership = await chrome.send('Runtime.evaluate', { awaitPromise: true, returnByValue: true, expression: `(async () => {
+    const { phoneApprovalStatus, placePhoneApprovals, forgetPhoneApprovals } = await import('/relay/browser-approval-card.js');
+    const doc = document.implementation.createHTMLDocument('Private approval ownership');
+    doc.body.innerHTML = '<main></main>';
+    const panel = phoneApprovalStatus(doc, 'Private pending request');
+    const button = doc.createElement('button'); let clicks = 0; button.onclick = () => clicks++; panel.append(button);
+    doc.querySelector('main').replaceChildren(doc.createElement('section'));
+    const restored = placePhoneApprovals(doc); button.click();
+    const retained = restored === panel && doc.querySelector('main').contains(panel) && clicks === 1;
+    forgetPhoneApprovals(doc);
+    return { retained, released: panel.childNodes.length === 0 && placePhoneApprovals(doc) === null };
+  })()` });
+  assert.equal(Boolean(panelOwnership.exceptionDetails), false, 'the real approval component executes');
+  assert.deepEqual(panelOwnership.result?.value, { retained: true, released: true }, 'board redraw retains live handlers; access loss releases them');
   // Seed a real non-extractable browser key without exporting it; the authenticated saved board is already readable.
   const seeded = await chrome.send('Runtime.evaluate', { awaitPromise: true, returnByValue: true, expression: `(async () => {
     const { createDeviceKeys } = await import('/relay/device-keys.js');
@@ -225,8 +251,8 @@ window.fetch = (input, options) => {
   await chrome.navigate('about:blank');
   await chrome.navigate(box.origin);
   await chrome.waitFor('window.approvalsPending899 === true');
-  await chrome.waitFor(`document.querySelector('#chain')?.textContent.includes(${JSON.stringify(marker)})`, 3000, // budget: declared #899 three-second ceiling while the late request never answers.
-    'readable board renders while approvals remain pending');
+  await chrome.waitFor(`document.querySelector('#chain')?.textContent.includes(${JSON.stringify(marker)}) && document.documentElement.dataset.relayScreen === undefined && document.body.innerText.includes('Checking requests from your computer')`, 3000, // budget: declared #899 three-second ceiling while the late request never answers.
+    'readable board and pending guidance render while approvals remain pending');
   assert.equal(await chrome.evaluate('window.approvalsPending899 === true'), true);
   assert.ok((await chrome.evaluate('document.body.innerText')).includes(marker));
   assert.ok((await chrome.evaluate('document.body.innerText')).includes('Checking requests from your computer'),

@@ -11,7 +11,6 @@ import {
   spawnSync,
 } from 'node:child_process';
 import {
-  appendFileSync,
   existsSync,
   mkdirSync,
   readdirSync,
@@ -22,7 +21,6 @@ import {
 } from 'node:fs';
 import {
   hostname,
-  loadavg,
 } from 'node:os';
 import {
   basename,
@@ -32,7 +30,6 @@ import {
   relative,
   resolve,
 } from 'node:path';
-import { performance } from 'node:perf_hooks';
 import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import {
@@ -41,9 +38,19 @@ import {
   refuseNextIdle,
 } from './next-steps.js';
 import { reviewerStartup } from './next-steps.js';
+import { judgeTrunkMove } from './verdict-trunk.js';
+import * as gateReceipt from './gate-receipt.js';
+import * as itemSessions from './item-sessions.js';
 import * as seatCheckout from './seat-checkout.js';
 import { submitPreflight } from './submit-preflight.js';
 import * as store from './board.js';
+import * as nativeFlakes from './native-flake-cli.js';
+import {
+  firstInputLine,
+  hookRead,
+  readStdin,
+  traceServeStartup,
+} from './cli-support.js';
 import {
   CONFIG_FILE,
   COORDINATOR,
@@ -72,6 +79,7 @@ import {
 import {
   AGENT_SESSION_IDS,
   agentSessionDigest,
+  personCommand,
   requirePersonChannel,
   personShout,
 } from './person.js';
@@ -311,6 +319,7 @@ import {
 } from './projects.js';
 import * as roadmapView from './roadmap.js';
 import * as queueView from './queue.js';
+import * as relayOutput from './relay-output.js';
 import {
   rigorLines,
   rigorReport,
@@ -376,6 +385,10 @@ import {
   trunkMerge,
   trunkRef,
 } from './trusted-policy.js';
+import {
+  composeReview,
+  composesAtAdmission,
+} from './verdict-admission.js';
 import {
   captureVerdictReview,
   staleVerdictRefusal,
@@ -460,20 +473,6 @@ export { gateWaitReporter };
 const CHECKOUT_LEASES = new WeakMap();
 const CHECKOUT_BOARD_ONLY = new WeakMap();
 let startupMainTraced = false;
-
-/** Append an opt-in startup phase marker for the real CLI fixture measurement [A2,C7]. */
-function traceServeStartup(phase) {
-  const path = process.env.PULLBOARD_STARTUP_TRACE_FILE;
-  const entry = process.env.PULLBOARD_STARTUP_TRACE_ENTRY;
-  if (!path || !entry || resolve(process.argv[1] ?? '') !== resolve(entry)) return;
-  try {
-    appendFileSync(path, `${JSON.stringify({ phase, at: Date.now(), elapsedMs: performance.now(),
-      processId: process.pid, cpuUsage: process.cpuUsage(), loadAverage: loadavg(),
-      eventLoopUtilization: performance.eventLoopUtilization() })}\n`);
-  } catch {
-    // Diagnostic tracing must not change normal CLI behavior.
-  }
-}
 
 /**
  * Read the collision baseline from the primary branch, retained trunk, or detached HEAD default.
@@ -966,6 +965,9 @@ async function reserveRow(ctx, row, written) {
 }
 
 /** Dispatch a board mutation locally, or seal it before any linked replica applies it. */
+/** Note the session behind a claim or submit (#921): its ledger must be writable before the move, and record after it. */
+async function withItemSession(info, operation, args, move) { const noted = operation === 'claim' || operation === 'submit'; if (noted) itemSessions.requireLedger(info); const result = await move(); if (noted) itemSessions.recordItemSession(info, args[0], operation); return result; }
+
 async function ordered(ctx, board, operation, args) {
   // Every engine-27 registration records the seat that made it: the coordinator from the main
   // checkout, the joined agent from its worktree, or `machine` for a join no seat made (#579).
@@ -975,8 +977,8 @@ async function ordered(ctx, board, operation, args) {
   }
   const command = ['add', 'edit', 'merged'].includes(ctx.io.relayCommand?.cliOperation) ? ctx.io.relayCommand : undefined;
   /** Dispatch while this session holds the checkout, including long-running next/run loops. */
-  const execute = () => relayLinked(ctx.info.root) || relayRecovered(ctx.info.root)
-    ? relayOperation(ctx.info.root, operation, args, ctx.io, command, () => store[operation](board, ...args)) : store[operation](board, ...args);
+  const execute = () => withItemSession(ctx.info, operation, args, () => relayLinked(ctx.info.root) || relayRecovered(ctx.info.root)
+    ? relayOperation(ctx.info.root, operation, args, ctx.io, command, () => store[operation](board, ...args)) : store[operation](board, ...args));
   const digest = agentSessionDigest();
   const boardOnly = CHECKOUT_BOARD_ONLY.get(ctx.io);
   const boardOnlyOperation = (boardOnly === 'shout' && operation === 'shout') || (boardOnly === 'fact' && operation === 'appendFact');
@@ -2317,6 +2319,7 @@ function refuseUncommittedSetup(mainRoot, config) {
  */
 function readCommands(io, { first, second, rest, values }) {
   return {
+    flakes: () => nativeFlakes.command(context(io), { first, second, rest }, withBoard),
     doctrine: async () => {
       if (first !== 'check' || second || rest.length) throw new Refused('USAGE', 'pullboard doctrine check');
       const ctx = context(io);
@@ -2539,8 +2542,7 @@ function readCommands(io, { first, second, rest, values }) {
         io.result(summary);
         return 0;
       }
-      if (summary.relay.linked) io.say(`relay: sequence ${summary.relay.sequence}; ${summary.relay.behind} pending uploads${summary.relay.recovery?.pending ? `; recovery pending for sequence ${summary.relay.recovery.skip}; retry ${summary.relay.recovery.next}` : ''}`);
-      if (summary.relay.oversizedSnapshot && !summary.relay.refusedCheckpoint) io.say(formatSnapshotLimit(summary.relay.oversizedSnapshot));
+      for (const line of relayOutput.briefLines(summary.relay)) io.say(line);
       const { items, accepted, rejected } = summary.stats;
       io.say(`${summary.me.displayName}: ${summary.unread} unread shouts; holding ${summary.mine.map((item) => `#${item.item_id}`).join(', ') || 'nothing'}`);
       io.say(`board: ${items.open} open, ${items.claimed} claimed, ${items.submitted} awaiting verification, ${items.verified} verified, ${items.withdrawn} withdrawn`);
@@ -2617,7 +2619,8 @@ function readCommands(io, { first, second, rest, values }) {
     stats: () => {
       const ctx = context(io);
       const { stats, agents } = withBoard(ctx, (board) => ({ stats: proofStats(board, { since: values.since }), agents: store.listAgents(board) }));
-      io.result?.({ stats });
+      const waits = gateReceipt.gateWaitStats(ctx.info.root);
+      io.result?.({ stats, gateWaits: waits.stats });
       io.say(`${stats.submissions} submissions · ${stats.rejections} rejections · ${(stats.rejectionShare * 100).toFixed(1)}% sent back`);
       io.say(`${stats.merged} items merged · ${stats.mergedWithoutAccept} merged without an accept`);
       io.say(`${stats.agentCount} agents · ${stats.familyCount} family buckets: ${stats.families.map((family) => `${family.name} (${family.agents} agents, ${family.moves} moves)`).join('; ') || 'none'}`);
@@ -2625,6 +2628,7 @@ function readCommands(io, { first, second, rest, values }) {
       io.say(`events: ${stats.firstEventAt ?? 'none'} to ${stats.lastEventAt ?? 'none'}${stats.since ? ` (since ${stats.since})` : ''}`);
       for (const line of barStatsLines(stats.bars)) io.say(line);
       for (const line of flowLines(stats.flow)) io.say(line);
+      for (const line of waits.lines) io.say(line);
       return 0;
     },
     ledger: () => {
@@ -2749,7 +2753,7 @@ async function submitHere(ctx, id) {
   // Doctrine counts only fall: accepted main's rules, at this exact commit (D1). No rule, no change.
   const doctrine = hasSubmitRules(root, acceptedMain.commit, acceptedMain.config.practice)
     ? await withGateSlot(root, () => holdDoctrine(root, { mainCommit: acceptedMain.commit, commit, practice: acceptedMain.config.practice, timeoutMs: acceptedMain.config.check?.timeoutMs }),
-      { itemCheck: true, agent: me.id, item: String(id), kind: 'doctrine', onWait: queuedItemLease(ctx, held, me.id, 'build') })
+      { itemCheck: true, agent: me.id, item: String(id), kind: 'doctrine', onWait: queuedItemLease(ctx, held, me.id, 'build'), onReceipt: (receipt) => ctx.io.say(`doctrine hold ${gateReceipt.receiptLine(receipt)}`) })
     : [];
   for (const rule of doctrine) ctx.io.say(`doctrine: ${ruleLine(rule)}`);
   // Every submit proves its frozen check and reachable tests anew on this exact commit (V4,V16).
@@ -2758,7 +2762,8 @@ async function submitHere(ctx, id) {
     submitInvariants: acceptedMain.config.submitInvariants,
     // The accepted project runner interprets its current invariant files; candidate config cannot replace it.
     ...(acceptedMain.config.submitInvariants.length ? { affectedTests: acceptedMain.config.affectedTests } : {}) };
-  const gate = await runSubmitGate(root, submitConfig, { base: claimHead, trunk: acceptedMain.commit, check: frozenCheck(held), agent: me.id, item: String(id), onWait: queuedItemLease(ctx, held, me.id, 'build'), onBrowserFallback: browserAdmissionReporter(ctx.io, ctx.io.relayJson) });
+  const gate = await runSubmitGate(root, submitConfig, { base: claimHead, trunk: acceptedMain.commit, check: frozenCheck(held), agent: me.id, item: String(id), onWait: queuedItemLease(ctx, held, me.id, 'build'), onBrowserFallback: browserAdmissionReporter(ctx.io, ctx.io.relayJson),
+    onFailure: nativeFlakes.observer(ctx, { kind: 'submit', main: acceptedMain.commit, config: submitConfig }, { ordered, withBoard, resourceAgent }) });
   // Only the person's live waivers can pass a red proof, failure by failure; the item's own check is never waived [B3].
   const waived = !gate.isGreen && gate.check?.green ? withBoard(ctx, (board) => waivedFailures(board, accountedFailures(gate, root))) : null;
   if (!gate.isGreen && !waived) {
@@ -2977,6 +2982,7 @@ async function verifyHere(ctx, id, { second, values }) {
       return await ordered(ctx, board, 'verify', recovered.args);
     }
     const item = store.getItem(board, id);
+    itemSessions.refuseSelfSession(ctx.info, item);
     const reReview = item.item_status === 'verified' && !item.item_merged_commit;
     const stale = reReview ? verdictProjector(root, board).state(item) : null;
     if (item.item_status !== 'submitted' && !stale) {
@@ -2994,6 +3000,7 @@ async function verifyHere(ctx, id, { second, values }) {
     let digest = 'missing';
     let check;
     let review;
+    let unaffectedMove = '';
     try {
       digest = freezer(ctx, { board })(item).digest;
     } catch (error) {
@@ -3003,20 +3010,16 @@ async function verifyHere(ctx, id, { second, values }) {
       if (digest !== item.item_frozen_digest) throw new Refused('CRITERIA_CHANGED', 'the criterion changed; ask the coordinator to refreeze this item before checking it');
       const checkedCommit = reReview ? head : commit;
       const checkedLabel = reReview ? 'reviewed composition' : 'submitted commit';
-      const trunk = requireTrunkMerge(root, checkedCommit);
-      if (reReview) {
-        if (!isClean(root)) throw new Refused('DIRTY', 'commit the reviewed composition before re-reviewing the stale verdict');
-        if (untracked(root).length) throw new Refused('UNTRACKED', 'commit or ignore untracked files before re-reviewing the stale verdict');
-        if (!contains(root, trunk.commit, head)) throw staleVerdictRefusal(item, stale);
-      }
-      review = captureVerdictReview(root, board, item, trunk.commit, checkedCommit);
-      refuseUnverifiedStack(root, board, item, checkedCommit, trunk);
+      const composeNow = () => composeReview(root, board, item, checkedCommit, { reReview, head, stale, refuseUnverifiedStack });
+      const admitted = composesAtAdmission(ctx.config) && Boolean(frozenCheck(item));
+      let trunk = null;
+      if (!admitted) ({ trunk, review } = composeNow());
       const checkedItem = reReview ? { ...item, item_commit: checkedCommit } : item;
       if (frozenCheck(item)) {
         const browser = !browserFreeChecksEnabled() || await checkNeedsBrowser(root, frozenCheck(item), { commit: checkedCommit, onFallback: browserAdmissionReporter(ctx.io, ctx.io.relayJson) });
         // A private checked composition needs this machine's live local gate markers [C7,V4].
         const shortEligible = Boolean(await explicitCheckFiles(root, frozenCheck(item), { commit: checkedCommit }));
-        check = await withGateSlot(root, (lease) => checkAtCommit(root, checkedItem, { waitMs: lease.waitMs, gateLease: lease }), { browser, remote: false, agent: me.id, item: String(id), kind: 'review', itemCheck: true, shortEligible, onWait: queuedItemLease(ctx, item, me.id, 'review') });
+        check = await withGateSlot(root, async (lease) => { if (admitted) ({ trunk, review } = composeNow()); return nativeFlakes.verify(ctx, checkedItem, frozenCheck(item), { board, main: trunk.commit, commit: checkedCommit }, { ordered, withBoard, resourceAgent })(lease); }, { browser, remote: false, agent: me.id, item: String(id), kind: 'review', itemCheck: true, shortEligible, onWait: queuedItemLease(ctx, item, me.id, 'review') });
       } else {
         check = checkAtCommit(root, checkedItem);
       }
@@ -3033,7 +3036,11 @@ async function verifyHere(ctx, id, { second, values }) {
       const receipt = store.events(board, { itemId: id }).filter(event => event.event_kind === 'submit').map(event => JSON.parse(event.event_detail)).find(event => event.commit === commit);
       submissionPaths(root, item, commit, { mainCommit: receipt?.policyCommit, dependencies: dependencySnapshots(board.db, item) });
       const currentTrunk = requireTrunkMerge(root, checkedCommit); // Re-read after the frozen check, before accepting.
-      if (currentTrunk.commit !== trunk.commit) throw new Refused('VERDICT_TRUNK_MOVED', `main moved from ${trunk.commit} to ${currentTrunk.commit} during review; merge the latest main and re-review the clean composition`);
+      // With verify.unrelatedTrunkMoves on, a move through commits that touch nothing this review read keeps its verdict (#928).
+      const judged = currentTrunk.commit === trunk.commit || ctx.config.verify.unrelatedTrunkMoves !== true ? null
+        : await judgeTrunkMove(root, { from: trunk.commit, to: currentTrunk.commit, item, checkedCommit, check: frozenCheck(item) });
+      if (currentTrunk.commit !== trunk.commit && (!judged || judged.overlap)) throw new Refused('VERDICT_TRUNK_MOVED', `main moved from ${trunk.commit} to ${currentTrunk.commit} during review${judged ? `, and the move reaches this review through ${judged.overlap}` : ''}; merge the latest main and re-review the clean composition`);
+      if (judged) unaffectedMove = `\nmain moved during this review through ${judged.moved.map((sha) => sha.slice(0, 12)).join(', ')}, judged unaffected: none of them changes this item's files or a file its check and affected tests read`;
       if (headCommit(root) !== head || (reReview && (!isClean(root) || untracked(root).length))) {
         throw new Refused('NOT_AT_COMMIT', 'the reviewed checkout moved during its check; restore the clean reviewed HEAD and retry verification');
       }
@@ -3045,7 +3052,7 @@ async function verifyHere(ctx, id, { second, values }) {
       agentId: me.id,
       decision,
       reason: values.reason,
-      note: textArg(ctx.io, values, 'note') ?? '',
+      note: (textArg(ctx.io, values, 'note') ?? '') + unaffectedMove,
       ...(decision === 'REJECT' && values.cause !== undefined ? { cause: values.cause } : {}),
       head,
       digest,
@@ -3590,9 +3597,9 @@ function workCommands(io, args) {
       await runStaticChecks(ctx.info.root, (item.item_claim_head ? itemPolicy(ctx.info.root, item) : mainPolicy(ctx.info.root)).config, { agent: caller, item: String(item.item_id), onWait: queuedItemLease(ctx, item, caller, 'build'), onBrowserFallback: browserAdmissionReporter(io, values.json) });
       const browser = !browserFreeChecksEnabled() || await checkNeedsBrowser(ctx.info.root, check, { onFallback: browserAdmissionReporter(io, values.json) });
       const shortEligible = Boolean(await explicitCheckFiles(ctx.info.root, check));
-      const run = await withGateSlot(ctx.info.root, (lease) => runProfiledShell(ctx.info.root, check, { waitMs: lease.waitMs, artifactPrefix: `pullboard-check-${item.item_id}`, persistLog: true, gateLease: lease }), { browser, agent: caller, item: String(item.item_id), kind: 'check', itemCheck: true, shortEligible, onWait: queuedItemLease(ctx, item, caller, 'build') });
+      const run = await withGateSlot(ctx.info.root, nativeFlakes.check(ctx, item, check, { ordered, withBoard, resourceAgent }), { browser, agent: caller, item: String(item.item_id), kind: 'check', itemCheck: true, shortEligible, onWait: queuedItemLease(ctx, item, caller, 'build') });
       refuseSandboxBlocked(run);
-      io.result?.({ id: item.item_id, green: run.isGreen, seconds: run.seconds, check, by, report: run.isGreen ? '' : digestOf(run.output) });
+      io.result?.({ id: item.item_id, green: run.isGreen, seconds: run.seconds, check, by, receipt: run.profile?.receipt, report: run.isGreen ? '' : digestOf(run.output) });
       const timings = timingDigest(run.profile);
       const compact = timings && !run.profile.files.length
         ? `; ${timings.replaceAll('\n', '; ')}; timing profile: ${run.profilePath}` : '';
@@ -4024,7 +4031,7 @@ async function specCommand(io, { first, second, rest, values }) {
     });
   }
   if (first === 'answer') {
-    requirePersonChannel(io.personChannel);
+    requirePersonChannel(io.personChannel, process.env, { command: personCommand(primaryCheckoutRoot(ctx.info) ?? ctx.info.root, ['spec', 'answer', second, rest.join(' ')]) });
     return withBoard(ctx, async (board) => {
       const me = whoAmI(ctx, board);
       if (!ctx.info.isMain || me.id !== COORDINATOR) throw new Refused('B26_PERSON_APPROVAL', 'only the person answers a pending question, from the main checkout or the view', 'ask the person to answer it in pullboard view, or in their own terminal at the main checkout');
@@ -4229,45 +4236,6 @@ async function specCommand(io, { first, second, rest, values }) {
   throw new Refused('USAGE', 'pullboard spec --json | check | view | show <id> | unmet [--must] | draft "<text>" | signoff <ids> | signers add | approve <ids> | decline <ids> --reason "why" | answer <id> "<choice or text>" | apply');
 }
 
-/** Read one consent line without waiting for EOF in an interactive terminal [V2]. */
-async function firstInputLine(stdin) {
-  if (!stdin) return '';
-  let text = '';
-  for await (const chunk of stdin) {
-    text += chunk.toString();
-    const newline = text.indexOf('\n');
-    if (newline >= 0) return text.slice(0, newline);
-    if (text.length > 256) return '';
-  }
-  return text;
-}
-
-/**
- * Read everything git writes on a hook's stdin, or nothing when run by hand.
- *
- * @param {any} stdin
- * @returns {Promise<string>}
- */
-async function readStdin(stdin) {
-  if (!stdin || stdin.isTTY) return '';
-  const chunks = [];
-  for await (const chunk of stdin) chunks.push(chunk);
-  return Buffer.concat(chunks).toString('utf8');
-}
-
-/** Wait up to the board's shared busy timeout while reading hook facts, without migrating its schema. */
-function hookRead(ctx, read) {
-  if (!existsSync(ctx.file)) return null;
-  const startedAt = Date.now();
-  let db;
-  try {
-    db = store.openBoardReadOnly(ctx.file);
-    return read({ db, clock: ctx.clock });
-  } catch (error) {
-    throw store.boardBusyError(ctx.file, startedAt, error);
-  } finally { db?.close(); }
-}
-
 /**
  * The hooks git runs. In a repo without pullboard.json they pass, so a stray hook never blocks.
  *
@@ -4470,7 +4438,7 @@ async function runCommand(argv, io) {
         : first === 'off' ? await relayOff(ctx.info.root, io) : relayStatus(ctx.info.root);
       io.result?.(result);
       const boardName = listApiProjects().find((project) => project.root === ctx.info.root)?.name ?? basename(ctx.info.root);
-      io.say(result.linked ? `${result.link}\nrelay: ${boardName} (board ${result.board}) is linked for GitHub ${result.login || `account ${result.account}`}; sequence ${result.sequence}; ${result.behind} pending uploads${result.recovery?.pending ? `; recovery pending for sequence ${result.recovery.skip}; retry ${result.recovery.next}` : ''}` : (result.notice || 'relay off; the local board is complete'));
+      for (const line of relayOutput.detailLines(result, boardName)) io.say(line);
       return 0;
     }
     if (command === 'blueprint' && first === 'save') {
@@ -4520,7 +4488,8 @@ async function runCommand(argv, io) {
         throw error;
       }
       const waivers = values.landing ? withBoard(ctx, (board) => liveWaiverProjection(board)) : [];
-      const gate = await runGate(ctx.info.root, config, { landing: values.landing, agent: resourceAgent(ctx), onWait: gateWaitReporter(io), stages: Boolean(values.landing), waivers });
+      const gate = await runGate(ctx.info.root, config, { landing: values.landing, agent: resourceAgent(ctx), onWait: gateWaitReporter(io), stages: Boolean(values.landing), waivers,
+        onFailure: nativeFlakes.observer(ctx, { kind: values.landing ? 'land' : 'gate', config }, { ordered, withBoard, resourceAgent }) });
       // A landing gate honours the person's live waivers exactly as land does; a red run never stamps, so it stays waived, not green [B3,R3].
       const waived = values.landing && !gate.isGreen ? withBoard(ctx, (board) => waivedFailures(board, accountedFailures(gate, ctx.info.root))) : null;
       if (waived) {

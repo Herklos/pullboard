@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { closeSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, unlinkSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { Refused } from '../src/refused.js';
+import { SEALED_SNAPSHOT_BYTES } from '../src/relay-limits.js';
 import { createRelayJournal } from './journal.js';
 
 const DAY = 86_400_000;
@@ -35,9 +36,9 @@ function privateDirectory(directory) {
 }
 
 /** Keep lifecycle mutations in the host's trusted process; this is never an unauthenticated HTTP API. */
-export function createRelayRetention({ directory, backupsDirectory = directory + '-backups', auth, now = Date.now }) {
+export function createRelayRetention({ directory, backupsDirectory = directory + '-backups', auth, now = Date.now, onDelete = () => {} }) {
   if (typeof directory !== 'string' || !directory.trim() || typeof backupsDirectory !== 'string' ||
-      !backupsDirectory.trim() || typeof now !== 'function' || !auth?.linkedBoards || !auth?.forgetBoard || !auth?.withBoard || !auth?.pendingCleanup || !auth?.finishCleanup || !auth?.withCleanup) {
+      !backupsDirectory.trim() || typeof now !== 'function' || typeof onDelete !== 'function' || !auth?.linkedBoards || !auth?.forgetBoard || !auth?.withBoard || !auth?.pendingCleanup || !auth?.finishCleanup || !auth?.withCleanup) {
     throw new Refused('RELAY_CONFIG', 'configure private relay storage, authentication and a retention clock');
   }
   const root = resolve(directory);
@@ -78,7 +79,7 @@ export function createRelayRetention({ directory, backupsDirectory = directory +
       if (!Number.isSafeInteger(link.linkedAt) || link.linkedAt < 0) throw new Refused('RELAY_CLOCK', 'restore a valid link time before retention maintenance');
       return link.linkedAt;
     }
-    const journal = createRelayJournal({ directory: root, boardId: link.id, maxBytes: 10_000_000 });
+    const journal = createRelayJournal({ directory: root, boardId: link.id, maxBytes: SEALED_SNAPSHOT_BYTES });
     try {
       const activity = journal.activity();
       const at = activity === null ? link.linkedAt : Date.parse(activity);
@@ -115,6 +116,8 @@ export function createRelayRetention({ directory, backupsDirectory = directory +
       for (const file of files) {
         try { unlinkSync(file); } catch (error) { if (error.code !== 'ENOENT') throw error; }
       }
+      const result = onDelete(id);
+      if (result && typeof result.then === 'function') throw new Refused('RELAY_CONFIG', 'Finish relay cleanup notices synchronously before completing deletion.');
       auth.finishCleanup(id);
     });
   }

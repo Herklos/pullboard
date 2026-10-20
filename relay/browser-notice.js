@@ -65,6 +65,13 @@ export function noticeLines({ available, paired, ownedRequestIds = new Map(), wa
   for (const warning of warnings) if (warning?.code === 'BOARD_INACTIVE' && Number.isInteger(warning.daysLeft)) {
     lines.push('BOARD_INACTIVE: ' + warning.daysLeft + ' days left before this relay board is deleted. Make a board move from a linked machine to keep it.');
   }
+  const storageAccounts = new Set();
+  for (const warning of warnings) if (['ACCOUNT_STORAGE_WARNING', 'ACCOUNT_STORAGE_LIMIT'].includes(warning?.code) && typeof warning.message === 'string') {
+    const account = warning.storage?.account?.id;
+    if (account && storageAccounts.has(account)) continue;
+    if (account) storageAccounts.add(account);
+    lines.push(warning.message);
+  }
   if (failure) lines.push(failure);
   if (!available.length) lines.push('No linked boards are available for this account.');
   return lines;

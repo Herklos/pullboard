@@ -1,13 +1,18 @@
 /** API v1's shared HTTP boundary; local and relay adapters supply the same board operations (A2). */
 import { Refused } from './refused.js';
+import { relayStorage } from './relay-storage.js';
 import { refusalDocument } from './json.js';
 import { withGitFacts } from './git.js';
+import { PAIR_PACKAGE_BODY_BYTES } from './relay-limits.js';
 
 const BODY_BYTES = 100_000;
 
 /** Keep unexpected internal failures out of the public refusal document. */
 function refusal(error) {
-  return refusalDocument(error instanceof Refused ? error : new Refused('SERVICE_ERROR', 'the board service could not complete the call; retry or check the service'));
+  const document = refusalDocument(error instanceof Refused ? error : new Refused('SERVICE_ERROR', 'the board service could not complete the call; retry or check the service'));
+  const storage = error instanceof Refused && error.code === 'ACCOUNT_STORAGE_LIMIT' ? relayStorage(error.storage) : null;
+  if (storage) document.error.storage = storage;
+  return document;
 }
 
 /** Emit exactly one versioned JSON response with no caching or content sniffing. */
@@ -25,7 +30,7 @@ function jsonState(res, status, state, eventLogVersion) {
 
 /** Read a bounded JSON object, draining oversize requests so a refusal reaches the caller. */
 async function readBody(req, { maxBytes = BODY_BYTES } = {}) {
-  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > 20_000_000) throw new TypeError('API body limit needs a positive safe integer no larger than twenty million');
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > PAIR_PACKAGE_BODY_BYTES) throw new TypeError('API body limit needs a positive safe integer within the shared request limit');
   if (!/^application\/json(?:\s*;|$)/i.test(String(req.headers['content-type'] ?? ''))) throw new Refused('BAD_REQUEST', 'send an application/json object as the request body');
   const chunks = [];
   let size = 0;
@@ -124,6 +129,13 @@ export function createApiHandler(adapter, { pollMs = 200 } = {}) {
     }
   }
 
+  /** Preserve the legacy primary warning while carrying additional independent notices. */
+  async function warningsFor(board, who) {
+    const primary = await adapter.warning?.(board, who);
+    const additional = await adapter.warnings?.(board, who);
+    return [primary, ...(Array.isArray(additional) ? additional : [])].filter(Boolean);
+  }
+
   /**
    * Replay and follow one or more boards' records on one response, respecting slow clients and
    * revocation between polls. A tagged stream names each frame's board, and each ordinary
@@ -160,11 +172,13 @@ export function createApiHandler(adapter, { pollMs = 200 } = {}) {
           for (const follow of follows) {
             current = follow;
             follow.who = await adapter.authenticate(req, { board: follow.board.id, write: false });
-            const warning = await adapter.warning?.(follow.board, follow.who);
-            const serialized = warning ? frame(follow, { warning }) : null;
+            const warnings = await warningsFor(follow.board, follow.who);
+            const serialized = warnings.length ? JSON.stringify(warnings) : null;
             if (serialized !== follow.lastWarning) {
               follow.lastWarning = serialized;
-              if (serialized && !res.write('event: warning\ndata: ' + serialized + '\n\n')) { blocked = true; return; }
+              for (const warning of warnings) {
+                if (!res.write('event: warning\ndata: ' + frame(follow, { warning }) + '\n\n')) { blocked = true; return; }
+              }
             }
             const records = follow.initial ?? await adapter.events(follow.board, follow.after, follow.who);
             follow.initial = null;
@@ -309,9 +323,10 @@ export function createApiHandler(adapter, { pollMs = 200 } = {}) {
           }
         }
         const initial = await adapter.events(board, after, who);
-        const warning = await adapter.warning?.(board, who);
+        const warnings = await warningsFor(board, who);
         const eventLogVersion = await adapter.eventLogVersion?.(board, who);
-        return json(res, 200, { events: initial, ...(eventLogVersion === undefined ? {} : { eventLogVersion }), ...(warning ? { warning } : {}) });
+        return json(res, 200, { events: initial, ...(eventLogVersion === undefined ? {} : { eventLogVersion }),
+          ...(warnings.length ? { warning: warnings[0], ...(warnings.length > 1 ? { warnings: warnings.slice(1) } : {}) } : {}) });
       }
       if (req.method === 'POST' && route[2] === 'moves') {
         const moved = await adapter.move(board, await readBody(req), who);
@@ -352,6 +367,7 @@ export function applyStateDelta(state, delta) {
 
 /** Choose the same HTTP refusal class for local and sealed relay adapters. */
 export function apiStatus(error) {
+  if (error instanceof Refused && error.code === 'ACCOUNT_STORAGE_LIMIT') return 507;
   return { RELAY_BOARD_DELETED: 410, AUTH_REQUIRED: 401, DEVICE_REVOKED: 403, TOKEN_BOARD: 403, API_ORIGIN: 403, BAD_ORIGIN: 403, WRITE_REQUIRED: 403, HUMAN_REQUIRED: 403, NO_REPO_ACCESS: 403, NO_BOARD: 404, NO_SHOUT: 404, BOARD_NOT_LINKED: 404, NO_SNAPSHOT: 404, BASELINE_EXISTS: 412, SNAPSHOT_REQUIRED: 409, SEQUENCE_REPEAT: 409, SEQUENCE_GAP: 409 }[error.code] ?? (error instanceof Refused ? 400 : 500);
 }
 

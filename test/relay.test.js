@@ -1204,7 +1204,7 @@ test('offline linked reads use the local board, moves refuse, and the same relay
     const afterTables = (await box.cli('export')).document.tables;
     assert.equal(afterTables.event.length, beforeEvents.length + 1, 'only the acknowledged recovery move is recorded locally');
     assert.equal(afterTables.event.at(-1).event_kind, 'add');
-    const remoteStateResponse = await fetch(`${box.origin}/api/v1/boards/${link.board}/state`, {
+    const remoteStateResponse = await fetch(`${box.origin}/api/v2/boards/${link.board}/state`, {
       headers: { authorization: `Bearer ${link.token}`, 'x-pullboard-engine': String(ENGINE_VERSION) },
     });
     assert.equal(remoteStateResponse.status, 200);
@@ -1444,7 +1444,7 @@ test('every real CLI relay request declares its engine including sign-in, reads,
   assert.ok(box.calls.some(call => call.path.startsWith('/auth/')));
   assert.ok(box.calls.some(call => call.method === 'GET' && call.path.includes('/events')));
   assert.ok(box.calls.some(call => call.method === 'POST' && call.path.endsWith('/moves')));
-  assert.ok(box.calls.some(call => call.method === 'PUT' && call.path.endsWith('/state')));
+  assert.ok(box.calls.some(call => call.method === 'POST' && /^\/api\/v2\/boards\/[0-9a-f]{32}\/uploads\/[^/]+\/publish$/u.test(call.path)), 'the current CLI publishes an authenticated paged checkpoint');
   assert.equal(box.calls.some(call => call.method === 'DELETE'), false, 'local off does not send remote deletion without phone approval');
   assert.ok(box.calls.every(call => call.engine === String(ENGINE_VERSION)), 'every request from the real CLI carries the current engine version');
 });

@@ -50,7 +50,8 @@ childProcess.spawn = (command, args, options) => {
     writeFileSync(${JSON.stringify(injected)}, 'checkout lock injected\\n');
     if (${JSON.stringify(mode)} === 'index') return spawn(command, [...args, '--fixture-invalid-option'], options);
     if (${JSON.stringify(mode)} === 'missing') return spawn(${JSON.stringify(join(dir, 'missing-git'))}, args, options);
-    if (${JSON.stringify(mode)} === 'large') return spawn(process.execPath, ['-e', ${JSON.stringify(`process.stderr.write('x'.repeat(20_000) + ${JSON.stringify(`\nfatal: fixture tail token=${SECRET} https://user:fake-password@fixture.invalid/repo?token=${SECRET} ${remoteHome}/private.txt 10.20.30.40\nAuthorization: Bearer fixture-bearer-secret\nCookie: session=fixture-cookie-secret\n`)}); process.exit(23);`)}], options);
+    // Let queued pipe bytes drain before exit; an immediate exit can discard the fixture's diagnostic tail.
+    if (${JSON.stringify(mode)} === 'large') return spawn(process.execPath, ['-e', ${JSON.stringify(`process.stderr.write('x'.repeat(20_000) + ${JSON.stringify(`\nfatal: fixture tail token=${SECRET} https://user:fake-password@fixture.invalid/repo?token=${SECRET} ${remoteHome}/private.txt 10.20.30.40\nAuthorization: Bearer fixture-bearer-secret\nCookie: session=fixture-cookie-secret\n`)}); process.exitCode = 23;`)}], options);
     writeFileSync(join(options.cwd, '.git', 'index.lock'), 'held by this fixture\\n');
   }
   return spawn(command, args, options);

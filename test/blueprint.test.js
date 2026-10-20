@@ -895,13 +895,13 @@ test('starter items land in a build lane, never the coordinator lane [S1,I1]', (
   const configLanes = (box) => JSON.parse(readFileSync(join(box.repo, 'pullboard.json'), 'utf8')).lanes ?? {};
 
   // A fresh init with a blueprint: init proposes the app lane and the starters are filed in it.
-  // The proposal stays unwritten until the person runs the command init prints.
+  // The proposal stays unwritten until the agent runs the command init prints, then tells the person (#914).
   const fresh = emptyRepo();
   const started = fresh.run('init', '--blueprint', 'web-app');
   assert.equal(started.status, 0, started.stdout + started.stderr);
   assert.deepEqual(lanesOf(fresh), Array(PUBLISHED.items.length).fill('app'), 'init files every starter in the lane it proposes');
-  assert.match(started.stdout, /starter items filed in the app lane, proposed above and not written until the person accepts/u, 'init says the lane is a proposal');
-  assert.match(started.stdout, /to accept, run: pullboard lane add app --owns app\//u, 'init prints the command that accepts it');
+  assert.match(started.stdout, /starter items filed in the app lane, proposed above; add it with the command printed there/u, 'init says the lane is a proposal');
+  assert.match(started.stdout, /then tell the person which lanes you made: pullboard lane add app --owns app\//u, 'init prints the command that accepts it');
   assert.deepEqual(Object.keys(configLanes(fresh)).filter((name) => name === 'app'), [], 'the proposed lane is not written');
   const accepted = fresh.run('lane', 'add', 'app', '--owns', 'app/');
   assert.equal(accepted.status, 0, accepted.stdout + accepted.stderr);
@@ -949,8 +949,8 @@ test('starter items land in a build lane, never the coordinator lane [S1,I1]', (
   const again = freshBoard();
   const said = again.run('blueprint', 'add', 'web-app');
   assert.equal(said.status, 0, said.stdout + said.stderr);
-  assert.match(said.stdout, /starter items filed in the app lane, proposed, not written until the person accepts/u, 'blueprint add says the lane is a proposal');
-  assert.match(said.stdout, /to accept, run: pullboard lane add app --owns app\//u, 'blueprint add prints the command that accepts it');
+  assert.match(said.stdout, /starter items filed in the app lane, proposed; add it to start them/u, 'blueprint add says the lane is a proposal');
+  assert.match(said.stdout, /then tell the person which lanes you made: pullboard lane add app --owns app\//u, 'blueprint add prints the command that accepts it');
 });
 
 /** The bundled blueprint of this name, as its file says. */
@@ -1476,4 +1476,13 @@ test('an agent cannot approve its own fit proposal [S1,E3,B26]', () => {
   assert.equal(refusal(box.run('spec', 'fit', 'approve', '--json'), 'approve with no batch code'), 'USAGE');
   const approved = ok(box.run('spec', 'fit', 'approve', third.batch, '--json'), 'the person approves');
   assert.deepEqual(approved.decisions.map((record) => [record.id, record.decision]), [[W3, 'decline'], [W4, 'approve']]);
+});
+
+test('a Something else answer that names the stack fits a plain Node project [A8]', () => {
+  // A plain Node project is not one of A8's named frameworks, so Something else takes the stack's name (#916).
+  const { seat, key } = fitBoard();
+  const stack = 'Node.js with built-in node:http and node:test';
+  const proposal = ok(seat('blueprint', 'fit', 'web-app', key('Q1'), 'answer', '--text', stack, '--reason', 'a plain Node project with no web framework', '--json'), 'answer the stack question').proposals[0];
+  assert.equal(proposal.decision, 'answer');
+  assert.equal(proposal.text, `The app is built with: ${stack}. Choices: Next.js, SvelteKit, Rails, Something else.`);
 });

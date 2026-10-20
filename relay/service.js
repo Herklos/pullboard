@@ -13,9 +13,12 @@ import { createPairingStore } from './pairing-store.js';
 import { createPairingHandler } from './pairing-http.js';
 import { createRelayBrowserHandler } from './browser-page.js';
 import { VERIFIER_STANDING_ENGINE } from '../src/machine.js';
+import { SEALED_SNAPSHOT_BYTES, SNAPSHOT_BODY_BYTES } from '../src/relay-limits.js';
+import { createRelayPagesHandler, snapshotPageRoot } from './pages-http.js';
+import { createStorageQuota } from './storage-quota.js';
 
-const SNAPSHOT_BODY = 14_000_000;
-const STORED_BYTES = 10_000_000;
+const SNAPSHOT_BODY = SNAPSHOT_BODY_BYTES;
+const STORED_BYTES = SEALED_SNAPSHOT_BYTES;
 
 /** Validate a board identity before deriving its private, internal database path. */
 function identity(id) {
@@ -108,23 +111,29 @@ function sender(who, personOnly = false) {
 }
 
 /** Create a private relay handler; the caller owns sign-in lifecycle and service shutdown. */
-export function createRelayHandler({ directory, auth, pollMs = 200, publicOrigin, now = Date.now, backupsDirectory, maintenanceMs = 60_000 }) {
+export function createRelayHandler({ directory, auth, pollMs = 200, publicOrigin, now = Date.now, backupsDirectory, maintenanceMs = 60_000, accountStorageBytes }) {
   const origin = trustedOrigin(publicOrigin);
   if (typeof directory !== 'string' || !directory.trim() || !auth) throw new Refused('RELAY_CONFIG', 'configure a private relay directory and sign-in component');
   const root = resolve(directory);
   mkdirSync(root, { recursive: true, mode: 0o700 });
   const stat = lstatSync(root);
   if (!stat.isDirectory() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0) throw new Refused('RELAY_STORAGE', 'use a private directory with mode 700 for relay storage');
+  // Older custom auth adapters remain explicitly API1-only, never an unmetered API2 transport.
+  const quota = auth.storageAccount && auth.storageBoards ? createStorageQuota({ directory: root, auth, limitBytes: accountStorageBytes }) : null;
 
   if (!Number.isSafeInteger(maintenanceMs) || maintenanceMs < 0 || maintenanceMs > 2_147_483_647 || (maintenanceMs > 0 && maintenanceMs < 10)) {
     throw new Refused('RELAY_CONFIG', 'use a maintenance interval of at least ten milliseconds, or zero for an external scheduler');
   }
-  const retention = createRelayRetention({ directory: root, backupsDirectory, auth, now });
+  const retention = createRelayRetention({ directory: root, backupsDirectory, auth, now, onDelete: id => quota?.clear(id) });
   let maintenanceError = null;
 
   /** Expose only a stable failure code to the trusted operator; never log paths, keys or provider errors. */
   function maintain() {
-    try { const result = retention.maintain(); maintenanceError = null; return result; }
+    try {
+      const result = retention.maintain();
+      if (quota) for (const link of auth.linkedBoards()) collectPages(link.id);
+      maintenanceError = null; return result;
+    }
     catch (error) { maintenanceError = error instanceof Refused ? error.code : 'RELAY_MAINTENANCE'; throw error; }
   }
   const timer = maintenanceMs ? setInterval(() => { try { maintain(); } catch { /* operator reads maintenanceStatus */ } }, maintenanceMs) : null;
@@ -167,6 +176,7 @@ export function createRelayHandler({ directory, auth, pollMs = 200, publicOrigin
     const declared = req.headers['x-pullboard-engine'];
     const version = declared === undefined ? 1 : typeof declared === 'string' && /^[1-9][0-9]*$/.test(declared) ? Number(declared) : NaN;
     requireClientVersion(id, version);
+    if (write && quota) auth.storageAccount(id, who.user.id);
     return { ...who, engineVersion: version };
   }
 
@@ -180,9 +190,13 @@ export function createRelayHandler({ directory, auth, pollMs = 200, publicOrigin
 
   /** Add an authorized next-contact warning without exposing any plaintext board contents. */
   function annotated(row, id) {
-    const warning = retention.notice(id);
+    if (row.apiVersion === 2) throw new Refused('RELAY_API_VERSION', 'This board requires relay API version 2. Upgrade with npm i -g pullboard@latest.');
+    const warning = quota?.notice(id) ?? retention.notice(id);
     return { ...state(row), ...(warning ? { warning } : {}) };
   }
+
+  /** Keep the budget check and its write inside the same authenticated lifecycle transaction. */
+  function storing(id, principal, delta, write) { return quota ? quota.change(id, principal, delta, write) : write(); }
 
   /** Open only an existing journal on reads; each synchronous operation closes its connection. */
   function withJournal(id, work, create = false, engineVersion) {
@@ -200,6 +214,28 @@ export function createRelayHandler({ directory, auth, pollMs = 200, publicOrigin
       requireClientVersion(id, engineVersion);
       const journal = createRelayJournal({ directory: root, boardId: id, maxBytes: STORED_BYTES, now: () => new Date(now()) });
       try { return work(journal); } finally { journal.close(); }
+    });
+  }
+
+  /** Collect expired staging and read pins without opening a missing board or decoding its opaque bytes. */
+  function collectPages(id) {
+    try { lstatSync(join(root, identity(id) + '.journal.sqlite')); }
+    catch (error) { if (error.code === 'ENOENT') return; throw error; }
+    auth.withBoard(id, () => {
+      const journal = createRelayJournal({ directory: root, boardId: id, maxBytes: STORED_BYTES, now: () => new Date(now()) });
+      const pages = journal.pages({ now });
+      try { const current = snapshotPageRoot(journal.snapshot()); pages.prune(current ? [current.id] : []); }
+      finally { pages.close(); journal.close(); }
+    });
+  }
+
+  /** Probe only account totals after expired staging is reclaimed, never a full snapshot or a device-supplied account. */
+  function refreshStorage(id, principal) {
+    return auth.withBoard(id, () => {
+      const account = auth.storageAccount(id, principal.userId);
+      if (account) for (const board of auth.storageBoards(account.id)) collectPages(board);
+      const storage = quota.usage(id, principal), warning = quota.notice(id);
+      return { storage, ...(warning ? { warning } : {}) };
     });
   }
 
@@ -225,7 +261,8 @@ export function createRelayHandler({ directory, auth, pollMs = 200, publicOrigin
     const principal = sender(authenticated);
     if (body.registration === undefined) {
       return withJournal(board.id, (journal) => {
-        const row = journal.append(body.sequence, bytes, kind, principal);
+        const row = body.sequence <= journal.latest() ? journal.append(body.sequence, bytes, kind, principal)
+          : storing(board.id, principal, bytes.byteLength, () => journal.append(body.sequence, bytes, kind, principal));
         return { status: 200, body: { event: event(row), result: { sequence: row.sequence } } };
       }, false, who.engineVersion);
     }
@@ -237,7 +274,9 @@ export function createRelayHandler({ directory, auth, pollMs = 200, publicOrigin
       const retry = prior && prior.origin === 'registered' && prior.creator === receipt.creator && prior.sequence === receipt.sequence && prior.digest === receipt.digest;
       if (prior && !retry) throw new Refused('SEAT_TAKEN', `the relay already issued ${receipt.target} a token, so it cannot be registered again; register the next free name`);
       let row;
-      try { row = retry ? journal.recordAt(receipt.sequence) : journal.append(body.sequence, bytes, kind, principal, receipt); }
+      try { row = retry ? journal.recordAt(receipt.sequence) : body.sequence <= journal.latest()
+        ? journal.append(body.sequence, bytes, kind, principal, receipt)
+        : storing(board.id, principal, bytes.byteLength, () => journal.append(body.sequence, bytes, kind, principal, receipt)); }
       catch (error) {
         // The move and its receipt committed but the seat did not (any failure before enrollment):
         // the creator's exact retry rolls the enrollment forward, even after compaction.
@@ -252,6 +291,7 @@ export function createRelayHandler({ directory, auth, pollMs = 200, publicOrigin
   }
 
   const browser = origin ? createRelayBrowserHandler({ authenticate: (req) => auth.authenticate(credential(req, origin)) }) : null;
+  const pagesHandler = createRelayPagesHandler({ directory: root, now, authorize: authorizedRequest, withJournal, sender, quota, annotated, refreshStorage, enabled: Boolean(quota) });
   const common = createApiHandler({
     authenticate: async (req, { board, write }) => {
       const token = credential(req, origin, write);
@@ -263,7 +303,14 @@ export function createRelayHandler({ directory, auth, pollMs = 200, publicOrigin
     },
     boards: (who) => {
       const boards = who.visible.filter((board) => !retention.expire(board.id));
-      const warnings = boards.map((board) => retention.notice(board.id)).filter(Boolean);
+      const warnedAccounts = new Set();
+      const warnings = boards.flatMap((board) => {
+        const storage = quota?.notice(board.id);
+        const accountId = storage?.storage?.account?.id;
+        if (accountId && warnedAccounts.has(accountId)) return [retention.notice(board.id)].filter(Boolean);
+        if (accountId) warnedAccounts.add(accountId);
+        return [retention.notice(board.id), ...(storage ? [{ board: board.id, ...storage }] : [])].filter(Boolean);
+      });
       return { boards, ...(warnings.length ? { warnings } : {}) };
     },
     board: (id, who) => { withJournal(id, () => undefined, false, who.engineVersion); return { id, engineVersion: who.engineVersion }; },
@@ -278,12 +325,14 @@ export function createRelayHandler({ directory, auth, pollMs = 200, publicOrigin
       return journal.after(after).map(event);
     }, false, board.engineVersion),
     warning: (board) => retention.notice(board.id),
+    warnings: (board) => [quota?.notice(board.id)].filter(Boolean),
     move: append,
     request: async (board, body, who) => (await append(board, body, who, 'request')).body,
   }, { pollMs });
 
   /** Add authenticated snapshot replacement and deletion to the common versioned read/move paths. */
   async function handle(req, res) {
+    if (await pagesHandler(req, res)) return;
     if (await deviceHandler(req, res)) return;
     if (await pairing(req, res)) return;
     try {
@@ -317,7 +366,12 @@ export function createRelayHandler({ directory, auth, pollMs = 200, publicOrigin
         if (!Number.isSafeInteger(body.sequence) || body.sequence < 0) throw new Refused('BAD_SEQUENCE', 'name the nonnegative sequence covered by the sealed snapshot');
         const who = await authorizedRequest(req, id, true);
         const principal = sender(who, 'snapshot');
-        const saved = withJournal(id, (journal) => journal.saveSnapshot(body.sequence, bytes, principal, { initialOnly: req.headers['if-none-match'] === '*' }), true, who.engineVersion);
+        const saved = withJournal(id, (journal) => {
+          if (journal.snapshot()?.apiVersion === 2) throw new Refused('RELAY_API_VERSION', 'This board requires relay API version 2. Upgrade with npm i -g pullboard@latest.');
+          const row = storing(id, principal, journal.snapshotDelta(body.sequence, bytes), () => journal.saveSnapshot(body.sequence, bytes, principal, { initialOnly: req.headers['if-none-match'] === '*' }));
+          quota?.clear(id);
+          return row;
+        }, true, who.engineVersion);
         return apiJson(res, 200, { state: annotated(saved, id) });
       }
       if (req.method === 'DELETE' && deletion) {
@@ -336,13 +390,13 @@ export function createRelayHandler({ directory, auth, pollMs = 200, publicOrigin
   handle.maintenance = maintain;
   handle.backup = retention.backup;
   handle.maintenanceStatus = () => ({ error: maintenanceError });
-  handle.close = () => { clearInterval(timer); common.close(); releaseSessionGuard?.(); deviceStore.close(); };
+  handle.close = () => { clearInterval(timer); common.close(); releaseSessionGuard?.(); deviceStore.close(); quota?.close(); };
   return handle;
 }
 
 /** Start the opt-in service on a configured address; tests use loopback and an ephemeral port. */
-export function serveRelay({ directory, auth, port = 0, host = '127.0.0.1', pollMs = 200, publicOrigin, now, backupsDirectory, maintenanceMs }) {
-  const handler = createRelayHandler({ directory, auth, pollMs, publicOrigin, now, backupsDirectory, maintenanceMs });
+export function serveRelay({ directory, auth, port = 0, host = '127.0.0.1', pollMs = 200, publicOrigin, now, backupsDirectory, maintenanceMs, accountStorageBytes }) {
+  const handler = createRelayHandler({ directory, auth, pollMs, publicOrigin, now, backupsDirectory, maintenanceMs, accountStorageBytes });
   const server = createServer(handler);
   server.requestTimeout = 15_000;
   return new Promise((ready, fail) => {

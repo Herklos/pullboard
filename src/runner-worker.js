@@ -22,6 +22,9 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
+import { availableParallelism } from 'node:os';
+import { freemem } from 'node:os';
+import { loadavg } from 'node:os';
 import { userInfo } from 'node:os';
 import {
   delimiter,
@@ -1203,6 +1206,8 @@ async function receipt(spec, fields, sink) {
   await flushStdout();
   const body = { id: spec.id, commit: spec.commit, tree: spec.tree, code: fields.code, signal: fields.signal,
     runtimeSha256: spec.runtime.sha256, toolingSha256: spec.tooling.sha256, root: fields.root ?? '', outputSha256: sink.hash.digest('hex'), wallMs: Math.max(0, Date.now() - sink.wallStart),
+    // The execution host's load and the pinned main this run used, so a paired rerun here can be judged (#925).
+    main: typeof spec.main === 'string' ? spec.main : null, load: { average: loadavg(), cpus: availableParallelism(), freeMB: Math.floor(freemem() / 1048576) },
     ...(spec.stageMarker ? { pipeStatuses: fields.pipeStatuses ?? null } : {}), ...(fields.refused ? { refused: fields.refused } : {}), ...(fields.denial ? { denial: fields.denial } : {}) };
   const encoded = Buffer.from(JSON.stringify(body)).toString('base64');
   await new Promise((resolveWrite, rejectWrite) => process.stderr.write(`${RECEIPT} ${spec.id} ${encoded}\n`, error => error ? rejectWrite(error) : resolveWrite()));

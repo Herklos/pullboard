@@ -1,4 +1,5 @@
 /** @pullboard-test-input source-tree */
+/** @pullboard-test-loads src/board.js */
 /**
  * The item lifecycle's declaration (M1, M2, M4): sound on its own terms, each property shown
  * failing on a broken copy, and in step with the refusals the board, CLI and spec parser raise today.
@@ -114,8 +115,9 @@ const CALLBACKS = { 'board.js': { freeze: 'cli.js#freezer' } };
  * reads committed doctrine rules leniently: a doctrine it cannot parse carries no check [D1].
  */
 const CAUGHT = {
-  'cli.js#submitHere': ['cli.js#freezer', 'main-red.js#compareMainFailures', 'main-red.js#matchingReworks', 'doctrine-checks.js#checkRulesAt'],
-  'cli.js#verifyHere': ['cli.js#freezer'],
+  'cli.js#submitHere': ['native-flakes.js#observeFailure', 'cli.js#freezer', 'main-red.js#compareMainFailures', 'main-red.js#matchingReworks', 'doctrine-checks.js#checkRulesAt'],
+  // observeNativeFailure catches its optional pair/recording errors; they cannot become lifecycle refusals.
+  'cli.js#verifyHere': ['cli.js#freezer', 'native-flakes.js#observeFailure'],
   // Historical decline metadata is parsed inside a non-throwing boundary, covered by the Rigor history control.
   'board.js#reopen': ['rigor-notices.js#declinedRigorSource'],
 };

@@ -111,10 +111,12 @@ test('an idle seat beside work it could take is noticed once and resolves when i
   const id = box.claimed(0);
   const idle = box.seat(1);
   box.clock.offset += 2 * HOUR;
+  // The idle seat's agent is around (it shouted just now) but holds and pulls nothing (#940).
+  store.shout(box.board, { from: idle, to: 'coordinator', text: 'still here', lanes: ['core'] });
   const idleKey = `IDLE_AGENT:agent:${idle}`;
   assert.deepEqual(box.scan().added.sort(), [`CLAIM_LAPSED:item:${id}`, idleKey].sort());
   const idleNotices = store.allShouts(box.board).filter(notice => notice.shout_text.includes('IDLE_AGENT'));
-  assert.deepEqual(idleNotices.map(notice => notice.shout_to).sort(), ['coordinator', idle].sort(), 'the idle seat and the coordinator each hear it once');
+  assert.deepEqual(idleNotices.map(notice => notice.shout_to), [idle], 'the idle seat alone hears it, once (#940); the coordinator sees it in pullboard health');
   const before = exportBoard(box.board);
   for (let index = 0; index < 3; index += 1) assert.equal(box.scan(), null);
   assert.deepEqual(exportBoard(box.board), before, 'a persisting idle seat creates no repeated events or shouts');

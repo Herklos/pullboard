@@ -1,3 +1,4 @@
+/** @pullboard-test-loads src/engine.js src/machine.js */
 /** Real-SQLite tests for the deterministic, sequence-ordered move engine [H3,H16]. */
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';

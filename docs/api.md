@@ -36,6 +36,8 @@ For a stale acceptance, merge current main into the submitted work and commit a 
 
 `pullboard stats [--since <date>] --json` returns `{version: 1, stats: {...}}` from the append-only event log. `submissions` and `rejections` count moves, including repeated attempts; `rejectionShare` is rejections divided by submissions (zero when the window has no submissions). `merged` counts distinct items with a merge move; `mergedWithoutAccept` counts those whose merge lacks an earlier acceptance of the latest submitted commit. That audit uses earlier history even when the acceptance falls before the selected window. Current item and verdict rows do not replace event evidence.
 
+`gateWaits`, beside `stats`, lists, for each kind of gated run in the last day (`check`, `review`, `doctrine`, `gate`, `landing`), its `runs`, `medianWaitMs`, `slowestWaitMs` and `medianRunMs`, read from the board's gate receipts; text `stats` prints them under `gate waits, last day:`. A gate receipt is written for every run that takes a gate slot. Its fields are `waitMs` (queued for a slot), `admissionMs` (deciding and queueing, then handing over), `setupMs`, `runMs` and `evidenceMs` (reading the result and writing its record), and `slot: {kind, reason}`, where `kind` is `ordinary`, `browser`, `short`, `runner` or `inherited`. A timing profile carries it as `receipt`, `check --json` returns it as `receipt`, and the timing lines print it as `phases: ...; slot: <kind> (<reason>)`. A doctrine hold at submit prints its own `doctrine hold phases:` line.
+
 `stats.bars` counts bar corrections, keyed by agent: `{corrections, barRejects, buildRejects}`. A correction is an `edit --criterion` or `--check` on an item that was ever claimed. It must carry `--reason "what the old bar got wrong"` (HTTP `args.reason`); without one it is refused with `BAR_REASON`. A correction that follows the item's newest, unexplained reject marks that reject as caused by the bar, counted to the correcting agent; every other reject counts to the build, under the agent who added the item. Text `stats` prints one `bars:` line per agent, and text `show` prints each correction with its reason.
 
 `stats.flow` adds the flow through the board:
@@ -96,7 +98,7 @@ For example: `flow: review wait average 61 min (1 measured; > 60 min); bottlenec
 | `milestone remove` | `version:number`, `milestone:object` |
 | `milestone ship` | `version:number`, `milestone:object`, `into:string|null`, `moved:array`, `notMoved:array` |
 | `show` | `version:number`, `item_id:number`, `item_title:string`, `item_lane:string`, `item_status:string`, `verdicts:array`, `thread:array` |
-| `stats` | `version:number`, `stats:object` |
+| `stats` | `version:number`, `stats:object`, `gateWaits:array` |
 | `status` | `version:number`, `me:object`, `mine:array`, `stats:object`, `reviewQueue:object`, `unread:number`, `relay:object` |
 | `doctor` | `version:number`, `problems:array` |
 | `health` | `version:number`, `asOf:string`, `thresholds:object`, `stuck:array`, `waiting:array` |
@@ -105,6 +107,8 @@ For example: `flow: review wait average 61 min (1 measured; > 60 min); bottlenec
 | `decisions` | `version:number`, `decisions:array` |
 | `ledger` | `version:number`, `items:array`, `stats:object` |
 | `log` | `version:number`, `events:array` |
+| `flakes` | `version:number`, `flakes:array`, `unclassified:array`, `regressions:array`, `stable:array` |
+| `flakes rerun` | `version:number`, `flakes:object`, `file:string` |
 | `rigor` | `version:number`, `causes:array`, `uncaused:number` |
 | `rigor draft` | `version:number`, `key:string`, `reads:string`, `evidence:object`, `proof:object`, `drafts:array` |
 | `add` | `version:number`, `item:object` |
@@ -115,7 +119,7 @@ For example: `flow: review wait average 61 min (1 measured; > 60 min); bottlenec
 | `run` | `version:number`, `messages:array` |
 | `sweep` | `version:number`, `messages:array` |
 | `next` | `version:number`, `item:object`, `review:boolean`, `held:boolean`, `shared:array` |
-| `check` | `version:number`, `id:number`, `green:boolean`, `seconds:number`, `check:string`, `report:string` |
+| `check` | `version:number`, `id:number`, `green:boolean`, `seconds:number`, `check:string`, `receipt:object`, `report:string` |
 | `check accept` | `version:number`, `id:number`, `digest:string`, `check:string` |
 | `claim` | `version:number`, `id:number`, `renewed:boolean`, `leaseUntil:string`, `digest:string` |
 | `hold` | `version:number`, `lane:string`, `held:boolean` |
@@ -184,6 +188,8 @@ Each checkout is bound to the first agent session that writes there. The local G
 With `submitGate: "landing"`, `status.submitInvariantProposals` lists files that failed outside a recorded submit selection. Each proposal carries `file`, `escapes` (distinct tested merge commits), `runtimeMs`, `budgetMs: 60000`, `withinBudget`, `commits` and the participating `submissions`. Repeated escapes below budget come first. Unmeasured whole-file runtime is `null`, not a sum of test-case durations. A later whole-file diagnostic or full gate passing at the identical commit suppresses that escape; another commit or merely an equal Git tree does not. Submission events record versioned `submissionProof: { version: 1, files, full, deferred, reason }`, including the actual full-fallback reason. A deferred full fallback records only invariants actually selected to run, rather than its possible full selection. Historical submissions without this receipt remain unknown. Landing batches append versioned `invariantEvidence` with actual tested commits, participants and whole-file diagnostics; earlier evidence cannot be replaced. Status reads those canonical events and changes no configuration. Edit `submitInvariants` on main to accept a proposal. Outside the landing submit policy the proposal list is empty.
 
 Releasing a reserved review requires a nonempty one-line `--note` (or `--note-file`); the authenticated release action accepts the same `note` field. A refusal keeps the reservation and records no release. The same reviewer is not offered that submission again until it is resubmitted or an hour passes, while other reviewers remain eligible. Releasing a build claim keeps its existing behavior and does not require a reason.
+
+With `verify.unrelatedTrunkMoves: true` in `pullboard.json` (off by default), an accept whose review saw main move is still recorded when every moved commit changes none of the item's files and none of the files its check and affected tests read; the verdict note names those commits. Any other move, or a check that is not an explicit test selection, refuses `VERDICT_TRUNK_MOVED` as before, naming the file that reaches the review.
 
 When outstanding reviews reach `verify.reviewRatio` times the active reviewers (default 3, with zero reviewers counting as one), `next` first offers a review the agent may take. This creates no claim or reservation. Its additive v1 `offer` has the review's `item` id, exact `command` to reserve it, `queue` and `ratio`; `build` previews the otherwise available build or is `null`. `next --verify <id>` reserves explicitly. `next --build` claims explicitly; a fresh claim's event detail records `reviewSkipped` with the offered id (or `null`), ratio and queue snapshot. Renewing an existing claim creates no new skip.
 
@@ -261,6 +267,10 @@ The HTTP move is `{verb: "fact", item: 12, agent: "web-1", args: {kind: "measure
 
 Rigor is how errors become doctrine or specs. It starts by noticing a failure cause that repeats. A cause key comes only from structured fields: `test:<file>::<title>`, `refusal:<CODE>`, `row:<id>` or `doctrine:<id>`. A reject (`verify <id> reject ... --cause <key>`) and a `reopen <id> --note "..." --cause <key>` record the key they name as `cause` in their event detail. A reopen after a red landing also gives one `test:` key per failing test in its `landingFailure.tests`, including reopens recorded before cause keys existed. Notes are never parsed, so an older reject with no cause counts as uncaused. A malformed key is refused with `BAD_CAUSE` before the move. Merge conflicts never count: a landing test whose name starts with `conflicts with`, and `refusal:MERGE_CONFLICT`.
 
+`pullboard flakes` lists recorded test failures: confirmed flake sightings, unclassified failures, possible regressions and stable red targets. Each observation retains the pinned source and complete raw/profile digests. Raw artifacts stay in the local common Git directory under `pullboard/flake-evidence/`; another device reading the board does not automatically receive those files. A paired pass never changes the original red verdict.
+
+The coordinator can run `pullboard flakes rerun on|off`, then commit `pullboard.json` to apply that policy. Paired diagnostics default off; recording remains on. On allows one exact-target pair for a supported structured Node target at unchanged source, with a pinned-main comparison. A green main is a possible regression. Unknown selectors, changed source and unsupported remote comparisons remain unclassified. A second confirmed sighting drafts ordinary strong repair work; it approves no spec or doctrine row. Off preserves the released landing diagnosis and its first legacy defect. Enabled landing consumes the saved pair, including after interruption, without another diagnostic measurement.
+
 `pullboard rigor` is read-only. It lists each cause that repeated: on 2 items, or on 1 item at 2 different commits. Each line shows the key, how it reads (`work` for `doctrine:` and `refusal:`, `product` for `row:`, `both` for `test:`), its failure count and its items. Its JSON result is `{version, causes: [{key, reads, occurrences, neverAgain, items: [{id, commits}]}], uncaused}`; `uncaused` counts rejects and reopens with no cause key.
 
 The person can mark a cause never-again from the main checkout's terminal: `pullboard fact <id> root-cause "<why>" --cause <key> --never-again --as person`. The fact is recorded as the person's, carries `cause` and `neverAgain: true`, and `rigor` lists its cause at once. An agent or a fact without `--as person` is refused with `RIGOR_PERSON_ONLY`. Over the relay, a fact move with person mode, a never-again or a cause key is accepted only from an authenticated person sender; an agent, a coordinator seat or the machine credential is refused with `RELAY_PERSON_ONLY` whatever channel the move names, and nothing is recorded. A move that carries a cause key needs move engine 30; moves without one replay as before.
@@ -275,6 +285,8 @@ The proof holds a real local machine gate while it runs on throwaway detached wo
 A refusal keeps the command's existing exit status and prints exactly one versioned document to stdout. In JSON mode stderr stays empty except for sign-in instructions and check consent notices. The command-specific `code` identifies the rule; `message` explains what happened; `next` gives the next step.
 
 Only the coordinator sets or edits an item's `--check`. `pullboard check [id]` prints the command and its setter before execution, and asks for consent when the caller did not set it. Use `--yes` to confirm that command without a prompt. An EOF or declined answer refuses with `CHECK_CONFIRM` before running the command. With `--json`, the notice and prompt appear immediately on stderr and stdout remains one JSON document; a successful check result also includes the optional `by` setter field.
+
+`pullboard add` and `pullboard edit` refuse a check with `CHECK_MASKS_EXIT`, naming the stage and the fix, when a pipeline's last stage is not the command that proves the work, so a red run would exit 0 (for example `node bin/run-tests.js ... | tail`). That includes a pipeline inside a `( ... )` subshell or a `{ ...; }` group, or after earlier commands or assignments. A check is exempt only when its first command is `set -o pipefail` (alone or with other `set` flags, run unconditionally) and it never clears pipefail, or when it captures the output first and tests it (`out=$(...)`). The rule reads the check's own top-level text: a pipeline inside a nested shell (`sh -c`, `bash -c`), `eval` or a script file is out of its scope.
 
 ```json
 {
@@ -376,7 +388,7 @@ The boards response keeps `boards` and may include `warnings` for registered ent
 
 The state from `pullboard serve` lists every item as a summary of what the lists and the roadmap read: `id`, `title`, `lane`, `status`, `route`, `milestone`, `specs`, `claim`, `builtBy`, `blockedBy`, `updatedAt`, `stage`, `since`, `counts` and `verdict`. `milestone` names the first roadmap milestone that lists the item, or is `null`. `claim` is the live lease on the item, `{by, until}`: its builder's while it is claimed, or its reviewer's while a submitted item is reserved for review; otherwise it is `null`. `stage` is the item's status, except `accepted` for a verified item and `merged` once a merge is recorded. `since` is when the item entered that stage: edits, review reservations and renewals do not restart it, and a lapsed claim's stage starts at its recorded lease deadline. `counts` has the item's number of `verdicts` and `facts`. `verdict` keeps only the latest verdict's `decision` and `reason`, or is `null`; for an item sent back and not verified, it also keeps `note`, the first nonblank line of that reject's note. The state also has `moveCounts`, the board's lifecycle moves keyed `from>to:verb`, as the view's lifecycle drawing counts them.
 
-`GET /api/v1/boards/:board/items/:id` returns `{item}`: the item's `id` and every field its summary leaves out, which are `owner`, `reviewer`, `reviewUntil`, `verifiedBy`, `criterion`, `brief`, `commit`, `merged`, `history`, `check`, `checkBaseline` when recorded, `verdicts`, `thread`, and the latest `verdict` in full. Laid over its summary, the detail is the item exactly as the full state carries it. An unknown id returns `NO_ITEM` with HTTP 404; a malformed id is refused with HTTP 400. `state?detail=full` returns every item in full, summary fields included, and `detail=summary` returns summaries; any other value is refused with `BAD_REQUEST`. Without `detail`, a server answers with its own default, `stateDetail: "summary"` or `"full"`: `serveApi`, which `pullboard serve` runs, defaults to summaries, and `createLocalApiHandler`, which a page's own server builds, defaults to full items until that page reads summaries. `GET /api/v1/boards/:board/items?q=text` returns `{ids}`, in state order, for the items whose `#id`, title, lane, spec ids or criterion contain the trimmed text, ignoring case, as the view's search matches; empty text matches every item. An adapter without these reads, such as the relay, whose state carries every item in full, returns `ITEM_NOT_AVAILABLE`.
+`GET /api/v1/boards/:board/items/:id` returns `{item}`: the item's `id` and every field its summary leaves out, which are `owner`, `reviewer`, `reviewUntil`, `verifiedBy`, `criterion`, `brief`, `commit`, `merged`, `history`, `check`, `checkBaseline` when recorded, `verdicts`, `thread`, and the latest `verdict` in full. Laid over its summary, the detail is the item exactly as the full state carries it. An unknown id returns `NO_ITEM` with HTTP 404; a malformed id is refused with HTTP 400. `state?detail=full` returns every item in full, summary fields included, and `detail=summary` returns summaries; any other value is refused with `BAD_REQUEST`. Without `detail`, a server answers with its own default, `stateDetail: "summary"` or `"full"`: `serveApi`, which `pullboard serve` runs, defaults to summaries, and `createLocalApiHandler`, which a page's own server builds, defaults to full items until that page reads summaries. `GET /api/v1/boards/:board/items?q=text` returns `{ids}`, in state order, for the items whose `#id`, title, lane, spec ids or criterion contain the trimmed text, ignoring case, as the view's search matches; empty text matches every item. An adapter without these reads returns `ITEM_NOT_AVAILABLE`. The paired API2 phone transport implements these reads by decrypting addressed pages; its initial state is bounded and full detail follows separately.
 
 Every state names the event it reflects as `sequence`, the latest event id when it was read. `GET /api/v1/boards/:board/state?since=N` answers `{since, sequence, eventLogVersion, delta}`, where `sequence` is the new latest and `delta` brings the summary state this server sent at event N up to date: `delta.replace` holds whole fields that changed, `delta.merge` holds keyed lists by field, as `{key, set, ids?}`, with only their changed entries and, when entries came, went or moved, the full key order, and `delta.remove` names fields that went away. Items merge by `id`, `shouts` and `asked` by `shout_id`, `events` by `event_id`, `agents` by `agent_id`, `spec` and `practice` rows by `id`, and `milestones` by `name`. `unseen`, `proofStats` and the Needs-you lists, `decisions`, `holds`, `requests` and `personRequests`, always come whole. Apply a delta without recomputing anything: copy `replace` over the state, delete each `remove` field, and for each `merge` field, overlay `set` on the entries by `key` and order them by `ids`, or keep their order. `applyStateDelta(state, delta)` in `src/api-http.js` does exactly this, and the result equals a fresh snapshot at `sequence`. A delta also carries changes that wrote no event, such as a spec or doctrine edit, so its `sequence` may equal N. N alone cannot say which of the snapshots sent at N a client holds, so after such a change a later delta from the same N may repeat it; it still applies exactly.
 
@@ -460,6 +472,33 @@ HTTP refusals use the same versioned error envelope above: 400 for malformed cal
 The initial command output names `.pullboard/signers`, `.pullboard/first-commit` and `.pullboard/signers.initial` for staging and committing. Later sign-offs and signed signer-list changes are recorded in `.pullboard/signoffs.jsonl`; commit that file with the corresponding signer-list change.
 
 Every signed row and signer-list change binds the initial signer-list hash in its canonical text. Rewriting `.pullboard/signers.initial`, or relabelling that hash in earlier receipts, invalidates those receipts.
+
+## Paged relay snapshots
+
+Relay API2 preserves the `version: 1` response envelope, executable moves and
+seal envelope. `GET /api/v2` advertises sealed-page support. The authenticated
+`/api/v2/boards/:board/state`, `/uploads`, `/uploads/:id/objects/:hash`,
+`/uploads/:id/publish`, `/objects/:hash`, and `/storage` routes exchange bounded
+opaque objects and server-derived storage totals; their full transport contract
+is in [relay/README.md](../relay/README.md#paged-snapshots-and-account-storage).
+
+The phone installs a current-state presentation under 900,000 bytes before
+streaming complete history. It uses the same lifecycle `stage`, `since`, claim,
+counts and summary projection as the local API. Full item details, search and old
+shout addresses can read selected encrypted pages before the complete stream.
+The transport's `historyProgress(boardId)` returns `{loaded, total, complete,
+sequence}` and optional `error`. Completion means all declared native rows and
+item details arrived for that checkpoint, not merely that current lists rendered.
+A newer current checkpoint can appear while an older pinned stream completes;
+historical completion never rewinds the live cursor.
+
+Account quota responses use `ACCOUNT_STORAGE_LIMIT` with HTTP 507 and
+`error.storage: {account: {id, login}, usedBytes, limitBytes}`. The same validated
+fields apply to API1 and API2 refusals. `GET /api/v2/boards/:board/storage` returns
+`{version: 1, apiVersion: 2, storage, warning?}` without downloading the snapshot.
+All routes retain current authorization and credential-derived sender checks.
+An API1 request for a paged head fails explicitly with `RELAY_API_VERSION` and
+upgrade guidance; it never returns an older or partial image.
 
 ## Sealed person requests
 

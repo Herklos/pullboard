@@ -1,4 +1,5 @@
-/** A paired browser seals person intent; only native Pullboard executes it [H12,H16,B26]. */
+/** A paired browser seals person intent; only native Pullboard executes it [H12,H16,B26]. These cases time and trace API1
+ * snapshot PUTs, so they run on the legacy wire (#903); API2 person moves are proven in relay-person-actions.test.js. */
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -10,7 +11,8 @@ import { gunzipSync } from 'node:zlib';
 import { decodeBoardKey, seal, unseal } from '../src/seal.js';
 import { ENGINE_VERSION } from '../src/machine.js';
 import { findChromeExecutable, relayWorkBudgetMs, startChrome } from './relay-browser-fixture.js';
-import { assertSnapshotCheckpoints, cliChildDeadlineMs, relayClientFixture } from './relay-client-fixture.js';
+import { assertSnapshotCheckpoints, cliChildDeadlineMs } from './relay-client-fixture.js';
+import { legacyRelayClientFixture as relayClientFixture } from './relay-client-fixture.js';
 
 const CHROME_START_BUDGET_MS = relayWorkBudgetMs(2);
 const CLI_SETUP_MARGIN_MS = relayWorkBudgetMs(0);
@@ -25,7 +27,7 @@ const APPROVAL_FLOW_CLI_CHILDREN = [
   { command: ['relay', 'on'], snapshotUploads: 1 },
   { command: ['status'], snapshotUploads: 4 },
   { command: ['export'], snapshotUploads: 0 },
-  { command: ['resume'], snapshotUploads: 0 },
+  { command: ['resume'], snapshotUploads: 1 }, // The first health scan publishes the fixture's unserved work findings.
   { command: ['spec', 'apply'], snapshotUploads: 1 },
   { command: ['answer'], snapshotUploads: 1 },
   { command: ['status'], snapshotUploads: 3 },
@@ -40,7 +42,7 @@ const DECLINE_FLOW_CLI_CHILDREN = [
   { command: ['status'], snapshotUploads: 4 },
   { command: ['answer'], snapshotUploads: 1 },
   { command: ['answer'], snapshotUploads: 1 },
-  { command: ['resume'], snapshotUploads: 0 },
+  { command: ['resume'], snapshotUploads: 1 }, // The first health scan publishes the fixture's unserved work findings.
 ];
 
 /** Record the real phase and wait budget for a late-snapshot failure without changing either wait. */

@@ -227,7 +227,7 @@ test('an agent in its worktree cannot mint a relay token [H2,V1,E3,E5,P6]', asyn
     assert.ok(failed, 'the registration reached the relay');
     const body = JSON.parse(failed.request.toString('utf8'));
     const state = link(box);
-    const snapshot = await call(box.origin, state.token, 'GET', `/api/v1/boards/${state.board}/state`);
+    const snapshot = await call(box.origin, state.token, 'GET', `/api/v2/boards/${state.board}/state`);
     const events = await call(box.origin, state.token, 'GET', `/api/v1/boards/${state.board}/events?after=${snapshot.document.state.sequence}`);
     assert.equal(events.status, 200, JSON.stringify(events.document.error ?? {}));
     assert.ok(events.document.events.some((event) => event.registration?.target === body.registration.target), 'the move and its receipt were published');

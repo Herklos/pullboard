@@ -1,9 +1,11 @@
-/** A paired browser retries only saved ciphertext after an interrupted person request [H12,H16,H17]. */
+/** A paired browser retries only saved ciphertext after an interrupted person request [H12,H16,H17]. The case traces
+ * API1 snapshot PUTs, so it runs on the legacy wire (#903). */
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { findChromeExecutable, relayWorkBudgetMs, startChrome } from './relay-browser-fixture.js';
-import { assertSnapshotCheckpoints, cliChildDeadlineMs, relayClientFixture } from './relay-client-fixture.js';
+import { assertSnapshotCheckpoints, cliChildDeadlineMs } from './relay-client-fixture.js';
+import { legacyRelayClientFixture as relayClientFixture } from './relay-client-fixture.js';
 
 /** Install only the private fixture's person cookie in the real browser. */
 async function signIn(chrome, box) {
