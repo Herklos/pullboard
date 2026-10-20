@@ -360,3 +360,17 @@ test("the board's own captured-output form is accepted [C7,V4]", () => {
   assert.equal(maskRefusal(`out=$(node bin/run-tests.js test/x.test.js 2>&1); printf "%s\\n" "$out"; printf "%s\\n" "$out" | grep -Eq "^# fail 0$" && printf "%s\\n" "$out" | grep -Eq "ok"`), null);
   assert.equal(maskRefusal(`out=$(node -e "process.exit(1)" | tail -5); echo "$out" | grep -q ok`), null, 'a pipe inside the capture is not a check pipeline');
 });
+
+test('pipefail counts only when its set always runs and is still on [C7,V4]', () => {
+  const masked = `node -e "console.log('proof-red'); process.exit(7)" | tail -n1`;
+  // /bin/sh never runs this set, since false fails first, so the pipe still exits 0 (#812 review).
+  assert.equal(maskRefusal(`false && set -o pipefail; ${masked}`), 'CHECK_MASKS_EXIT');
+  assert.equal(maskRefusal(`set -o pipefail; set +o pipefail; ${masked}`), 'CHECK_MASKS_EXIT', 'a later set +o pipefail turns it off');
+  assert.equal(maskRefusal(`(set -o pipefail); ${masked}`), 'CHECK_MASKS_EXIT', 'a subshell keeps its pipefail to itself');
+  assert.equal(maskRefusal(`set -euo pipefail\n${masked}`), null, 'a set that always runs keeps the producer exit');
+});
+
+test('a pipe inside a shell comment is not a pipeline [C7,V4]', () => {
+  assert.equal(maskRefusal('printf proof-green # example only: false | tail'), null);
+  assert.equal(maskRefusal('echo a#b | tail -n1'), 'CHECK_MASKS_EXIT', 'a # inside a word starts no comment');
+});
