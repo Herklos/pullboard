@@ -84,7 +84,10 @@ import {
 } from './seal.js';
 import { terminalQr } from './qr.js';
 import { locked } from './relay-lock.js';
-import { baselineNotAccepted, transientRelayFailure } from './relay-move-fallback.js';
+import {
+  baselineNotAccepted,
+  transientRelayFailure,
+} from './relay-move-fallback.js';
 import { Refused } from './refused.js';
 import { refusalFromReceipt } from './recorded-refusal.js';
 import { relaySenderProblem } from './relay-sender.js';

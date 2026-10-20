@@ -1,6 +1,16 @@
 /** The per-board link lock: one worktree sends at a time, and a sibling waits instead of failing (#919). */
-import { lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import {
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import {
+  dirname,
+  join,
+} from 'node:path';
 import { Refused } from './refused.js';
 
 /** Longest wait for a sibling worktree's relay send, and how often the waiting command says so. */
