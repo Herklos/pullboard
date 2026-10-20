@@ -17,7 +17,6 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
-import { once } from 'node:events';
 import { createServer } from 'node:http';
 import { join, dirname, resolve, basename, delimiter } from 'node:path';
 import { after, test } from 'node:test';
@@ -39,12 +38,65 @@ const covered = new Set();
 const coveredRoots = new Set();
 const catalogCases = [];
 
+// Bound CLI/server/watch processes, while the existing Git fixtures remain synchronous.
+let childSlots = 3;
+let closingCatalog = false;
+const childWaiters = [];
+const serverChildren = new Map();
+
+/** Acquire one of three child slots; handing it directly to a waiter keeps admission fair. */
+async function catalogChildSlot() {
+  if (closingCatalog) throw new Error('the catalog fixture is closing');
+  if (childSlots) childSlots -= 1;
+  else await new Promise((resolve, reject) => childWaiters.push({ resolve, reject }));
+  let held = true;
+  return () => {
+    if (!held) return;
+    held = false;
+    const next = childWaiters.shift();
+    if (next) next.resolve();
+    else childSlots += 1;
+  };
+}
+
+/** Keep an actual CLI child in its slot until its result includes the close event. */
+async function withCatalogChild(run) {
+  const release = await catalogChildSlot();
+  try {
+    if (closingCatalog) throw new Error('the catalog fixture is closing');
+    return await run();
+  }
+  finally { release(); }
+}
+
+/** Spawn synchronously after admission so callers install listeners before the next event-loop turn. */
+function spawnCatalogChild(release, command, args, options) {
+  let child;
+  try {
+    if (closingCatalog) throw new Error('the catalog fixture is closing');
+    child = spawn(command, args, options);
+  }
+  catch (error) { release(); throw error; }
+  const closed = new Promise(resolve => child.once('close', (code, signal) => {
+    serverChildren.delete(child);
+    release();
+    resolve([code, signal]);
+  }));
+  serverChildren.set(child, closed);
+  return { child, closed };
+}
+
+
 /** Queue independent real-repository cases; the final catalog test waits for all of them. */
 function catalogCase(name, run) {
   catalogCases.push({ name, run });
 }
 
 after(async () => {
+  closingCatalog = true;
+  for (const waiter of childWaiters.splice(0)) waiter.reject(new Error('the catalog fixture is closing'));
+  for (const child of serverChildren.keys()) child.kill('SIGKILL');
+  await Promise.all(serverChildren.values());
   await cleanupFixtureChildren();
   for (const dir of TEMP_DIRS) rmSync(dir, { recursive: true, force: true });
 });
@@ -90,7 +142,7 @@ function sandbox() {
   delete env.PULLBOARD_STARTUP_TEST_RELEASE_FILE;
   for (const marker of SSH_SHELL_MARKERS) delete env[marker];
   const git = (cwd, ...args) => runFixtureGit(args, { cwd, env, encoding: 'utf8', stdio: 'pipe' });
-  const run = (cwd, ...args) => runFixtureChildAsync(process.execPath, [BIN, ...args], { cwd, env, encoding: 'utf8' });
+  const run = (cwd, ...args) => withCatalogChild(() => runFixtureChildAsync(process.execPath, [BIN, ...args], { cwd, env, encoding: 'utf8' }));
   return { dir, env, git, run };
 }
 
@@ -492,10 +544,10 @@ catalogCase('[A1] refusals are one JSON document with exact public error fields'
 catalogCase('[A1] long-running servers flush one JSON document before shutdown', async (t) => {
   for (const command of ['view', 'serve']) {
     const box = await project();
-    t.after(() => rmSync(box.dir, { recursive: true, force: true }));
     const args = [BIN, command, ...(command === 'view' ? ['--no-open'] : []), '--port', '0', '--json'];
     const startedAt = performance.now();
-    const child = spawn(process.execPath, args, { cwd: box.repo,
+    const release = await catalogChildSlot();
+    const { child, closed } = spawnCatalogChild(release, process.execPath, args, { cwd: box.repo,
       env: command === 'view' ? { ...box.env, PULLBOARD_VIEW_FOREGROUND: '1' } : box.env,
       stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
@@ -504,10 +556,10 @@ catalogCase('[A1] long-running servers flush one JSON document before shutdown',
     child.stderr.setEncoding('utf8');
     child.stdout.on('data', (chunk) => { stdout += chunk; });
     child.stderr.on('data', (chunk) => { stderr += chunk; });
-    const closed = once(child, 'close');
     t.after(async () => {
       if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');
       await closed;
+      rmSync(box.dir, { recursive: true, force: true });
     });
     const ready = new Promise((resolveReady, rejectReady) => {
       let settled = false;
@@ -548,12 +600,12 @@ catalogCase('[A1] long-running servers flush one JSON document before shutdown',
 
 catalogCase('[A1,A2] watch --json prints one catalog document per event line', async (t) => {
   const box = await project();
-  t.after(() => rmSync(box.dir, { recursive: true, force: true }));
-  const child = spawn(process.execPath, [BIN, 'watch', '--json', '--kinds', 'shout'], { cwd: box.repo, env: box.env, stdio: ['ignore', 'pipe', 'pipe'] });
-  const closed = once(child, 'close');
+  const release = await catalogChildSlot();
+  const { child, closed } = spawnCatalogChild(release, process.execPath, [BIN, 'watch', '--json', '--kinds', 'shout'], { cwd: box.repo, env: box.env, stdio: ['ignore', 'pipe', 'pipe'] });
   t.after(async () => {
     if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
     await closed;
+    rmSync(box.dir, { recursive: true, force: true });
   });
   let stdout = '';
   let stderr = '';
@@ -610,11 +662,7 @@ catalogCase('[A1,A10] view exports a static folder through its JSON variant', as
 });
 
 
-test('[A1] every catalog command and subcommand has a real CLI exercise', { concurrency: 3 }, async (t) => {
-  // Every private scenario finishes before the final catalog and root coverage assertions.
-  const completed = await Promise.allSettled(catalogCases.map(({ name, run }) => t.test(name, run)));
-  for (const result of completed) if (result.status === 'rejected') throw result.reason;
-
+catalogCase('[A1] catalog commands keep their real repository exercises', async () => {
   const source = await project();
   const target = await project();
   const document = await json(source, source.repo, 'export');
@@ -690,7 +738,7 @@ test('[A1] every catalog command and subcommand has a real CLI exercise', { conc
   await json(source, source.repo, 'spec', ['apply'], 'apply');
 
   /** Exercise the agent-only takeover with a private explicit session, leaving later terminal calls markerless. */
-  const sessionSource = { ...source, run: (cwd, ...args) => runFixtureChild(process.execPath, [BIN, ...args], { cwd, env: { ...source.env, CODEX_SESSION_ID: 'api-catalog-session' }, encoding: 'utf8' }) };
+  const sessionSource = { ...source, run: (cwd, ...args) => withCatalogChild(() => runFixtureChildAsync(process.execPath, [BIN, ...args], { cwd, env: { ...source.env, CODEX_SESSION_ID: 'api-catalog-session' }, encoding: 'utf8' })) };
   await json(sessionSource, source.repo, 'takeover');
   const fitBlueprint = await json(source, source.repo, 'blueprint', ['add', 'web-app'], 'add');
   const fitTarget = fitBlueprint.rows[0].id;
@@ -704,6 +752,13 @@ test('[A1] every catalog command and subcommand has a real CLI exercise', { conc
   assert.deepEqual(runner.runner, { host: 'fixture-runner', slots: 2, browser: 1 });
   const projectGate = JSON.parse(readFileSync(join(source.repo, 'pullboard.json'), 'utf8')).gate;
   assert.equal((await json(source, source.repo, 'gate', ['set', projectGate], 'set')).gate, projectGate);
+});
+
+test('[A1] every catalog command and subcommand has a real CLI exercise', { concurrency: true }, async (t) => {
+  // Every private scenario finishes before the final catalog and root coverage assertions.
+  const completed = await Promise.allSettled(catalogCases.map(({ name, run }) => t.test(name, run)));
+  for (const result of completed) if (result.status === 'rejected') throw result.reason;
+
   const missing = Object.keys(JSON_SHAPES.commands).filter((key) => !covered.has(key));
   assert.deepEqual(missing, [], `add real-repo invocations for undocumented coverage gaps: ${missing.join(', ')}`);
   assert.deepEqual([...coveredRoots].sort(), resultCommands(), 'every actual root/factory command has an invocation');
