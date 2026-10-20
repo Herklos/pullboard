@@ -194,7 +194,7 @@ test('health names each stuck cause with its next step and owner [A6]', async (t
   };
   expect(`CLAIM_LAPSED:item:${lapsed}`, { cause: 'CLAIM_LAPSED', since: ago(2 * HOUR), role: 'builder', who: builders[0], next: `pullboard claim ${lapsed}`, why: builders[0] });
   expect(`REVIEW_LAPSED:item:${reviewLapsed}`, { cause: 'REVIEW_LAPSED', since: ago(2 * HOUR), role: 'reviewer', who: null, next: `pullboard next --verify ${reviewLapsed}`, why: reviewer });
-  expect(`NO_REVIEWER:item:${unreviewed}`, { cause: 'NO_REVIEWER', since: ago(2 * HOUR), role: 'coordinator', who: 'coordinator', next: 'a reviewer from the review lane', why: builders[2] });
+  expect(`NO_REVIEWER:item:${unreviewed}`, { cause: 'NO_REVIEWER', since: ago(2 * HOUR), role: 'coordinator', who: 'coordinator', next: 'reserve a reviewer outside', why: builders[2] });
   const conflictFinding = expect(`UNLANDED_CONFLICT:item:${conflict}`, { cause: 'UNLANDED_CONFLICT', since: ago(2 * HOUR), role: 'builder', who: builders[3], next: 'merge main into its branch', why: ['conflicts with main', 'a.txt'] });
   assert.deepEqual(conflictFinding.detail.files, ['a.txt'], 'the conflict names its files');
   expect(`UNLANDED_READY:item:${ready}`, { cause: 'UNLANDED_READY', since: ago(2 * HOUR), role: 'coordinator', who: 'coordinator', next: 'pullboard land', why: 'merges cleanly onto main' });
@@ -280,14 +280,14 @@ test('health on a healthy board says nothing is stuck [A6]', async (t) => {
 });
 
 test('a submitted item with no reviewer goes to the coordinator, not its builder [A6]', async (t) => {
-  // The builder must never be named the owner of their own review, and the next step must send
-  // the work to a reviewer outside the builder's session (#910).
+  // A board with no review lane still gets a command the real shout path accepts: it goes to the
+  // coordinator, and the builder is never the owner of their own review (#910).
   const box = repo(t);
+  writeFileSync(join(box.root, 'pullboard.json'), `${JSON.stringify({ gate: 'true', lanes: { core: { owns: ['src/'] } } }, null, 2)}\n`);
   const commit = box.git(['rev-parse', 'HEAD']);
   const { board, at } = boardAt(box);
   store.register(board, { lane: 'coordinator', path: box.root });
   const builder = store.register(board, { lane: 'core', path: join(box.dir, 'core-1') });
-  store.register(board, { lane: 'review', path: join(box.dir, 'review-1') });
   at(3 * HOUR);
   const waiting = store.addItem(board, { by: 'coordinator', lane: 'core', title: 'Waiting review' });
   store.claim(board, waiting, { agentId: builder, lane: 'core', leaseMs: 2 * HOUR, freeze });
@@ -300,11 +300,22 @@ test('a submitted item with no reviewer goes to the coordinator, not its builder
   assert.ok(entry, `health lists the unreviewed submission; found ${result.stdout}`);
   assert.notEqual(entry.owner.who, builder, 'the builder is never the owner of their own review');
   assert.deepEqual(entry.owner, { role: 'coordinator', who: 'coordinator' }, 'the coordinator owns the missing reviewer');
-  assert.ok(entry.next.includes('review lane') && entry.next.includes('outside'), `the next step asks for an outside reviewer: ${entry.next}`);
+  assert.ok(entry.next.includes(`reserve a reviewer outside ${builder}'s controller and session`), `the next step names a reviewer outside the builder: ${entry.next}`);
   assert.ok(!entry.next.includes('pullboard next --verify'), `the next step never sends the builder to verify: ${entry.next}`);
   assert.ok(!entry.command.includes('pullboard next --verify'), `the command never sends the builder to verify: ${entry.command}`);
+
+  // The generated command runs through the real shout path on this board, reaching every agent.
+  const argv = entry.command.match(/"[^"]*"|\S+/gu).map((token) => token.replace(/^"|"$/gu, ''));
+  assert.equal(argv[0], 'pullboard', entry.command);
+  const shouted = await cli(box.root, argv.slice(1));
+  assert.equal(shouted.code, 0, `the generated command is accepted: ${shouted.stderr}${shouted.stdout}`);
+  const reread = store.openBoard(box.file, { now: () => new Date(NOW) });
+  try {
+    const sent = store.allShouts(reread).filter((shout) => shout.shout_to === 'all').map((shout) => shout.shout_text);
+    assert.ok(sent.some((text) => text.includes(`#${waiting} needs a reviewer outside ${builder}'s controller and session`)), `every agent hears the request: ${sent.join(' | ')}`);
+  } finally { store.closeBoard(reread); }
   const text = await cli(box.root, ['health']);
-  assert.ok(text.stdout.includes('Next, the coordinator: get a reviewer from the review lane'), `the text names the coordinator: ${text.stdout}`);
+  assert.ok(text.stdout.includes('Next, the coordinator: reserve a reviewer outside'), `the text names the coordinator: ${text.stdout}`);
 });
 
 test('item history survives garbage collection mid-read [A6]', () => {

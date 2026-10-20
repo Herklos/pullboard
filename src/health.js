@@ -133,8 +133,8 @@ export function healthReport({ db, root, config, now }) {
           since: submittedAt, now: at,
           title: 'no reviewer',
           why: `${item.item_built_by} submitted ${short(item.item_commit)} and nobody has reserved its review`,
-          next: `get a reviewer from the review lane who is outside ${item.item_built_by}'s controller and session`,
-          command: `pullboard shout review "#${id} needs a reviewer outside ${item.item_built_by}'s session"`,
+          next: `reserve a reviewer outside ${item.item_built_by}'s controller and session for the review`,
+          command: `pullboard shout all "#${id} needs a reviewer outside ${item.item_built_by}'s controller and session"`,
           owner: { role: 'coordinator', who: COORDINATOR }, detail: { builder: item.item_built_by, commit: item.item_commit },
         }));
       }
