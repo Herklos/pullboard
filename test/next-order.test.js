@@ -425,3 +425,43 @@ test('milestone order refuses invalid membership and unauthenticated ranking [N2
   assert.equal(refusal.error.code, 'RELAY_SENDER_MISMATCH');
   assert.equal(JSON.stringify(store.milestones(board)), original);
 });
+
+test('next in a fresh unbound checkout of a seated session claims nothing and names the seat [N2,B13]', (t) => {
+  const box = crossLaneFixture(t);
+  const web = box.json(box.runAs(box.session, box.web, 'join', 'web', '--model', 'Cross-lane test', '--json'));
+  const item = box.add('web', 'Web work for the seated checkout');
+  const fresh = join(box.dir, 'fresh-helper');
+  box.git(box.repo, 'worktree', 'add', '-q', '--detach', fresh, 'main');
+  const next = box.runAs(box.session, fresh, 'next', '--build', '--json');
+  assert.notEqual(next.code, 0, 'an unbound checkout never claims for a seat bound elsewhere');
+  const error = JSON.parse(next.out).error;
+  assert.match(error.message, new RegExp(`${web.agent}.*${box.web.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}`, 'u'), 'it names the seat and its checkout');
+  assert.match(`${error.message} ${error.next ?? ''}`, /pullboard join <lane>|pullboard join web/u, 'and the join command for this checkout');
+  const board = store.openBoard(join(box.repo, '.git', 'pullboard', 'board.sqlite'));
+  try { assert.equal(store.getItem(board, item).item_status, 'open', 'nothing was claimed'); }
+  finally { store.closeBoard(board); }
+});
+
+test('a cross-checkout claim leads with its seat and other checkouts cannot act on it [N2,B13]', (t) => {
+  const box = crossLaneFixture(t);
+  const web = box.json(box.runAs(box.session, box.web, 'join', 'web', '--model', 'Cross-lane test', '--json'));
+  const api = box.seat('owned-api', 'api', box.session);
+  const later = box.add('web', 'Later web work');
+  const first = box.add('api', 'Earlier API release');
+  box.milestone('first', first);
+  box.milestone('later', later);
+  const next = box.runAs(box.session, box.web, 'next', '--build');
+  assert.equal(next.code, 0, next.out + next.err);
+  const lines = next.out.trim().split('\n');
+  assert.match(lines[0], new RegExp(`^${api.agent} .*${api.root.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}`, 'u'), `the output leads with the holding seat and its checkout: ${lines[0]}`);
+  assert.ok(lines.slice(0, 3).some((line) => line.includes(`cd '${api.root}'`) || line.includes(`cd ${api.root}`)), 'and the command to continue there');
+  for (const args of [['check', String(first), '--yes'], ['submit', String(first)], ['release', String(first)]]) {
+    const refused = box.runAs(box.session, box.web, ...args, '--json');
+    assert.notEqual(refused.code, 0, `${args[0]} from another checkout is refused`);
+    const message = JSON.parse(refused.out).error.message;
+    assert.ok(message.includes(api.agent) && message.includes(api.root), `${args[0]} names the holding seat and its path: ${message}`);
+  }
+  const again = box.runAs(box.session, box.web, 'next', '--build');
+  assert.doesNotMatch(again.out, /you hold #/u, 'a checkout is never told it holds an item another seat holds');
+  assert.notEqual(web.agent, api.agent);
+});
