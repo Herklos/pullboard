@@ -251,6 +251,9 @@ const ADD_EXAMPLE = ['pullboard lane add web --owns src/web', 'pullboard spec dr
   'pullboard add web "Upload page" --specs G1'].join('\n');
 
 const HELP_EXAMPLES = {
+  'spec approve': 'pullboard spec approve G1',
+  'spec decline': 'pullboard spec decline G1 --reason "The requirement needs revision"',
+  'sentinel propose': 'pullboard sentinel propose "Run the checks" --check "npm test" --every hourly --owner web',
   tour: 'pullboard tour', init: 'pullboard init --blueprint web-app', worktree: 'pullboard worktree web --model "my-model"',
   join: 'pullboard join web --model "my-model"', resume: 'pullboard resume',
   add: ADD_EXAMPLE, list: 'pullboard list web', show: 'pullboard show 12',
@@ -303,6 +306,8 @@ const HELP_ALIASES = {
   'spec check': { usage: 'pullboard spec check', source: 'spec check' },
   'spec view': { usage: 'pullboard spec view [--out file]', source: 'spec view' },
   'spec show': { usage: 'pullboard spec show <id>', source: 'spec show', onlyFlags: [] },
+  'spec approve': { usage: 'pullboard spec approve <ids>', source: 'spec approve', onlyFlags: [] },
+  'spec decline': { usage: 'pullboard spec decline <ids> --reason "why"', source: 'spec approve', onlyFlags: ['--reason'] },
   'spec unmet': { usage: 'pullboard spec unmet [--must]', source: 'spec show', onlyFlags: ['--must'] },
   'spec signoff': { usage: 'pullboard spec signoff <ids> [--by <principal>] [--note "..."] [--note-file <file>]', source: 'spec show', onlyFlags: ['--by', '--note', '--note-file'], extraFlags: ['--note-file <file>'] },
   'spec signers': { usage: 'pullboard spec signers add [--key <path>] [--by <principal>]', source: 'spec signers add' },
@@ -488,9 +493,8 @@ export function commandPhrases(help = HELP) {
   for (const line of help.all.split('\n')) {
     if (line.startsWith('  pullboard ')) for (const phrase of usagePhrases(line.trim())) phrases.add(phrase);
   }
-  for (const form of SETTING_FORMS) phrases.add(`settings ${form}`);
   for (const [name, declaration] of Object.entries(help.commands)) {
-    if (/^[a-z][a-z0-9-]*(?: [a-z][a-z0-9-]*)*$/u.test(name)) phrases.add(name);
+    phrases.add(name);
     for (const usage of declaration.usages) for (const phrase of usagePhrases(usage)) phrases.add(phrase);
   }
   return [...phrases].sort((left, right) => right.length - left.length || left.localeCompare(right));
