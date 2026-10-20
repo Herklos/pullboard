@@ -15,7 +15,8 @@ import { readRemoteGateHolders, waitForCondition } from './runner-fixture-state.
  * transport drops (#888: a forwarded write then waited forever for a drain from a destroyed stdout), and `epermOnce`
  * arms after the child's TERM handler starts, then makes the worker's next real group signal answer EPERM (#945).
  * The marker is a fixture phase, not an OS-dependent second signal to the same group: the worker's fresh-census retry
- * (#888) must still drain its owned groups and release its lease.
+ * (#888) must still drain its owned groups and release its lease. The launcher handles TERM without exiting until a
+ * real TERM arrives after the refusal, so Linux's launcher-first ordering also leaves a live group to signal.
  * `lateGroup` starts the child in the launcher's group and moves it to its own a second later, so the worker's census
  * always sees it first in the old group, as it did under load when a detached child had not yet called setsid (#888).
  */
@@ -104,6 +105,10 @@ const child = ${lateGroup
     : "spawn(process.execPath, [require.resolve('./remote-detached-child.js'), ...process.argv.slice(2)], {\n  detached: true, stdio: 'ignore', env: process.env,\n});"}
 child.unref();
 ${chatty ? "setInterval(() => process.stdout.write('launcher output\\n'), 20);" : 'setInterval(() => {}, 1_000);'}
+${epermOnce ? `// Keep a live group until the worker delivers TERM after its forced refusal, without a timed linger.
+process.on('SIGTERM', () => {
+  if (require('node:fs').existsSync(${JSON.stringify(epermAnswered)})) process.exit(0);
+});` : ''}
 `);
   writeFileSync(join(repo, 'remote-detached-child.js'), `const { existsSync, writeFileSync } = require('node:fs');
 const [ready, pidFile, term, release, gone] = process.argv.slice(2);
