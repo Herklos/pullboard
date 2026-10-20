@@ -232,6 +232,7 @@ globalThis.fetch = function tracedFetch(input, init) {
   let stateReadHold = null;
   let stateReadStarted = 0;
   let refuseSnapshotWrites = false;
+  let stallApi = false;
   let rejectSnapshotWrites = null;
   let rejectedStateReads = null;
   let legacySnapshotApi = false;
@@ -362,6 +363,7 @@ globalThis.fetch = function tracedFetch(input, init) {
       request: Buffer.concat(requestChunks), response: Buffer.concat(responseChunks) }));
     calls.push({ method: req.method, path: req.url, accept: req.headers.accept ?? '', engine: req.headers['x-pullboard-engine'],
       browser: String(req.headers.cookie ?? '').includes('pb_session=') });
+    if (stallApi && (req.url ?? '').startsWith('/api/')) { request.resume(); await new Promise(() => {}); }
     if (legacySnapshotApi && req.method === 'GET' && req.url === '/api/v2') {
       res.writeHead(legacySnapshotApi === 'bad-route' ? 400 : 200, { 'content-type': 'application/json' });
       res.end(JSON.stringify(legacySnapshotApi === 'bad-route'
@@ -740,6 +742,8 @@ globalThis.fetch = function tracedFetch(input, init) {
     overrideDelete(value) { override = value; },
     failTokenMints(count) { mintFailures = count; },
     refuseSnapshotWrites(value) { refuseSnapshotWrites = value; },
+    /** Leave every board API request unanswered until its client times out, like an overloaded relay. */
+    stallApi(value = true) { stallApi = value; },
     /** Restart only the private service with a changed operator quota, retaining real journals and credentials. */
     setStorageQuota(bytes) {
       assert.ok(Number.isSafeInteger(bytes) && bytes > 0);
