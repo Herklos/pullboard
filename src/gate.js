@@ -531,6 +531,11 @@ export async function withGateSlot(root, action, { landing = false, itemCheck = 
   }
 }
 
+/** Carry a failure observer's pinned main on the lease, so a remote runner's receipt names the main this run used (#925). */
+export function pinRunMain(lease, observer) {
+  if (typeof observer?.main === 'string') lease.runMetadata = { ...(lease.runMetadata ?? {}), main: observer.main };
+}
+
 /**
  * Run the configured gate in the repo, unless this exact tree already passed. Its output, both
  * streams in order, is kept whole in the git dir and returned for a digest.
@@ -550,6 +555,7 @@ export async function runGate(root, config, { trustStamp = true, onWait, landing
   }
   if (trustStamp && isStampedGreen(root)) return { isGreen: true, isCached: true, output: '', seconds: 0, log: '' };
   return await withGateSlot(root, async (lease) => {
+    pinRunMain(lease, onFailure);
     const run = fullGateRun(root, config, trustStamp, { waitMs: lease.waitMs, gateLease: lease, landing, stages, waivers });
     if (!run.isGreen && onFailure) await onFailure(run, { root, command: config.gate, lease });
     return run;
@@ -569,7 +575,9 @@ function fullGateRun(root, config, trustStamp = false, { waitMs = 0, log = gitPa
   if (!run.sandboxBlocked) recordGateRun(root, gateRunRecord(root, config, isGreen, gateLease));
   refuseSandboxBlocked(run);
   if (isGreen && before !== null && committedTree(root) === before) writeFileSync(gitPath(root, STAMP), `${before}\n`);
-  return { isGreen, isCached: false, output, seconds, log, profile, profilePath, ...(run.executionRoot ? { executionRoot: run.executionRoot } : {}), ...(stages ? { stages: run.stages } : {}) };
+  return { isGreen, isCached: false, output, seconds, log, profile, profilePath, ...(run.executionRoot ? { executionRoot: run.executionRoot } : {}),
+    // A remote run's host load and pinned main reach the flake diagnostics with it (#925).
+    ...(run.executionRunner ? { executionRunner: run.executionRunner, executionMain: run.executionMain ?? null, executionLoad: run.executionLoad ?? null } : {}), ...(stages ? { stages: run.stages } : {}) };
 }
 
 /**
@@ -646,6 +654,7 @@ export async function runSubmitGate(root, config, { base, trunk, changed, check,
     : (selection.full || !allowBrowserFreeChecks || await testsNeedBrowser(root, proofFiles, { onFallback: onBrowserFallback }));
   const browser = checkUsesBrowser || proofUsesBrowser;
   return await withGateSlot(root, async (lease) => {
+    pinRunMain(lease, onFailure);
     const startedAt = Date.now();
     const log = gitPath(root, 'pullboard-submit.log');
     const checkLog = `${log}.check.log`;

@@ -170,6 +170,17 @@ function privateProbe(root, commit, command, lease, policyCommit) {
     executionRoot: check.executionRoot, executionSourceUnchanged: check.executionSourceUnchanged, profilePath: check.profilePath, profile: check.profile };
 }
 
+/**
+ * Why a remote admission cannot be judged, or null when its receipt names both facts a local run measures: the
+ * execution host's load, and the pinned main this run used (#925). A missing fact is never guessed or replaced by a
+ * local measurement.
+ */
+function remoteGap(run, pin) {
+  if (!run.executionLoad) return 'The remote receipt does not carry the execution host\'s load; the red remains unclassified, never guessed.';
+  if (!pin.main || run.executionMain !== pin.main) return 'The remote receipt does not name the pinned main this run used; the red remains unclassified, never guessed.';
+  return null;
+}
+
 /** Report only a bounded code when diagnostic work fails; never replace the original gate's red result. */
 export async function observeNativeFailure(options) {
   const started = Date.now();
@@ -218,7 +229,7 @@ async function observeFailure({ root, config, pin, run, command, lease, kind, re
     invalidateGitFacts();
     const changed = run.executionSourceUnchanged === false || !pin.privateCheck && (headCommit(root) !== pin.head || headTree(root) !== pin.tree || !isClean(root) || untracked(root).length > 0);
     if (!pin.clean || changed) reason = 'The source is dirty or changed; no unchanged-head diagnostic is claimed.';
-    else if (lease?.runner) reason = 'This remote admission has no supported pinned-main comparison; no local substitute is run.';
+    else if (lease?.runner && remoteGap(run, pin)) reason = remoteGap(run, pin);
     else if (config.flakes?.rerun === true && prefix && named && failure.indent === 0) {
       const pattern = '^' + failure.name.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&') + '$';
       const selected = prefix + ' --test-name-pattern ' + word(pattern) + ' ' + word(failure.file);
@@ -243,7 +254,8 @@ async function observeFailure({ root, config, pin, run, command, lease, kind, re
     }
     const observation = { id, file: named ? failure.file : null, name: named ? failure.name : null, head: pin.head, tree: pin.tree, main: pin.main,
       kind, classification, reason, commandSha256: digest(command), at: observedAt, diagnosticMs: Date.now() - targetStarted,
-      load, original, paired, mainReceipt };
+      // A remote run records its own host's load; without one, the observer's sample stands and the reason says so.
+      load: lease?.runner && run.executionLoad ? run.executionLoad : load, original, paired, mainReceipt };
     writeFileSync(join(directory, 'observation.json'), JSON.stringify(observation, null, 2) + '\n', { flag: 'wx', mode: 0o600 });
     const manifest = Object.fromEntries(readdirSync(directory).map(file => [file, fileDigest(join(directory, file))]));
     writeFileSync(join(directory, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n', { flag: 'wx', mode: 0o600 });
