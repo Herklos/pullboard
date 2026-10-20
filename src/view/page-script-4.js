@@ -560,7 +560,7 @@ async function decideRow(kind, command, args, anchor) {
   if (snapshot || (readOnly && !requests)) return false;
   const requestMode = requests;
   const root = view.root, scroll = window.scrollY;
-  const ids = String(args.ids).split(/\s+/);
+  const ids = String(args.ids).split(/\\s+/);
   const prefix = kind + ':';
   const rows = [...$(kind + '-list').querySelectorAll('[data-row]')];
   const index = rows.findIndex((row) => row.dataset.row === prefix + ids[0]);
