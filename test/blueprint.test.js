@@ -1477,3 +1477,12 @@ test('an agent cannot approve its own fit proposal [S1,E3,B26]', () => {
   const approved = ok(box.run('spec', 'fit', 'approve', third.batch, '--json'), 'the person approves');
   assert.deepEqual(approved.decisions.map((record) => [record.id, record.decision]), [[W3, 'decline'], [W4, 'approve']]);
 });
+
+test('a Something else answer that names the stack fits a plain Node project [A8]', () => {
+  // A plain Node project is not one of A8's named frameworks, so Something else takes the stack's name (#916).
+  const { seat, key } = fitBoard();
+  const stack = 'Node.js with built-in node:http and node:test';
+  const proposal = ok(seat('blueprint', 'fit', 'web-app', key('Q1'), 'answer', '--text', stack, '--reason', 'a plain Node project with no web framework', '--json'), 'answer the stack question').proposals[0];
+  assert.equal(proposal.decision, 'answer');
+  assert.equal(proposal.text, `The app is built with: ${stack}. Choices: Next.js, SvelteKit, Rails, Something else.`);
+});
