@@ -712,6 +712,25 @@ function landingWorkerReceipts(path) {
   return complete.split(/\r?\n/u).filter(Boolean).map(line => JSON.parse(line));
 }
 
+/**
+ * True when a kill that failed with ESRCH or EPERM hit a process this run no longer owns: it is gone,
+ * a zombie, or its pid now belongs to another process. Under load a process can exit, or its pid be
+ * reused, between the census and the signal, and macOS answers EPERM for some of those (#850). Each
+ * such answer is logged; an EPERM for a process that is still ours is a real permission error.
+ */
+export function killAnsweredGone(error, owned, snapshot) {
+  if (error.code !== 'ESRCH' && error.code !== 'EPERM') return false;
+  if (error.code === 'EPERM') {
+    const fresh = snapshot();
+    // No census, no verdict: keep the identity and let the next sweep decide.
+    if (!fresh) return true;
+    const live = fresh.get(owned.pid);
+    if (sameProcessIdentity(live, owned) && !live.state.startsWith('Z')) return false;
+  }
+  process.stderr.write(`run-tests: kill ${owned.pid} answered ${error.code}; that process is gone or no longer ours, so it counts as gone\n`);
+  return true;
+}
+
 /** Terminate owned descendants as the live receipt set grows, then wait for the run and every identity to drain. */
 async function drainLandingWorkerDescendants(ownedDescendants, refreshOwnedDescendants, runFinished, reportUnverified, cleanupDeadline) {
   let firstError = null;
@@ -747,7 +766,7 @@ async function drainLandingWorkerDescendants(ownedDescendants, refreshOwnedDesce
         if (signal === 'SIGTERM') state.termAt = now;
         else state.killSent = true;
       } catch (error) {
-        if (error.code === 'ESRCH') continue;
+        if (killAnsweredGone(error, owned, snapshot)) continue;
         rememberError(error);
       }
       signalState.set(key, state);
