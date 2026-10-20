@@ -4,6 +4,7 @@
  */
 import * as store from './board.js';
 import { Refused } from './refused.js';
+import { refuseSelfSession } from './item-sessions.js';
 import { shownPath } from './trunk-conflict.js';
 
 /**
@@ -52,7 +53,11 @@ export async function nextReview(ctx, board, me, values, { ordered, idArg, trunk
     if (ctx.io.stderr) ctx.io.stderr.write(line + '\n'); else ctx.io.err?.(line);
   }
   const reservation = { agentId: me.id, leaseMs: ctx.config.reviewLeaseMs, policy: ctx.config.verify.policy, familyPolicy: ctx.config.verify.family };
-  if (values.verifyId !== undefined) return { item: await ordered('reserveReview', [idArg(values.verifyId, 'an item id after --verify'), reservation]), reasons: [] };
+  if (values.verifyId !== undefined) {
+    const id = idArg(values.verifyId, 'an item id after --verify');
+    refuseSelfSession(ctx.info, store.getItem(board, id));
+    return { item: await ordered('reserveReview', [id, reservation]), reasons: [] };
+  }
   return await ordered('reserveNextReview', [{ agentId: me.id, lane: me.lane, leaseMs: ctx.config.reviewLeaseMs, policy: ctx.config.verify.policy,
     familyPolicy: ctx.config.verify.family, runnable: values.runnable, routes: values.routes }]);
 }
