@@ -762,7 +762,7 @@ async function api(path, body) {
   if (body && (hosted.local ? readOnly && source?.kind !== 'local' : pageReadOnly)) throw new Error('This is a read-only view.');
   const base = source?.kind === 'local' ? localReadBase : connection.base;
   const headers = source?.kind === 'local' ? localReadHeaders : connection.headers;
-  return jsonRequest(path, body, base, headers);
+  const reply = await jsonRequest(path, body, base, headers); if (boardId && source?.kind === 'local' && path.includes('/state') && reply?.state) return { ...reply, state: { ...reply.state, root: source.board.root } }; return reply;
 }
 
 /** Use one JSON request primitive, capturing its local route and session before awaiting a reply. */
