@@ -41,8 +41,8 @@ import {
   refuseNextIdle,
 } from './next-steps.js';
 import { reviewerStartup } from './next-steps.js';
-import { gateWaitStats } from './gate-receipt.js';
-import { receiptLine } from './gate-receipt.js';
+import * as gateReceipt from './gate-receipt.js';
+import { submitPreflight } from './submit-preflight.js';
 import * as store from './board.js';
 import {
   CONFIG_FILE,
@@ -2617,7 +2617,7 @@ function readCommands(io, { first, second, rest, values }) {
     stats: () => {
       const ctx = context(io);
       const { stats, agents } = withBoard(ctx, (board) => ({ stats: proofStats(board, { since: values.since }), agents: store.listAgents(board) }));
-      const waits = gateWaitStats(ctx.info.root);
+      const waits = gateReceipt.gateWaitStats(ctx.info.root);
       io.result?.({ stats, gateWaits: waits.stats });
       io.say(`${stats.submissions} submissions · ${stats.rejections} rejections · ${(stats.rejectionShare * 100).toFixed(1)}% sent back`);
       io.say(`${stats.merged} items merged · ${stats.mergedWithoutAccept} merged without an accept`);
@@ -2744,12 +2744,13 @@ async function submitHere(ctx, id) {
   if (stray.length) throw new Refused('UNTRACKED', `commit or ignore ${stray.length} untracked file(s), e.g. ${stray[0]}`);
   const commit = headCommit(root);
   if (!commit) throw new Refused('NO_COMMIT', 'nothing committed yet');
+  withBoard(ctx, (board) => submitPreflight(board, id, { agentId: me.id, commit, tree: headTree(root) ?? '' }));
   const trunk = requireTrunkMerge(root, commit);
   withBoard(ctx, (board) => refuseUnverifiedStack(root, board, held, commit, trunk));
   // Doctrine counts only fall: accepted main's rules, at this exact commit (D1). No rule, no change.
   const doctrine = hasSubmitRules(root, acceptedMain.commit, acceptedMain.config.practice)
     ? await withGateSlot(root, () => holdDoctrine(root, { mainCommit: acceptedMain.commit, commit, practice: acceptedMain.config.practice, timeoutMs: acceptedMain.config.check?.timeoutMs }),
-      { itemCheck: true, agent: me.id, item: String(id), kind: 'doctrine', onWait: queuedItemLease(ctx, held, me.id, 'build'), onReceipt: (receipt) => ctx.io.say(`doctrine hold ${receiptLine(receipt)}`) })
+      { itemCheck: true, agent: me.id, item: String(id), kind: 'doctrine', onWait: queuedItemLease(ctx, held, me.id, 'build'), onReceipt: (receipt) => ctx.io.say(`doctrine hold ${gateReceipt.receiptLine(receipt)}`) })
     : [];
   for (const rule of doctrine) ctx.io.say(`doctrine: ${ruleLine(rule)}`);
   // Every submit proves its frozen check and reachable tests anew on this exact commit (V4,V16).
