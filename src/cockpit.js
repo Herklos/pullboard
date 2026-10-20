@@ -2240,7 +2240,7 @@ function milestoneItem(entry, p) {
     state: read ? stateOf(read) : null,
     stale: item ? staleChip(item) : '',
     block: item ? roadmapBlock(detail?.item || item, {
-      holds: root === view.root ? source.holds : source.laneHolds, items: source.items, name: (id) => agentName(id, source), time: when, state: stateOf,
+      holds: root === view.root ? source.holds : source.laneHolds, items: source.items, agents: source.agents, state: stateOf,
       address: (id) => itemAddress(id, root), board: root === view.root ? null : root,
       releases: (p.milestones || []).filter((milestone) => milestone.items.some((ref) => ref.id === entry.id)).map((milestone) => milestone.name),
       loading: detail?.loading, error: detail?.error,
