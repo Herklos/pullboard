@@ -38,7 +38,9 @@ import { outOfLane } from './lanes.js';
 import {
   citedIds,
   deletedIds,
+  gateFiles,
   idProblems,
+  parseSpec,
 } from './spec.js';
 import { approvedRowProblems } from './approved-rows.js';
 
@@ -280,6 +282,7 @@ export function preCommitProblems({ root, isMain, config, agent, boardFile, preM
     problems.push(...secretsIn(addedLines(diff)).map((where) => `possible secret: ${where}`));
   }
   problems.push(...deletedRowProblems(root, [config.spec, config.practice]));
+  problems.push(...deletedGateProblems(root, config));
   problems.push(...approvedRowProblems(root, config, boardFile));
   if (isMain) return problems;
   if (!agent) {
@@ -308,6 +311,43 @@ export function preCommitProblems({ root, isMain, config, agent, boardFile, preM
       .flatMap((path) => outOfLane(ownershipConfig, agent.agent_lane, [path]))
       .map((path) => `outside the ${agent.agent_lane} lane: ${path}; shout its owner instead`),
   );
+  return problems;
+}
+
+/**
+ * A commit that deletes or renames a test file an approved must-row names must point that row at its new
+ * home in the same commit, or the rule loses its test silently (#809). The row is read from HEAD's spec
+ * and again from the staged one, so a repoint in this commit counts and a missing row does not.
+ *
+ * @param {string} root
+ * @param {{ spec?: string }} config
+ * @returns {string[]}
+ */
+export function deletedGateProblems(root, config) {
+  if (!config?.spec) return [];
+  const status = tryGit(root, ['diff', '--cached', '--name-status', '-M', '--no-color']);
+  if (status.status !== 0) return [];
+  const gone = new Map();
+  for (const line of status.stdout.split('\n').filter(Boolean)) {
+    const [code, from, to] = line.split('\t');
+    if (code.startsWith('D')) gone.set(from, 'deletes');
+    else if (code.startsWith('R')) gone.set(from, `renames to ${to}`);
+  }
+  if (!gone.size) return [];
+  const head = tryGit(root, ['show', `HEAD:${config.spec}`]);
+  if (head.status !== 0) return [];
+  const staged = tryGit(root, ['show', `:${config.spec}`]);
+  const before = parseSpec(head.stdout).rows.filter((row) => row.status === 'approved' && row.tier === 'must');
+  const after = staged.status === 0 ? parseSpec(staged.stdout).rows : [];
+  const problems = [];
+  for (const [file, change] of gone) {
+    for (const row of before) {
+      if (!gateFiles(row.gate).includes(file)) continue;
+      const now = after.find((candidate) => candidate.id === row.id);
+      if (now && !gateFiles(now.gate).includes(file)) continue;
+      problems.push(`${row.id} names ${file}, which this commit ${change}; point ${row.id} at its new home in this commit`);
+    }
+  }
   return problems;
 }
 

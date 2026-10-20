@@ -249,6 +249,41 @@ export function checkFieldFindings(row) {
   return problems;
 }
 
+/** A repo path with a known extension, as a whole word in a gate (#809). */
+const GATE_FILE_RE = /(?:^|\s)((?:[\w.-]+\/)*[\w.-]+\.(?:js|mjs|cjs|sh|md|json|yml))(?=\s|$)/gu;
+
+/**
+ * The repo files a row's gate names, such as `test/board.test.js` or `bin/checks/file-size.js`. A gate
+ * word without a path, such as `review` or `true`, names no file to check.
+ *
+ * @param {string | undefined} gate
+ * @returns {string[]}
+ */
+export function gateFiles(gate) {
+  return [...String(gate ?? '').matchAll(GATE_FILE_RE)].map((match) => match[1]);
+}
+
+/**
+ * Findings for each row whose gate names a file the repo does not have (#809). An approved must-row is
+ * an error, so spec check fails and names the row and the file; every other row only warns, so a draft
+ * can name a file it will create.
+ *
+ * @param {any} spec - a parsed spec
+ * @param {string} root - the repo root the gate paths resolve against
+ * @returns {{ level: string, line: number, id: string, message: string }[]}
+ */
+export function missingGateFindings(spec, root) {
+  const findings = [];
+  for (const row of spec.rows) {
+    for (const file of gateFiles(row.gate)) {
+      if (existsSync(join(root, file))) continue;
+      const level = row.status === 'approved' && row.tier === 'must' ? 'error' : 'warning';
+      findings.push({ level, line: row.line, id: row.id, message: `gate file ${file} does not exist; name the file that proves the row` });
+    }
+  }
+  return findings;
+}
+
 /**
  * The first cycle in the serves graph, as the ids around it, or null.
  *
