@@ -277,6 +277,12 @@ function runTests(args, env, concurrency) {
     } else if (/^--(?:experimental[-_])?test[-_]isolation(?:=none|$)/u.test(argument) &&
       (argument.endsWith('=none') || args[at + 1] === 'none')) {
       throw new Error('bounded browser test files require process isolation; remove --test-isolation=none');
+    } else if (argument === '--test-only') {
+      // Node would apply it only to cases marked only, so a run would silently skip the rest of the file (#931).
+      throw new Error('unknown option --test-only; run-tests does not apply it, so select cases with --test-name-pattern');
+    } else if (argument.startsWith('-') && !knownNodeOption(argument)) {
+      // Node ignores an option it does not know after the files; name it instead of running without it (#931).
+      throw new Error(`unknown option ${argument.split('=', 1)[0]}; check its spelling, or drop it`);
     } else forwarded.push(argument);
   }
   const reporter = args.some((argument) => argument === '--test-reporter' || argument.startsWith('--test-reporter='));
@@ -339,7 +345,8 @@ async function landingTestOptions(args, env, concurrency) {
     if (valueOption('--test-coverage-lines', value => { options.lineCoverage = Number(value); })) continue;
     if (valueOption('--test-coverage-branches', value => { options.branchCoverage = Number(value); })) continue;
     if (valueOption('--test-coverage-functions', value => { options.functionCoverage = Number(value); })) continue;
-    if (argument === '--test-only') { options.only = true; continue; }
+    // Parsed but never applied, so a run would pass silently without the cases it claims: refuse it by name (#931).
+    if (argument === '--test-only') throw new Error('unknown option --test-only; run-tests does not apply it, so select cases with --test-name-pattern');
     if (argument === '--experimental-test-coverage') { options.coverage = true; continue; }
     if (argument.startsWith('--experimental-test-isolation=')) {
       options.isolation = argument.slice(argument.indexOf('=') + 1);
@@ -360,6 +367,10 @@ async function landingTestOptions(args, env, concurrency) {
     if (argument === '--test-shard') { index += 1; continue; }
     if (argument.startsWith('--test-shard=')) continue;
     if (argument.startsWith('-')) {
+      // An option Node does not know would be forwarded and ignored after the files; refuse it by name wherever it appears (#931).
+      const name = argument.split('=', 1)[0].replaceAll('_', '-');
+      optionTakesValue(name);
+      if (!knownNodeOptions.has(name)) throw new Error(`unknown option ${name}; check its spelling, or drop it`);
       execArgv.push(argument);
       if (!argument.includes('=') && optionTakesValue(argument)) {
         if (args[index + 1] === undefined) throw new Error(`${argument} requires a value`);
@@ -1228,6 +1239,19 @@ function optionTakesValue(argument) {
 
   }
   return nodeOptionsWithValues.has(argument.replaceAll('_', '-'));
+}
+
+/**
+ * Whether Node's own CLI knows an option, so run-tests can forward it; any other dash option is a typo or a flag
+ * this runner cannot apply.
+ *
+ * @param {string} argument the option as written, with its value after an equals sign if any
+ * @returns {boolean}
+ */
+function knownNodeOption(argument) {
+  const name = argument.split('=', 1)[0].replaceAll('_', '-');
+  optionTakesValue(name);
+  return knownNodeOptions.has(name);
 }
 
 /** Distinguish file selection from option values so filtered discovery still takes a full-suite slot. */
