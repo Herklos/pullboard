@@ -84,6 +84,7 @@ import {
   unseal,
 } from './seal.js';
 import { terminalQr } from './qr.js';
+import { baselineNotAccepted, transientRelayFailure } from './relay-move-fallback.js';
 import { Refused } from './refused.js';
 import { refusalFromReceipt } from './recorded-refusal.js';
 import { relaySenderProblem } from './relay-sender.js';
@@ -1168,21 +1169,6 @@ function recoveredMove(root, state, operation, args, command) {
     throw new Refused('RELAY_MOVE', 'the recovered operation differs from its durable receipt; restore consistent relay metadata before retrying');
   }
   return recovered.move;
-}
-
-/** Whether the relay has not yet accepted this board's first snapshot, so no ordered history exists to protect. */
-function baselineNotAccepted(state) {
-  return state.mode === 'ordered' && state.baselineAccepted === false && !state.baselineConflict;
-}
-
-/**
- * Whether a relay failure says nothing definite about the board: a timeout, a lost connection, a busy relay or a 5xx.
- * Why: only a definite refusal (auth, a conflicting baseline) may stop a local move before the relay accepts a baseline.
- */
-function transientRelayFailure(error) {
-  if (!(error instanceof Refused)) return false;
-  if (['RELAY_UNAVAILABLE', 'RELAY_RESPONSE', 'RELAY_BUSY'].includes(error.code)) return true;
-  return Number.isInteger(error.httpStatus) && (error.httpStatus >= 500 || [408, 425, 429].includes(error.httpStatus));
 }
 
 /**

@@ -1,0 +1,17 @@
+/** When a relay failure may let a local board move commit without the relay (#919, #341). */
+import { Refused } from './refused.js';
+
+/** Whether the relay has not yet accepted this board's first snapshot, so no ordered history exists to protect. */
+export function baselineNotAccepted(state) {
+  return state.mode === 'ordered' && state.baselineAccepted === false && !state.baselineConflict;
+}
+
+/**
+ * Whether a relay failure says nothing definite about the board: a timeout, a lost connection, a busy relay or a 5xx.
+ * Why: only a definite refusal (auth, a conflicting baseline) may stop a local move before the relay accepts a baseline.
+ */
+export function transientRelayFailure(error) {
+  if (!(error instanceof Refused)) return false;
+  if (['RELAY_UNAVAILABLE', 'RELAY_RESPONSE', 'RELAY_BUSY'].includes(error.code)) return true;
+  return Number.isInteger(error.httpStatus) && (error.httpStatus >= 500 || [408, 425, 429].includes(error.httpStatus));
+}
