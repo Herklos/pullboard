@@ -1016,3 +1016,20 @@ test('a changed approved draft needs a new decision before apply [S1,I1,P6]', t 
   const applied = JSON.parse(runIn(box, box.root, ['resume', '--json']).stdout);
   assert.doesNotMatch(applied.next, /spec apply|approve A1/u);
 });
+
+test('a spec answer refused in an agent shell gives the person the exact command to paste [S1,B26]', (t) => {
+  const box = specBox(t, { specSource: QUESTION_SPEC });
+  const before = readFileSync(join(box.root, box.specName), 'utf8');
+  const refused = runIn(box, box.root, ['spec', 'answer', 'B2', "Redis on the host's port", '--json'], { ...box.env, CLAUDECODE: '1' });
+  assert.notEqual(refused.status, 0, 'an agent shell never records a person answer');
+  const error = JSON.parse(refused.stdout).error;
+  assert.equal(error.code, 'B26_PERSON_CHANNEL');
+  assert.match(error.message, /relay the command below to the person verbatim/u);
+  const pasted = error.next.slice(error.next.lastIndexOf(': cd ') + 2);
+  assert.equal(pasted, `cd ${box.root} && pullboard spec answer B2 'Redis on the host'\\''s port'`, 'the id and the proposed choice, quoted, with no placeholder');
+  assert.equal(readFileSync(join(box.root, box.specName), 'utf8'), before);
+  // The person pastes it into their own terminal and it is recorded.
+  const person = runFixtureChild('/bin/sh', ['-c', pasted.replace(/^cd \S+ && pullboard/u, `cd '${box.root}' && "${process.execPath}" "${resolve(import.meta.dirname, '../bin/pullboard.js')}"`) + ' --json'], { cwd: box.root, env: box.env, encoding: 'utf8' });
+  assert.equal(person.status, 0, person.stdout + person.stderr);
+  assert.equal(JSON.parse(person.stdout).decisions[0].answer, "Redis on the host's port");
+});
