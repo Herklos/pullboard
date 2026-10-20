@@ -357,6 +357,8 @@ function commandHelpRows(fullHelp, commandNames) {
     ...Object.keys(HELP_ALIASES),
     ...Object.keys(HELP_EXAMPLES).filter((name) => /^[a-z][a-z0-9-]*(?: [a-z][a-z0-9-]*)*$/u.test(name)),
     ...rows.map((row) => commandWords(row.usage)[0]).filter(Boolean),
+    // Every printed subcommand phrase (milestone items, relay devices) is a name too, so its help exists [N2].
+    ...lines.filter((line) => line.startsWith('  pullboard ')).flatMap((line) => usagePhrases(line.trim())).filter((phrase) => phrase.includes(' ')),
   ])];
   return Object.fromEntries(names.map((name) => {
     const parts = name.split(' ');
