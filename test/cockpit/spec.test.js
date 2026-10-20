@@ -1,4 +1,6 @@
-/** Cockpit spec checks, using the shared real-board fixtures [N26]. */
+/** Cockpit spec checks, using the shared real-board fixtures [N26].
+ * @pullboard-test-input source-tree
+ */
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -41,7 +43,7 @@ function regexLiterals(source) {
   return found;
 }
 
-test('no hosted page script part loses a regex backslash', () => {
+test('no hosted page script part loses a regex backslash [N26]', () => {
   const offenders = [];
   for (const name of readdirSync(new URL('../../src/view/', import.meta.url)).filter((file) => /^page-script-\d+\.js$/u.test(file))) {
     const source = readFileSync(new URL(`../../src/view/${name}`, import.meta.url), 'utf8');
@@ -57,7 +59,7 @@ test('no hosted page script part loses a regex backslash', () => {
   assert.deepEqual(offenders, [], `hosted regex escapes need a doubled template-literal backslash: ${offenders.join(', ')}`);
 });
 
-test('emitted page script splits decision ids on whitespace', () => {
+test('emitted page script splits decision ids on whitespace [N26]', () => {
   const served = pageScriptPart4({});
   const split = /String\(args\.ids\)\.split\((\/.*?\/)\)/u.exec(served);
   assert.ok(split, 'the served decideRow implementation splits its ids');
@@ -69,7 +71,7 @@ test('emitted page script splits decision ids on whitespace', () => {
   assert.equal(ids.map((id) => `doctrine:${id}`).join(' '), 'doctrine:G1 doctrine:G2', 'each doctrine row keeps its own qualified id');
 });
 
-test('a decision on two spec rows splits their ids on whitespace', async () => {
+test('a decision on two spec rows splits their ids on whitespace [B26,N26]', async () => {
   const served = pageScriptPart4({});
   const start = served.indexOf('async function decideRow(');
   const end = served.indexOf('\n}\n\n/**\n * Run a public API move', start) + 2;
