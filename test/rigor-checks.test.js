@@ -18,6 +18,12 @@ import { fileSizeProblems } from '../bin/checks/file-size.js';
 import { testNameProblems } from '../bin/checks/test-names.js';
 import { emptyCatchProblems } from '../bin/checks/empty-catch.js';
 import { testInputProblems } from '../bin/checks/test-inputs.js';
+import * as store from '../src/board.js';
+import { submitFixture } from './board-submit-fixture.js';
+import { createE2eHelpers } from './e2e-helpers.js';
+
+const conflictE2e = createE2eHelpers();
+after(conflictE2e.cleanup);
 
 const ROOT = resolve(import.meta.dirname, '..');
 const CHECKS = ['file-size', 'test-names', 'empty-catch', 'test-inputs'];
@@ -119,6 +125,47 @@ function fixture(name) {
   mkdirSync(root, { recursive: true });
   return root;
 }
+
+/** Record synthetic conflict history through public board moves, without claiming gates ran. */
+function conflictHistory() {
+  const box = conflictE2e.project('true');
+  const board = store.openBoard(join(box.repo, '.git/pullboard/board.sqlite'));
+  try {
+    const builder = store.register(board, { lane: 'web', path: join(box.dir, 'history-builder'), model: 'Fixture builder' });
+    const reviewer = store.register(board, { lane: 'web', path: join(box.dir, 'history-reviewer'), model: 'Fixture reviewer' });
+    /** Accept a synthetic submission, then record its typed conflict reopen. */
+    const collision = (title, files) => {
+      const id = store.addItem(board, { by: 'coordinator', lane: 'web', title });
+      store.claim(board, id, { agentId: builder, lane: 'web', leaseMs: 7_200_000,
+        freeze: item => ({ text: item.item_title, digest: `fixture:${item.item_id}` }) });
+      const commit = id.toString(16).padStart(40, '0');
+      submitFixture(board, id, { agentId: builder, commit, tree: 'a'.repeat(40) });
+      store.verify(board, id, { agentId: reviewer, decision: 'ACCEPT', note: 'synthetic accepted-history fixture; no gate claim',
+        head: commit, digest: store.getItem(board, id).item_frozen_digest, policy: 'any' });
+      store.reopen(board, id, { agentId: 'coordinator', conflict: { files, trunk: 'b'.repeat(40) } });
+      return id;
+    };
+    const first = collision('First collision', ['src/cli.js', 'src/rare.js']);
+    const second = collision('Second collision', ['src/cli.js']);
+    const held = store.addItem(board, { by: 'coordinator', lane: 'web', title: 'An unrelated hold' });
+    store.holdItem(board, held, { agentId: 'coordinator', reason: 'a discussion mentions a conflict in src/unrelated.js' });
+    return { ...box, ids: [first, second] };
+  } finally { store.closeBoard(board); }
+}
+
+test('rigor reports a file that keeps causing merge conflicts [D1,C7]', () => {
+  const box = conflictHistory();
+  const before = readFileSync(join(box.repo, 'SPEC.md'), 'utf8');
+  const run = box.run(box.repo, 'rigor', '--json');
+  assert.equal(run.code, 0, run.out + run.err);
+  const report = JSON.parse(run.out);
+  assert.ok(Array.isArray(report.hotFiles), 'rigor exposes its per-file conflict history');
+  assert.deepEqual(report.hotFiles.map(file => file.file), ['src/cli.js'], 'one-off and prose-only paths never become hot files');
+  assert.deepEqual(report.hotFiles[0].items, box.ids, 'the report names the actual colliding items');
+  assert.equal(report.hotFiles[0].reopens, 2, 'each typed reopen counts once for this file');
+  assert.deepEqual(report.causes, [], 'architectural collisions do not pretend to be proved code-rule failures');
+  assert.equal(readFileSync(join(box.repo, 'SPEC.md'), 'utf8'), before, 'reporting alone does not draft or approve a rule');
+});
 
 test('Pullboard\'s four checks count what main has [D1, C7]', async (t) => {
   assert.equal(typeof fileSizeProblems, 'function', 'the size check imports without running');
