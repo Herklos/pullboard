@@ -345,7 +345,7 @@ export async function checkNeedsBrowser(root, command, { commit, env = process.e
  * @returns {Promise<string[] | null>}
  */
 export async function explicitCheckFiles(root, command, { commit, env = process.env } = {}) {
-  if (env.NODE_OPTIONS) return null;
+  if (unclassifiedNodeOptions(env.NODE_OPTIONS)) return null;
   let words = literalShellWords(command);
   if (!words) {
     const inner = capturedRunner(command);
