@@ -137,10 +137,10 @@ test('help names come from the command declarations [C7,N37]', async (t) => {
   assert.equal(all.status, 0, all.failure);
   assert.equal(overview.stdout, HELP.overview + '\n');
   assert.equal(all.stdout, HELP.all + '\n');
-  const undocumented = run('help', 'milestone', 'items');
-  assert.equal(undocumented.status, 2, 'the existing undocumented help stays refused');
+  const undocumented = run('help', 'milestone', 'bogus');
+  assert.equal(undocumented.status, 2, 'a name the CLI does not dispatch stays refused');
   assert.equal(undocumented.stdout, '');
-  assert.equal(undocumented.stderr, 'pullboard: no command "milestone items"; closest match is "milestone order". Run pullboard help --all for the full list.\n');
+  assert.equal(undocumented.stderr, 'pullboard: no command "milestone bogus"; closest match is "milestone items". Run pullboard help --all for the full list.\n');
   t.diagnostic('help overview bytes ' + JSON.stringify(overview.stdout));
 
   const directory = resolve(import.meta.dirname, '../src');
@@ -226,5 +226,38 @@ test('help add example runs on a fresh board [I1,L3]', (t) => {
   for (const line of lines) {
     const result = runFixtureChild('sh', ['-c', line], { cwd: root, env, encoding: 'utf8' });
     assert.equal(result.status, 0, `${line}\n${result.failure ?? `${result.stdout}${result.stderr}`}`);
+  }
+});
+
+test('help covers every dispatched subcommand [N2]', () => {
+  // Every printed subcommand phrase is one the CLI dispatches; each must have help, and an unknown name still refuses.
+  const subcommands = [...new Set([...helpDeclaration.commandPhrases(HELP).filter((phrase) => phrase.includes(' ')), ...helpDeclaration.SETTING_FORMS.map((form) => `settings ${form}`)])];
+  assert.ok(subcommands.includes('milestone items') && subcommands.includes('relay devices') && subcommands.includes('spec approve'),
+    'the walk covers the subcommands that were refused before');
+  for (const phrase of subcommands) {
+    const result = run('help', ...phrase.split(' '));
+    assert.equal(result.status, 0, `help ${phrase} exits 0: ${result.stderr}`);
+    assert.match(result.stdout, /^Usage: pullboard /u, `help ${phrase} prints a Usage line`);
+  }
+  const unknown = run('help', 'milestone', 'bogus');
+  assert.equal(unknown.status, 2, 'an unknown subcommand still exits 2');
+  assert.equal(unknown.stdout, '');
+});
+
+test('the settings forms the CLI dispatches have help and reach their own refusal [N2]', () => {
+  // The expected forms are written out here, not read from the parser: each one must have help, and
+  // each must reach its own value check in settingsCommand, which proves the dispatcher knows it (#824).
+  assert.deepEqual([...helpDeclaration.SETTING_FORMS], ['gateSlots', 'browserSlots', 'gate.shortSlots']);
+  const folder = mkdtempSync(join(tmpdir(), 'pullboard-settings-'));
+  sandboxes.push(folder);
+  runFixtureGit(['init', '-q'], { cwd: folder });
+  const refusals = { gateSlots: '[USAGE]', browserSlots: '[BAD_BROWSER_SLOTS]', 'gate.shortSlots': '[BAD_SHORT_SLOTS]' };
+  for (const [form, code] of Object.entries(refusals)) {
+    const help = run('help', 'settings', form);
+    assert.equal(help.status, 0, `help settings ${form} exits 0: ${help.stderr}`);
+    assert.match(help.stdout, new RegExp(`^Usage: pullboard settings ${form.replace('.', '\\.')} `, 'u'), `help settings ${form} names its usage`);
+    const refused = runFixtureChild(process.execPath, [BIN, 'settings', form, 'abc'], { cwd: folder, encoding: 'utf8' });
+    assert.equal(refused.status, 1, `settings ${form} abc is refused: ${refused.stdout}`);
+    assert.ok(refused.stderr.includes(code), `settings ${form} reaches its own check ${code}: ${refused.stderr}`);
   }
 });

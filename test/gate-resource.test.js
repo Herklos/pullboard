@@ -661,6 +661,20 @@ test('a short slot is offered only to a literal runner call over regular test fi
   assert.deepEqual(await explicitCheckFiles(root, named, { commit: head.stdout.trim() }), ['test/gate-resource.test.js'], 'a review reads the files from the submitted tree');
 });
 
+test('short slots behave the same with gate.browserByLaunch on [C7]', async () => {
+  // With gate.browserByLaunch on, the runner adds its launch guard to NODE_OPTIONS for its children (#808). The
+  // short-slot offer for the same named file must match under either setting: each run gets the environment the
+  // runner gives its children for that setting, and both name the file. A foreign NODE_OPTIONS still refuses.
+  const { explicitCheckFiles } = await import(BROWSER_ADMISSION_MODULE);
+  const root = process.cwd();
+  const named = `${quote(process.execPath)} bin/run-tests.js test/gate-resource.test.js`;
+  const guard = pathToFileURL(resolve(root, 'src/browser-slot-guard.js')).href;
+  const base = Object.fromEntries(Object.entries(process.env).filter(([name]) => name !== 'NODE_OPTIONS'));
+  assert.deepEqual(await explicitCheckFiles(root, named, { env: base }), ['test/gate-resource.test.js'], 'with gate.browserByLaunch off');
+  assert.deepEqual(await explicitCheckFiles(root, named, { env: { ...base, NODE_OPTIONS: `--import=${guard}` } }), ['test/gate-resource.test.js'], 'with gate.browserByLaunch on');
+  assert.equal(await explicitCheckFiles(root, named, { env: { ...base, NODE_OPTIONS: '--import=file:///elsewhere/unclassified.js' } }), null, 'a foreign NODE_OPTIONS is not short');
+});
+
 test('a short check never waits behind whole suites [C7]', async () => {
   const box = fixture();
   const settingsRoot = gateRepo(box, 'settings-view');
