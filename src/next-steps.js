@@ -126,6 +126,8 @@ export function personRequestGuidance(message, { caller, leading = false } = {})
 
 /** @type {Readonly<Record<string, string>>} */
 export const NEXT_STEPS = Object.freeze({
+  FLAKE_EVIDENCE: 'retain the original gate log, timing profile and pinned source; ask the coordinator to repair the failure-evidence recorder before recording again',
+  FLAKE_OBSERVATION_CHANGED: 'keep the original observation unchanged; record a new gate failure with a new observation identity instead of replacing historical evidence',
   HEALTH_FINDINGS: 'run pullboard health to read the current findings, then run pullboard resume to capture a fresh observation',
   HEALTH_SCAN_STALE: 'run pullboard resume again to scan the current board before posting sentinel notices',
   A5_GRAMMAR_VERSION: 'upgrade Pullboard: npm install -g pullboard@latest',
