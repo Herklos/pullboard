@@ -175,9 +175,9 @@ function privateProbe(root, commit, command, lease, policyCommit) {
  * execution host's load, and the pinned main this run used (#925). A missing fact is never guessed or replaced by a
  * local measurement.
  */
-function remoteGap(run, pin) {
-  if (!run.executionLoad) return 'The remote receipt does not carry the execution host\'s load; the red remains unclassified, never guessed.';
-  if (!pin.main || run.executionMain !== pin.main) return 'The remote receipt does not name the pinned main this run used; the red remains unclassified, never guessed.';
+function remoteGap(run, pin, receipt = 'remote') {
+  if (!run.executionLoad) return `The ${receipt} receipt does not carry the execution host's load; the red remains unclassified, never guessed.`;
+  if (!pin.main || run.executionMain !== pin.main) return `The ${receipt} receipt does not name the pinned main this run used; the red remains unclassified, never guessed.`;
   return null;
 }
 
@@ -236,17 +236,24 @@ async function observeFailure({ root, config, pin, run, command, lease, kind, re
       const pairRun = pin.privateCheck ? privateProbe(root, pin.head, selected, lease, pin.main ?? pin.head)
         : runProfiledShell(root, selected, { gateLease: lease });
       paired = saveReceipt(directory, id, 'paired', pairRun);
-      const pairResult = pairRun.unverified ? null : targetResult(pairRun, root, failure.name);
+      // Every remote receipt a classification rests on carries both facts, the paired rerun's and main's included; a
+      // probe that ran in a local private copy has no remote receipt to check.
+      const gaps = [];
+      const pairGap = pairRun.executionRunner ? remoteGap(pairRun, pin, 'paired remote') : null;
+      if (pairGap) gaps.push(pairGap);
+      const pairResult = pairRun.unverified || pairGap ? null : targetResult(pairRun, root, failure.name);
       let mainResult = pin.main === pin.head ? false : null;
       if (pin.main && pin.main !== pin.head && committedTest(root, pin.main, failure.file)) {
         const mainRun = privateProbe(root, pin.main, selected, lease, pin.main);
         mainReceipt = saveReceipt(directory, id, 'main', mainRun);
-        mainResult = mainRun.unverified ? null : targetResult(mainRun, root, failure.name);
+        const mainGap = mainRun.executionRunner ? remoteGap(mainRun, pin, 'main remote') : null;
+        if (mainGap) gaps.push(mainGap);
+        mainResult = mainRun.unverified || mainGap ? null : targetResult(mainRun, root, failure.name);
       }
       if (mainResult === true) { classification = 'possible-regression'; reason = 'The exact target passes on pinned main; this candidate failure is not a flake observation.'; }
       else if (pairResult === true && mainResult === false) { classification = 'flake'; reason = 'The red target passed its one paired rerun at the same pinned head; original red retained.'; }
       else if (pairResult === false) { classification = 'stable-red'; reason = 'The target remains red in its one paired rerun; original red retained.'; }
-      else reason = 'A probe did not establish the exact target at its pinned source; it remains unclassified.';
+      else reason = gaps[0] ?? 'A probe did not establish the exact target at its pinned source; it remains unclassified.';
       invalidateGitFacts();
       if (!pin.privateCheck && (headCommit(root) !== pin.head || headTree(root) !== pin.tree || !isClean(root) || untracked(root).length > 0)) {
         classification = 'unclassified'; reason = 'The source changed during diagnostics; no unchanged-head classification is claimed.';
