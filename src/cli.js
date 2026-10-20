@@ -11,7 +11,6 @@ import {
   spawnSync,
 } from 'node:child_process';
 import {
-  appendFileSync,
   existsSync,
   mkdirSync,
   readdirSync,
@@ -22,7 +21,6 @@ import {
 } from 'node:fs';
 import {
   hostname,
-  loadavg,
 } from 'node:os';
 import {
   basename,
@@ -32,7 +30,6 @@ import {
   relative,
   resolve,
 } from 'node:path';
-import { performance } from 'node:perf_hooks';
 import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import {
@@ -44,6 +41,12 @@ import { reviewerStartup } from './next-steps.js';
 import * as seatCheckout from './seat-checkout.js';
 import { submitPreflight } from './submit-preflight.js';
 import * as store from './board.js';
+import {
+  firstInputLine,
+  hookRead,
+  readStdin,
+  traceServeStartup,
+} from './cli-support.js';
 import {
   CONFIG_FILE,
   COORDINATOR,
@@ -460,20 +463,6 @@ export { gateWaitReporter };
 const CHECKOUT_LEASES = new WeakMap();
 const CHECKOUT_BOARD_ONLY = new WeakMap();
 let startupMainTraced = false;
-
-/** Append an opt-in startup phase marker for the real CLI fixture measurement [A2,C7]. */
-function traceServeStartup(phase) {
-  const path = process.env.PULLBOARD_STARTUP_TRACE_FILE;
-  const entry = process.env.PULLBOARD_STARTUP_TRACE_ENTRY;
-  if (!path || !entry || resolve(process.argv[1] ?? '') !== resolve(entry)) return;
-  try {
-    appendFileSync(path, `${JSON.stringify({ phase, at: Date.now(), elapsedMs: performance.now(),
-      processId: process.pid, cpuUsage: process.cpuUsage(), loadAverage: loadavg(),
-      eventLoopUtilization: performance.eventLoopUtilization() })}\n`);
-  } catch {
-    // Diagnostic tracing must not change normal CLI behavior.
-  }
-}
 
 /**
  * Read the collision baseline from the primary branch, retained trunk, or detached HEAD default.
@@ -4227,45 +4216,6 @@ async function specCommand(io, { first, second, rest, values }) {
     return 0;
   }
   throw new Refused('USAGE', 'pullboard spec --json | check | view | show <id> | unmet [--must] | draft "<text>" | signoff <ids> | signers add | approve <ids> | decline <ids> --reason "why" | answer <id> "<choice or text>" | apply');
-}
-
-/** Read one consent line without waiting for EOF in an interactive terminal [V2]. */
-async function firstInputLine(stdin) {
-  if (!stdin) return '';
-  let text = '';
-  for await (const chunk of stdin) {
-    text += chunk.toString();
-    const newline = text.indexOf('\n');
-    if (newline >= 0) return text.slice(0, newline);
-    if (text.length > 256) return '';
-  }
-  return text;
-}
-
-/**
- * Read everything git writes on a hook's stdin, or nothing when run by hand.
- *
- * @param {any} stdin
- * @returns {Promise<string>}
- */
-async function readStdin(stdin) {
-  if (!stdin || stdin.isTTY) return '';
-  const chunks = [];
-  for await (const chunk of stdin) chunks.push(chunk);
-  return Buffer.concat(chunks).toString('utf8');
-}
-
-/** Wait up to the board's shared busy timeout while reading hook facts, without migrating its schema. */
-function hookRead(ctx, read) {
-  if (!existsSync(ctx.file)) return null;
-  const startedAt = Date.now();
-  let db;
-  try {
-    db = store.openBoardReadOnly(ctx.file);
-    return read({ db, clock: ctx.clock });
-  } catch (error) {
-    throw store.boardBusyError(ctx.file, startedAt, error);
-  } finally { db?.close(); }
 }
 
 /**
