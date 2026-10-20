@@ -7,6 +7,8 @@ import { join, relative } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 import { submitFixture } from '../test/board-submit-fixture.js';
+import { syntheticFlakeObservation } from '../test/flake-observation-fixture.js';
+import { recordFlakeObservation } from '../src/board.js';
 import { proposeSentinel } from '../src/sentinels.js';
 import { decideSentinel } from '../src/sentinels.js';
 import { beginSentinelRun } from '../src/sentinels.js';
@@ -364,6 +366,10 @@ function recordEventContract() {
   const revision = () => events(board).at(-1)?.event_id ?? 0;
   recordHealthFindings(board, { agentId: coordinator, observedRevision: revision(), findings: [healthFinding] });
   recordHealthFindings(board, { agentId: coordinator, observedRevision: revision(), findings: [] });
+  // These synthetic receipts exercise both append-only event formats, not real diagnostic execution.
+  for (const id of ['format-first', 'format-second']) recordFlakeObservation(board, {
+    agentId: coordinator, lane: 'docs', observation: syntheticFlakeObservation(id, true),
+  });
   // Explicitly synthetic event-contract history; no external command or gate is claimed.
   const watch = proposeSentinel(board, { agentId: coordinator, row: { name: 'format-watch', check: 'false', every: 'daily', owner: 'coordinator' } });
   decideSentinel(board, { agentId: PERSON, channel: 'view', name: watch.name, digest: watch.digest, decision: 'approve' });
@@ -642,6 +648,8 @@ test('[A5] schema, versions, event kinds and event detail fields match live beha
     shout: 'sender',
     pass: 'coordinator',
     answer: 'answerer',
+    'flake-observation': 'reporting agent',
+    'flake-repair': 'reporting agent',
     'health-scan': 'observing agent',
     'health-failure': 'sentinel',
     'health-resolved': 'sentinel',
