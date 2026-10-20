@@ -31,6 +31,23 @@ const drawHosted = (${drawHosted.toString()});
  */
 function localNote(state, facts = {}) {
   drawHosted(document, hostedState(state, { browser: hostedBrowser(navigator), phone: document.documentElement.dataset.relayDevice === 'phone', ...facts }), { view: localSession?.origin || LOCAL_VIEW, signIn: hosted.signIn, session: hosted.relaySession });
+  revealNote(state);
+}
+
+let revealTimer = null;
+/**
+ * Leave the hosted page's neutral mark for the screen just drawn (#948). A screen the page settles on shows at once.
+ * Finding your boards and Click Allow are on the way to another screen, so they show only once they last past the
+ * page's slow threshold, and a fast look never flashes them (#932). For a signed-in person the other local screens
+ * are on the way too, since the account's list decides next, and startPage leaves the mark once it has.
+ */
+function revealNote(state) {
+  clearTimeout(revealTimer);
+  if (!state || !document.body.classList.contains('loading')) return;
+  const passing = state === 'looking' || state === 'asking';
+  if (!passing && hosted.relaySession && LOCAL_STATES.includes(state)) return;
+  if (!passing) { document.body.classList.remove('loading'); return; }
+  revealTimer = setTimeout(() => { if ($('local-note').dataset.state === state) document.body.classList.remove('loading'); }, 800);
 }
 
 let starLinked = { at: 0, linked: false, reading: false };

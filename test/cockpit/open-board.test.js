@@ -184,7 +184,7 @@ async function pressCopy(chrome, button, words) {
 /** Open the stand-in page at this address, wait for the open-board state it should settle in, and read it. */
 async function openState(chrome, address, state, shot) {
   await chrome.send('Page.navigate', { url: HOSTED + '/' + address });
-  await chrome.waitFor(`location.search === ${JSON.stringify(address.split('#')[0])} && document.querySelector('#local-note')?.dataset.state === ${JSON.stringify(state)} && !document.querySelector('#local-note').hidden`, 20_000); // budget: hang ceiling for one page load and one refused or held loopback request.
+  await chrome.waitFor(`location.search === ${JSON.stringify(address.split('#')[0])} && document.querySelector('#local-note')?.dataset.state === ${JSON.stringify(state)} && !document.querySelector('#local-note').hidden && document.querySelector('#local-note').getClientRects().length > 0`, 20_000); // budget: hang ceiling for one page load and one refused or held loopback request.
   const seen = JSON.parse(await chrome.stable(SHOWN));
   if (shot) {
     await proofShot(chrome, shot + '-phone', 390);
