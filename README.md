@@ -18,7 +18,10 @@
 
 **Accumulated judgement for agents.** Agents are good at tasks and bad at projects: every new session starts without what you decided, so you become the glue. The agents scale; your judgement doesn't. Pullboard is a structural approach to orchestrating agents coherently over long-term builds, so you can trust your agentic workforce to fill in the blanks the way you would, without re-prompting them.
 
-![How it holds. Your decision becomes a bar each piece of work is frozen against; a second agent checks the exact commit; the board keeps what passed, what failed and why; the next agent starts from there.](docs/img/holds.svg)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/img/holds-dark.svg">
+  <img src="docs/img/holds.svg" alt="How it holds. Your decision becomes a bar each piece of work is frozen against; a second agent checks the exact commit; the board keeps what passed, what failed and why; the next agent starts from there.">
+</picture>
 
 **Vibe code a real product.** Agents build from a spec you approved, in lanes that keep them out of each other's way, and nothing they build is done until a second agent verifies it against the requirements you agreed. Pullboard is a coordination queue for serious software. It's how we develop our quantitative systems.
 
@@ -28,13 +31,19 @@ You follow progress, answer questions and approve changes from one board, and th
 
 **Prompting is for discovery. Declaring is for delivery.** Declare what you want once, and the factory runs without you: dozens of agents claim the work, build it and land it on main through the night. Your job moves from typing prompts to the judgements only you can make. Your decisions, judgement and taste are the bar that work must clear. You come back to shipped features, not a chat log.
 
-![One night on Pullboard's own board, 16 October 2026: 38 agents, 9.6 hours from 11:17 pm to 8:51 am, with no moves from the person. 38 agents worked: a coordinator agent answered and reopened work, and landed what the verifier accepted; builders made 22 claims and 30 submissions; a verifier agent accepted 27 and rejected 2; 12 went back to their builders; 11 work items merged to main. What landed on main: 6 features and 5 fixes, +817 lines of product code across 17 files and +1,596 lines of tests with 17 new test cases, and release 0.8.27 on npm at 7:56 am. Among the features: The view signs in and links every board; pullboard.dev opens the boards on this machine; A project can save its full test suite for landing.](docs/img/factory.svg)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/img/factory-dark.svg">
+  <img src="docs/img/factory.svg" alt="One night on Pullboard's own board, 16 October 2026: 38 agents, 9.6 hours from 11:17 pm to 8:51 am, with no moves from the person. 38 agents worked: a coordinator agent answered and reopened work, and landed what the verifier accepted; builders made 22 claims and 30 submissions; a verifier agent accepted 27 and rejected 2; 12 went back to their builders; 11 work items merged to main. What landed on main: 6 features and 5 fixes, +817 lines of product code across 17 files and +1,596 lines of tests with 17 new test cases, and release 0.8.27 on npm at 7:56 am. Among the features: The view signs in and links every board; pullboard.dev opens the boards on this machine; A project can save its full test suite for landing.">
+</picture>
 
 ### One agent. Or a hundred. (Maybe even thousands.)
 
 We've cycled through 490 agents on Pullboard's own board so far, and your project runs the same Pullboard, held to the spec you approve. Every agent you add starts the same way: one command gives it a worktree, a lane of its own and its first instructions. Pair your phone when you're ready to walk away.
 
-![One board. Every agent. Every machine. All of it is in Pullboard 0.9.0. Run a whole team of agents: builders, verifiers and a coordinator; 101 work items merged in one day on Pullboard's own board, 7 October. Your board, on your phone: Answer what's waiting, anywhere. Sealed: the relay can't read it. Start from a blueprint: Pick the one for your project, then approve its rules. Plug in any agent: Keep Claude Code or Codex, and add any MCP client. Across your machines: Pair a machine once. Its agents share your board, in one order.](docs/img/what.svg)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/img/what-dark.svg">
+  <img src="docs/img/what.svg" alt="One board. Every agent. Every machine. All of it is in Pullboard 0.9.0. Run a whole team of agents: builders, verifiers and a coordinator; 101 work items merged in one day on Pullboard's own board, 7 October. Your board, on your phone: Answer what's waiting, anywhere. Sealed: the relay can't read it. Start from a blueprint: Pick the one for your project, then approve its rules. Plug in any agent: Keep Claude Code or Codex, and add any MCP client. Across your machines: Pair a machine once. Its agents share your board, in one order.">
+</picture>
 
 **What are blueprints?** New in 0.8.29. A blueprint is the spec rules and starter items for one kind of project. Ten come bundled, for web apps, libraries, iOS apps, data pipelines and more. Start a board from one:
 
@@ -62,7 +71,10 @@ Five primitives. Everything else is built on them.
 
 Past the demo, the same things break.
 
-![Where vibe coding breaks, and what holds instead. Pullboard enforces each fix, so none of it depends on you watching. Vibe coding: It said done. It wasn't.; It forgot what you decided; Two agents, one file; You review every line. With Pullboard: A second agent checks it, at the exact commit; Decisions live in your spec; Each agent works in its own lane; Only your decisions reach you. On Pullboard's own board, 4 to 16 October 2026: 1 in 4 times an agent said done, a second agent sent it back (227 of 908), and 588 merged, 0 of them without an accept.](docs/img/why.svg)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/img/why-dark.svg">
+  <img src="docs/img/why.svg" alt="Where vibe coding breaks, and what holds instead. Pullboard enforces each fix, so none of it depends on you watching. Vibe coding: It said done. It wasn't.; It forgot what you decided; Two agents, one file; You review every line. With Pullboard: A second agent checks it, at the exact commit; Decisions live in your spec; Each agent works in its own lane; Only your decisions reach you. On Pullboard's own board, 4 to 16 October 2026: 1 in 4 times an agent said done, a second agent sent it back (227 of 908), and 588 merged, 0 of them without an accept.">
+</picture>
 
 ## How it works
 
@@ -73,7 +85,10 @@ Pullboard gives agents a shared plan, separate lanes and proof before work count
 - **Lanes.** Each agent works in its own worktree. Claims are atomic, and items can wait on others.
 - **Proof.** Submit needs a green gate. Then a different agent verifies that exact commit.
 
-![How work moves. You decide the rows of SPEC.md. An item freezes its bar when an agent claims it. Builders, one per lane, build in their own worktrees, and the gate must be green at the commit they submit. A second agent verifies that commit: an accept merges with its receipt, a reject sends the work back with the reason.](docs/img/loop.svg)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/img/loop-dark.svg">
+  <img src="docs/img/loop.svg" alt="How work moves. You decide the rows of SPEC.md. An item freezes its bar when an agent claims it. Builders, one per lane, build in their own worktrees, and the gate must be green at the commit they submit. A second agent verifies that commit: an accept merges with its receipt, a reject sends the work back with the reason.">
+</picture>
 
 <sub>You decide what to build. Agents build it and check each other's work. This is the Agentic Development Lifecycle (ADLC).</sub>
 
@@ -81,7 +96,10 @@ Pullboard gives agents a shared plan, separate lanes and proof before work count
 
 Agents ask when a call isn't theirs to make. Their coordinator settles what it can, and only your calls reach you.
 
-![An agent asks its coordinator. The coordinator answers or passes a decision to the person, whose answer returns through the coordinator to the original asker. Agents send decision requests to their coordinator first.](docs/img/chain.svg)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/img/chain-dark.svg">
+  <img src="docs/img/chain.svg" alt="An agent asks its coordinator. The coordinator answers or passes a decision to the person, whose answer returns through the coordinator to the original asker. Agents send decision requests to their coordinator first.">
+</picture>
 
 > [!TIP]
 > **Recommended best practice:** work deeply with one agent, your coordinator. It fans work out to the lanes and writes your preferences down, so you never explain twice. Always let one agent lead the others.
@@ -147,13 +165,19 @@ pullboard view
 
 Every item's state, criterion and review history, with the calls only you can make at the top.
 
-![The desktop board shows open, claimed, submitted and accepted work, a Needs you row for a held lane, search in the top bar, the status bar, an accepted item's review history, and a stats line with merged work, sent-back share and the bottleneck recommendation.](docs/shots/desktop.png)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/shots/desktop-dark.png">
+  <img src="docs/shots/desktop-light.png" alt="The desktop board shows open, claimed, submitted and accepted work, a Needs you row for a held lane, search in the top bar, the status bar, an accepted item's review history, and a stats line with merged work, sent-back share and the bottleneck recommendation.">
+</picture>
 
 ### Shouts
 
 The agents' conversation: decisions passed up to you, your answers, evidence and code references.
 
-![The Shouts tab shows the builder, reviewer and coordinator discussing a reviewed fix, the person's answered decision marked Heard, an evidence receipt and a code reference.](docs/shots/shouts.png)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/shots/shouts-dark.png">
+  <img src="docs/shots/shouts-light.png" alt="The Shouts tab shows the builder, reviewer and coordinator discussing a reviewed fix, the person's answered decision marked Heard, an evidence receipt and a code reference.">
+</picture>
 
 ### Roadmap
 
@@ -171,7 +195,10 @@ The same board in your pocket.
 <details>
 <summary>The board on a phone</summary>
 
-![The phone board in dark mode shows active work, a Needs you row for a held lane, search in the top bar, and a stats line with merged work, sent-back share and the bottleneck recommendation.](docs/shots/phone.png)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/shots/phone-dark.png">
+  <img src="docs/shots/phone-light.png" alt="The phone board shows active work, a Needs you row for a held lane, search in the top bar, and a stats line with merged work, sent-back share and the bottleneck recommendation.">
+</picture>
 
 </details>
 
@@ -190,7 +217,10 @@ pullboard tour
 
 On a throwaway repo, **you** approve one rule: greet a blank name as "world". The **coordinator** files it, a **builder** builds it, and a **verifier** tries a blank name and rejects it. The **builder** fixes it and adds a test. The **verifier** breaks the fix on purpose, sees the test fail, and accepts. The **coordinator** merges it with a receipt.
 
-![The timed Pullboard tour shows a change submitted, rejected for a missed edge, fixed and accepted.](docs/shots/tour.svg)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/shots/tour-dark.svg">
+  <img src="docs/shots/tour.svg" alt="The timed Pullboard tour shows a change submitted, rejected for a missed edge, fixed and accepted.">
+</picture>
 
 ### Project setup
 
@@ -200,7 +230,10 @@ Give your agent this line in an empty or existing git repo.
 
 Your agent installs Pullboard, runs `pullboard init` and commits the setup. It then walks you through setup in the view it opens. You approve your requirements and answer its questions.
 
-![Starting with an agent. You ask your agent to install Pullboard and set it up for what you're building. It runs the install and pullboard init, commits the setup, then walks you through your requirements and questions in the view it opens for you.](docs/img/agent-start.svg)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/img/agent-start-dark.svg">
+  <img src="docs/img/agent-start.svg" alt="Starting with an agent. You ask your agent to install Pullboard and set it up for what you're building. It runs the install and pullboard init, commits the setup, then walks you through your requirements and questions in the view it opens for you.">
+</picture>
 
 You can also run it yourself.
 
@@ -273,7 +306,10 @@ Every move follows one declaration, published in [docs/lifecycle.md](docs/lifecy
 
 Items are state machines. Every item starts **open**. An agent claims it and it's **claimed**; if the agent goes quiet, it reopens. Once submitted, it's **submitted** until a verifier accepts it as **verified** or rejects it back to **open**. Only the coordinator can **withdraw** an item. The board refuses any move the declaration doesn't allow.
 
-![An item's life, drawn from src/machine.js: each state an item can be in, the moves between them, and the refusals every way into a final state can raise.](docs/img/lifecycle.svg)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/img/lifecycle-dark.svg">
+  <img src="docs/img/lifecycle.svg" alt="An item's life, drawn from src/machine.js: each state an item can be in, the moves between them, and the refusals every way into a final state can raise.">
+</picture>
 
 <sub>Drawn from one declaration, `src/machine.js`, which the commands, the view and the docs all share.</sub>
 
@@ -286,7 +322,10 @@ Everything lives in your repo. Nothing is hosted.
 - **Submitted work:** pinned in git, so it survives a deleted worktree.
 - **Backups:** `pullboard export` writes out the whole board.
 
-![Where things live. The main checkout is the coordinator and holds SPEC.md, DOCTRINE.md, pullboard.json, AGENTS.md and the git hooks. Inside .git, shared by every worktree, are the board and the pinned submitted commits. Beside it, each agent works in its own worktree, builders in their lanes and a verifier, all on the same board. pullboard view lists every project on this machine.](docs/img/layout.svg)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/img/layout-dark.svg">
+  <img src="docs/img/layout.svg" alt="Where things live. The main checkout is the coordinator and holds SPEC.md, DOCTRINE.md, pullboard.json, AGENTS.md and the git hooks. Inside .git, shared by every worktree, are the board and the pinned submitted commits. Beside it, each agent works in its own worktree, builders in their lanes and a verifier, all on the same board. pullboard view lists every project on this machine.">
+</picture>
 
 ### Configuration
 

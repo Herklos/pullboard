@@ -41,8 +41,8 @@ import {
   refuseNextIdle,
 } from './next-steps.js';
 import { reviewerStartup } from './next-steps.js';
-import { recordItemSession } from './item-sessions.js';
-import { refuseSelfSession } from './item-sessions.js';
+import * as itemSessions from './item-sessions.js';
+import { submitPreflight } from './submit-preflight.js';
 import * as store from './board.js';
 import {
   CONFIG_FILE,
@@ -966,8 +966,8 @@ async function reserveRow(ctx, row, written) {
 }
 
 /** Dispatch a board mutation locally, or seal it before any linked replica applies it. */
-/** Note the session behind a claim or submit (#921), then hand back the move's result unchanged. */
-function tapItemSession(info, operation, args, result) { if (operation === 'claim' || operation === 'submit') recordItemSession(info, args[0], operation); return result; }
+/** Note the session behind a claim or submit (#921): its ledger must be writable before the move, and record after it. */
+async function withItemSession(info, operation, args, move) { const noted = operation === 'claim' || operation === 'submit'; if (noted) itemSessions.requireLedger(info); const result = await move(); if (noted) itemSessions.recordItemSession(info, args[0], operation); return result; }
 
 async function ordered(ctx, board, operation, args) {
   // Every engine-27 registration records the seat that made it: the coordinator from the main
@@ -978,8 +978,8 @@ async function ordered(ctx, board, operation, args) {
   }
   const command = ['add', 'edit', 'merged'].includes(ctx.io.relayCommand?.cliOperation) ? ctx.io.relayCommand : undefined;
   /** Dispatch while this session holds the checkout, including long-running next/run loops. */
-  const execute = async () => tapItemSession(ctx.info, operation, args, await (relayLinked(ctx.info.root) || relayRecovered(ctx.info.root)
-    ? relayOperation(ctx.info.root, operation, args, ctx.io, command, () => store[operation](board, ...args)) : store[operation](board, ...args)));
+  const execute = () => withItemSession(ctx.info, operation, args, () => relayLinked(ctx.info.root) || relayRecovered(ctx.info.root)
+    ? relayOperation(ctx.info.root, operation, args, ctx.io, command, () => store[operation](board, ...args)) : store[operation](board, ...args));
   const digest = agentSessionDigest();
   const boardOnly = CHECKOUT_BOARD_ONLY.get(ctx.io);
   const boardOnlyOperation = (boardOnly === 'shout' && operation === 'shout') || (boardOnly === 'fact' && operation === 'appendFact');
@@ -2745,6 +2745,7 @@ async function submitHere(ctx, id) {
   if (stray.length) throw new Refused('UNTRACKED', `commit or ignore ${stray.length} untracked file(s), e.g. ${stray[0]}`);
   const commit = headCommit(root);
   if (!commit) throw new Refused('NO_COMMIT', 'nothing committed yet');
+  withBoard(ctx, (board) => submitPreflight(board, id, { agentId: me.id, commit, tree: headTree(root) ?? '' }));
   const trunk = requireTrunkMerge(root, commit);
   withBoard(ctx, (board) => refuseUnverifiedStack(root, board, held, commit, trunk));
   // Doctrine counts only fall: accepted main's rules, at this exact commit (D1). No rule, no change.
@@ -2978,7 +2979,7 @@ async function verifyHere(ctx, id, { second, values }) {
       return await ordered(ctx, board, 'verify', recovered.args);
     }
     const item = store.getItem(board, id);
-    refuseSelfSession(ctx.info, item);
+    itemSessions.refuseSelfSession(ctx.info, item);
     const reReview = item.item_status === 'verified' && !item.item_merged_commit;
     const stale = reReview ? verdictProjector(root, board).state(item) : null;
     if (item.item_status !== 'submitted' && !stale) {

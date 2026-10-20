@@ -12,11 +12,14 @@ import { fileURLToPath } from 'node:url';
 import { browser, waitForDemoBoard } from './capture-browser.mjs';
 import { FIXED_TIME, isolatedEnv } from './demo-env.mjs';
 import { renderTour } from './tour-renderer.mjs';
+import { themeVariants } from '../img/theme.mjs';
 import { AGENT_SHELL_MARKERS } from '../../src/person.js';
 
 const ROOT = resolve(fileURLToPath(new URL('../..', import.meta.url)));
 const BIN = join(ROOT, 'bin', 'pullboard.js');
 const OUTPUT = fileURLToPath(new URL('./', import.meta.url));
+/** Every board image is captured in both themes, so GitHub can show the one that matches the reader. */
+const THEMES = ['light', 'dark'];
 const DEMO_OUTPUT = join(ROOT, 'docs', 'demo');
 const DEMO_BOARD_ID = 'demo-board';
 const CHROME = [process.env.PULLBOARD_CHROME, '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', '/usr/bin/google-chrome', '/usr/bin/chromium', '/usr/bin/chromium-browser'].filter(Boolean);
@@ -241,7 +244,20 @@ async function recordTour(env) {
   const status = await new Promise((resolveStatus) => child.once('close', resolveStatus));
   if (buffer.trim()) lines.push({ text: buffer.trim(), at: Date.now() - started });
   if (status !== 0 || !lines.length) throw new Error('The pullboard tour recording did not finish');
-  await writeFile(join(OUTPUT, 'tour.svg'), renderTour(lines));
+  const { light, dark } = themeVariants(renderTour(lines));
+  await writeFile(join(OUTPUT, 'tour.svg'), light);
+  await writeFile(join(OUTPUT, 'tour-dark.svg'), dark);
+}
+
+/**
+ * Show the board in one theme the way the reader's own choice does, then wait for the paint.
+ *
+ * @param {{ evaluate: (expression: string) => Promise<unknown> }} view the open demo page
+ * @param {'light' | 'dark'} theme the theme to paint
+ */
+async function paintTheme(view, theme) {
+  await view.evaluate(`document.documentElement.dataset.theme = ${JSON.stringify(theme)}; localStorage.setItem('pb.theme', ${JSON.stringify(theme)})`);
+  await view.evaluate('document.fonts.ready.then(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))');
 }
 
 /** Capture the real demo release and one expanded item, with data and geometry checks before each image. */
@@ -384,15 +400,23 @@ else {
           await view.evaluate("document.querySelector('#filter-toggle').click(); document.querySelector('#filter-menu [data-filter-choice=\"state:active\"]').click()");
           await view.waitFor("!document.querySelector('#needs').hidden && document.querySelector('#needs').textContent.includes('NEEDS YOU') && document.querySelector('#detail').textContent.includes('ACCEPT')", 'Active items, Needs you and the selected review history');
           await view.evaluate('document.fonts.ready.then(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))');
-          await view.screenshot(join(OUTPUT, 'desktop.png'));
+          for (const theme of THEMES) {
+            await paintTheme(view, theme);
+            await view.screenshot(join(OUTPUT, `desktop-${theme}.png`));
+          }
           await view.viewport(390, 900);
-          await view.evaluate("(()=>{document.documentElement.dataset.theme='dark'; localStorage.setItem('pb.theme','dark'); const item=document.querySelector('[data-item=\"4\"]'); const detail=document.querySelector('#detail')?.textContent??''; if(document.documentElement.dataset.theme!=='dark'||!item||!detail.includes('ACCEPT')||document.querySelector('#needs').hidden) throw new Error('The phone screenshot must show active work and Needs you in dark mode'); return true})()");
-          await view.screenshot(join(OUTPUT, 'phone.png'));
+          for (const theme of THEMES) {
+            await paintTheme(view, theme);
+            await view.evaluate("(()=>{const item=document.querySelector('[data-item=\"4\"]'); const detail=document.querySelector('#detail')?.textContent??''; if(!item||!detail.includes('ACCEPT')||document.querySelector('#needs').hidden) throw new Error('The phone screenshot must show active work and Needs you'); return true})()");
+            await view.screenshot(join(OUTPUT, `phone-${theme}.png`));
+          }
           await view.viewport(1440, 900);
           await view.evaluate("document.documentElement.dataset.theme='light'; localStorage.setItem('pb.theme','light'); document.querySelector('[data-tab=\"shouts\"]').click()");
           await view.waitFor("!document.querySelector('#shouts-pane').hidden && !!document.querySelector('#feed .heard:not(.not)') && !!document.querySelector('#feed .receipt') && !!document.querySelector('#feed [data-code]') && !!document.querySelector('#feed .band.done')", 'answered conversation, Heard, receipt and code reference');
-          await view.evaluate('document.fonts.ready.then(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))');
-          await view.screenshot(join(OUTPUT, 'shouts.png'));
+          for (const theme of THEMES) {
+            await paintTheme(view, theme);
+            await view.screenshot(join(OUTPUT, `shouts-${theme}.png`));
+          }
         }
         await captureRoadmap(view, repo, observation);
         await view.close(); view = null;

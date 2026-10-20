@@ -4,7 +4,9 @@
  * record the session's digest beside the board, in this repository's own Git directory, never on the shared board or
  * the relay, and a verdict from a session that built or submitted the item is refused.
  */
+import { accessSync } from 'node:fs';
 import { appendFileSync } from 'node:fs';
+import { constants } from 'node:fs';
 import { existsSync } from 'node:fs';
 import { mkdirSync } from 'node:fs';
 import { readFileSync } from 'node:fs';
@@ -18,20 +20,43 @@ function ledgerFile(info) {
   return join(info.commonDir, 'pullboard', 'item-sessions.jsonl');
 }
 
-/** Record that this session claimed or submitted an item. A ledger that cannot be written never fails the move. */
+/** The refusal when the ledger cannot keep a session's claims and submits; a lost entry would let that session judge its own work. */
+function ledgerRefusal(info, error) {
+  return new Refused('SESSION_LEDGER', `this agent session's claim or submit cannot be recorded in ${ledgerFile(info)} (${error.code ?? error.message}), so a later verdict could not be checked against it`,
+    `make that file writable by this user (chmod u+rw ${ledgerFile(info)}), then run the command again`);
+}
+
+/**
+ * Refuse a claim or submit from an agent session before it moves when the ledger cannot be written (#921). A shell
+ * with no agent session records nothing and is never refused.
+ */
+export function requireLedger(info, digest = agentSessionDigest()) {
+  if (!digest) return;
+  try {
+    mkdirSync(join(info.commonDir, 'pullboard'), { recursive: true, mode: 0o700 });
+    accessSync(existsSync(ledgerFile(info)) ? ledgerFile(info) : join(info.commonDir, 'pullboard'), constants.W_OK);
+  } catch (error) { throw ledgerRefusal(info, error); }
+}
+
+/** Record that this session claimed or submitted an item; a write that fails after the move is reported, never dropped. */
 export function recordItemSession(info, item, move, digest = agentSessionDigest()) {
   if (!digest || !Number.isInteger(Number(item))) return;
   try {
-    mkdirSync(join(info.commonDir, 'pullboard'), { recursive: true, mode: 0o700 });
     appendFileSync(ledgerFile(info), JSON.stringify({ item: Number(item), move, digest, at: new Date().toISOString() }) + '\n', { mode: 0o600 });
-  } catch { /* The binding scan below still covers a session that holds the builder's checkout. */ }
+  } catch (error) { throw ledgerRefusal(info, error); }
 }
 
 /** The digests recorded for one item's claims and submits. */
 function ledgerDigests(info, item) {
   const file = ledgerFile(info);
   if (!existsSync(file)) return new Set();
-  return new Set(readFileSync(file, 'utf8').split('\n').flatMap((line) => {
+  let text;
+  try { text = readFileSync(file, 'utf8'); }
+  catch (error) {
+    throw new Refused('SESSION_LEDGER', `the agent-session ledger ${file} cannot be read (${error.code ?? error.message}), so this verdict's independence from the builder cannot be checked`,
+      `make it readable by this user (chmod u+r ${file}), then verify again`);
+  }
+  return new Set(text.split('\n').flatMap((line) => {
     try {
       const row = JSON.parse(line);
       return row.item === item && typeof row.digest === 'string' ? [row.digest] : [];

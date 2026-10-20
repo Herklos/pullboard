@@ -379,3 +379,20 @@ test('a verdict from the agent session that built the item is refused under any 
   const accepted = reviewAs(other, ['verify', '1', 'accept', '--note', 'checked the page', '--json']);
   assert.equal(accepted.status, 0, `${accepted.stdout}${accepted.stderr}`);
 });
+
+test('a session whose claims cannot be recorded is refused before it moves, never let through [V1,B3]', () => {
+  const box = project();
+  const ledger = resolve(box.repo, box.git(box.repo, 'rev-parse', '--git-common-dir'), 'pullboard', 'item-sessions.jsonl');
+  writeFileSync(ledger, '', { mode: 0o400 });
+  chmodSync(ledger, 0o400);
+  const before = boardSnapshot(box.boardFile);
+  const claim = box.run(box.web, ['claim', '1', '--json'], { session: 'codex-thread-secret-unrecorded-921', sessionKey: 'CODEX_THREAD_ID' });
+  assert.notEqual(claim.status, 0, 'an unrecordable claim is refused');
+  const error = JSON.parse(claim.stdout).error;
+  assert.equal(error.code, 'SESSION_LEDGER');
+  assert.match(error.next, /chmod u\+rw/u);
+  assert.deepEqual(boardSnapshot(box.boardFile), before, 'the refused claim moved nothing');
+  chmodSync(ledger, 0o600);
+  assert.equal(box.run(box.web, ['claim', '1', '--json'], { session: 'codex-thread-secret-unrecorded-921', sessionKey: 'CODEX_THREAD_ID' }).status, 0, 'a writable ledger lets it through');
+  assert.match(readFileSync(ledger, 'utf8'), /"move":"claim"/u);
+});

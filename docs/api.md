@@ -198,6 +198,8 @@ For HTTP `next`, a review offer returns success with `event: null`, `offer` and 
 - `key` names the cause and what is stuck, like `CLAIM_LAPSED:item:12`, `HOLD_STALE:lane:docs`, `DECISION_UNANSWERED:shout:40` or `RELEASE_OVERDUE:release:v0.9.0`; it stays the same while the finding persists, so a watcher can post it once and notice when it clears.
 - `item` is the item id, or `null` for a lane hold, a decision or a release; `subject` is the same thing as text (`#12`, `lane docs`, `decision #40`, `release v0.9.0`).
 - `since` is when the wait began, in ISO time; `ageMinutes` counts whole minutes from it to `asOf`.
+
+A gate has its own two alarms, which need no board. Each real `pullboard gate` run appends a line to `pullboard-gate-runs.jsonl` in the git directory, with its result and, when `pullboard.json` declares `positiveControl`, that known-good command's result. `GATE_CONTROL_FAILED:gate` is stuck when the last run's positive control failed. `GATE_REFUSED_EVERY_RUN:gate` is stuck when the runs in the last day were all refused, and there are at least three of them. Each carries the gate, its control and its last five runs in `detail`; its `command` is `pullboard gate` for the refusal alarm.
 - `why` and `next` are plain sentences; `command` is the exact command for the next step, or `null` when the step has none.
 - `owner.role` is `builder`, `reviewer`, `coordinator` or `person`; `owner.who` is the agent, lane, `coordinator` or `person`, and `null` when any reviewer may take it.
 - `detail` holds the cause's facts: `holder`, `reviewer`, `builder`, `commit`, `files` and `trunk` for a conflict, `parent` for a stacked item, `reason` and `by` for a hold, `withdrawn`, `after`, `move` and `milestone`, `shout`, `from` and `to`, or `release` and `landed`.
@@ -222,6 +224,12 @@ The causes, each with its owner:
 | `DECISION_UNANSWERED` | a decision to the coordinator or the person is unanswered past `health.stuck` | the coordinator or the person |
 | `REQUEST_UNANSWERED` | a person's request is not done or declined past `health.stuck` | the coordinator |
 | `RELEASE_OVERDUE` | landed work waits and the newest version tag is older than `health.release` | the coordinator |
+| `ROUTE_UNSERVED` | open current work on a route that no active agent can take; `detail.items` names them | the coordinator, who starts an agent on the route |
+| `ITEM_UNTAKEABLE` | an open item that no active agent in its lane can take on its route | the coordinator |
+| `IDLE_AGENT` | an agent with no claim, review or event for 30 minutes while open work in its lane is one it could take | the agent itself |
+| `RANK_INVERSION` | a claim whose holder could take an earlier-ranked item that sits free; `detail.ahead` names it | the holder |
+
+An agent is active while it holds a claim or review, has submitted work still awaiting review, or had an event or shout in the last 30 minutes. Queue faults read the queue's own order, so `pullboard queue` and health agree.
 
 The current release is the roadmap's first milestone with unverified local work; an unplanned item counts as current. A release is the newest tag named like `v1.2.3` or `1.2.3`, dated by its creation, and its landed work is every item first recorded merged after it. A repository with no such tag has no release deadline. The trunk is the primary checkout's branch, or the retained trunk when that checkout is detached.
 
