@@ -122,3 +122,21 @@ test('a read-only board refuses resume by name [I1,L3,P4]', () => {
   } finally { unlockBoard(folder); }
   assert.equal(p.run(p.repo, 'resume').code, 0, 'restoring write access, the step it names, lets resume run');
 });
+
+test('a Codex agent that cannot write the board is told the Codex step that grants it [I1,P4]', () => {
+  const p = project();
+  const folder = join(p.repo, '.git', 'pullboard');
+  assert.equal(p.run(p.repo, 'resume').code, 0, 'the board opens before it is locked');
+  // init's agent guidance names the step before the first refusal.
+  assert.match(readFileSync(join(p.repo, 'AGENTS.md'), 'utf8'), /\*\*Codex\.\*\* .*codex --add-dir "\$\(git rev-parse --path-format=absolute --git-common-dir\)\/pullboard"/u);
+  lockBoard(folder);
+  try {
+    const codex = runFixtureChild(process.execPath, [join(import.meta.dirname, '..', 'bin', 'pullboard.js'), 'resume', '--json'],
+      { cwd: p.repo, env: { ...p.env, CODEX_THREAD_ID: 'codex-thread-913' }, encoding: 'utf8' });
+    assert.notEqual(codex.status, 0);
+    const { error } = JSON.parse(codex.stdout);
+    assert.equal(error.code, 'BOARD_NOT_WRITABLE');
+    assert.match(error.message, /Codex's workspace-write sandbox keeps \.git read-only/u);
+    assert.equal(error.next, `restart Codex with that folder writable: codex --add-dir '${folder}' (or add it to writable_roots under [sandbox_workspace_write] in ~/.codex/config.toml), then run the command again`);
+  } finally { unlockBoard(folder); }
+});

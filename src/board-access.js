@@ -1,6 +1,10 @@
 /** Name a board this process cannot write, such as one inside a read-only agent sandbox [I1,P4]. */
 import { dirname } from 'node:path';
+import { AGENT_SHELL_MARKERS } from './person.js';
 import { Refused } from './refused.js';
+
+/** The markers a Codex session sets; its sandbox needs the board folder named to Codex itself. */
+const CODEX_MARKERS = AGENT_SHELL_MARKERS.filter((name) => name.startsWith('CODEX_'));
 
 /**
  * Turn SQLite's bare readonly or cannot-open error, or a file-system access error, into a named
@@ -12,9 +16,15 @@ import { Refused } from './refused.js';
  * @param {Error & { errcode?: number, code?: string }} error
  * @returns {Error}
  */
-export function boardNotWritable(file, error) {
+export function boardNotWritable(file, error, environment = process.env) {
   const sqliteCode = Number.isInteger(error?.errcode) ? error.errcode & 0xff : null;
   if (sqliteCode !== 8 && sqliteCode !== 14 && !['EACCES', 'EPERM', 'EROFS'].includes(error?.code ?? '')) return error;
+  const folder = dirname(file);
+  // Codex's workspace-write sandbox keeps .git read-only; its own flag grants the one folder (#913).
+  if (CODEX_MARKERS.some((name) => Boolean(environment[name]))) {
+    return new Refused('BOARD_NOT_WRITABLE', `Cannot write the board in "${folder}": Codex's workspace-write sandbox keeps .git read-only.`,
+      `restart Codex with that folder writable: codex --add-dir '${folder.replaceAll("'", "'\\''")}' (or add it to writable_roots under [sandbox_workspace_write] in ~/.codex/config.toml), then run the command again`);
+  }
   return new Refused('BOARD_NOT_WRITABLE',
-    `Cannot write the board in "${dirname(file)}". Give the agent write access to that folder, the repo's .git/pullboard, or run the command outside the sandbox.`);
+    `Cannot write the board in "${folder}". Give the agent write access to that folder, the repo's .git/pullboard, or run the command outside the sandbox.`);
 }

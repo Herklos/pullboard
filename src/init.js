@@ -42,6 +42,7 @@ import {
   settingCommand,
 } from './gate-config.js';
 export { detectGate } from './gate-config.js';
+import { gitPath } from './git.js';
 import { machineHome } from './machine-home.js';
 import { Refused } from './refused.js';
 import { reviewerStartup } from './next-steps.js';
@@ -542,9 +543,10 @@ function writeCodexLoopRules(root, gate, onWrite) {
   if (!machineHomeWriteScopeIsNarrow(machinePath)) {
     return `${rulesNote}; trust this project and restart the session to load rules. Machine-home write was not granted because the path is the OS home, an ancestor of it, or a filesystem root; choose a narrower PULLBOARD_MACHINE_HOME`;
   }
-  const workspaceWrite = `sandbox_mode = "workspace-write"\n\n[sandbox_workspace_write]\nwritable_roots = ${JSON.stringify([machinePath])}`;
+  // The board folder sits under .git, which Codex keeps read-only, so it is granted beside the machine home (#913).
+  const workspaceWrite = `sandbox_mode = "workspace-write"\n\n[sandbox_workspace_write]\nwritable_roots = ${JSON.stringify([machinePath, gitPath(root, 'pullboard')])}`;
   const profileWrite = `${JSON.stringify(machinePath)} = "write"`;
-  return `${rulesNote}; trust this project and restart the session to load rules. For machine-home access, merge these exact values into legacy Codex settings: put sandbox_mode at the TOML top level before any table, append this exact path to any existing writable_roots array while keeping its entries, and do not duplicate the table or replace unrelated settings:\n${workspaceWrite}\nPermission-profile users add ${profileWrite} under their existing [permissions.<active-profile>.filesystem] table instead; do not mix the two configuration formats. Official docs: https://learn.chatgpt.com/docs/config-file/config-reference and https://learn.chatgpt.com/docs/permissions`;
+  return `${rulesNote}; trust this project and restart the session to load rules. For machine-home access, merge these exact values into legacy Codex settings: put sandbox_mode at the TOML top level before any table, append these exact paths to any existing writable_roots array while keeping its entries, and do not duplicate the table or replace unrelated settings:\n${workspaceWrite}\nPermission-profile users add ${profileWrite} under their existing [permissions.<active-profile>.filesystem] table instead; do not mix the two configuration formats. Official docs: https://learn.chatgpt.com/docs/config-file/config-reference and https://learn.chatgpt.com/docs/permissions`;
 }
 
 /**
