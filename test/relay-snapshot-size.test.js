@@ -4,6 +4,8 @@ import { createHash, randomBytes } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { gzipSync, gunzipSync } from 'node:zlib';
+import { spawn } from 'node:child_process';
+import { availableParallelism } from 'node:os';
 import { test } from 'node:test';
 import * as store from '../src/board.js';
 import { decodeBoardKey, seal, unseal } from '../src/seal.js';
@@ -262,9 +264,11 @@ async function oldestEventPage(head, context) {
   }
 }
 
-test('thirty thousand events open on the phone within three seconds and stream all sealed history beside live moves [H5,H15,H17]', {
-  skip: !findChromeExecutable() && 'Chrome is not installed',
-}, async t => {
+/**
+ * A linked board with thirty thousand events, its oldest shout and over thirty megabytes of sealed history uploaded
+ * through API2 pages, as #903's phone case builds it (#953 shares it).
+ */
+async function thirtyThousandBoard(t) {
   const box = await relayClientFixture(t);
   await box.link();
   const pairing = await box.cli('relay', 'pair');
@@ -318,12 +322,21 @@ test('thirty thousand events open on the phone within three seconds and stream a
   const root = await readSealedDescriptor(head.root, context);
   assert.ok(root.links[0].bytes < 1_000_000, 'the authenticated current-state plaintext budget is under one megabyte');
   const heldPage = await oldestEventPage(head, context);
+  return { box, pairing, second, currentMarker, oldestMarker, liveMarker, oldest, before, uploadedStatus, link, writes, uploaded, cipherBytes, headers, headResponse, head, key, context, root, heldPage };
+}
+
+/**
+ * Open that board on a fresh phone-sized Chrome and return the page's own timing once it has painted the current
+ * board. holdStateMs is a test-only delay on the phone's current-state read, which holds the first paint (#953).
+ */
+async function openOnPhone(t, { box, link, heldPage, currentMarker }, { holdStateMs = 0 } = {}) {
   const chrome = await startChrome();
   t.after(() => chrome.close());
   await chrome.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
   await chrome.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
   await chrome.send('Page.addScriptToEvaluateOnNewDocument', { source: String.raw`
     window.__phoneTiming = { firstBoardPaint: null, objectRequests: 0, loopbackReads: 0, historyHeld: false };
+    window.__holdStateMs = ${holdStateMs};
     window.__releaseOlderHistory = null;
     const originalFetch = window.fetch;
     window.fetch = async (input, options) => {
@@ -332,6 +345,10 @@ test('thirty thousand events open on the phone within three seconds and stream a
         __phoneTiming.loopbackReads++; throw new TypeError('No local view in this private phone fixture');
       }
       if (/\/api\/v2\/boards\/[^/]+\/objects\//u.test(url.pathname)) __phoneTiming.objectRequests++;
+      if (window.__holdStateMs && /\/api\/v2\/boards\/[^/]+\/state$/u.test(url.pathname)) {
+        const held = window.__holdStateMs; window.__holdStateMs = 0;
+        await new Promise(resolveHold => setTimeout(resolveHold, held));
+      }
       if (url.pathname.endsWith('/objects/${heldPage}') && !window.__olderHistoryAllowed) {
         __phoneTiming.historyHeld = true;
         await new Promise(resolveHistory => { window.__releaseOlderHistory = resolveHistory; });
@@ -351,8 +368,17 @@ test('thirty thousand events open on the phone within three seconds and stream a
   });
   await chrome.navigate(box.origin + '/#board=' + link.board + '&key=' + readFileSync(box.keyFile, 'utf8').trim());
   // Budget: the owner's explicit first-readable-board bar is three seconds, independent of historical streaming.
-  await chrome.waitFor('Number.isFinite(window.__phoneTiming?.firstBoardPaint) && typeof transport !== "undefined" && !!transport?.historyProgress', 3000, 'bounded current board paints before all history'); // budget: declared frozen #903 first-readable-board ceiling is 3000ms; it cannot be relaxed.
+  // The product bar is the page's own firstBoardPaint < 3000 ms; this wait only has to outlast a loaded runner (#953).
+  await chrome.waitFor('Number.isFinite(window.__phoneTiming?.firstBoardPaint) && typeof transport !== "undefined" && !!transport?.historyProgress', 30_000, 'bounded current board paints before all history'); // budget: hang ceiling for observing the paint under suite load; the frozen #903 3000ms first-readable-board bar is asserted on the page-measured firstBoardPaint.
   const first = await chrome.evaluate(`({ ...__phoneTiming, phone: document.documentElement.dataset.relayDevice, progress: transport.historyProgress('${link.board}') })`);
+  return { chrome, first };
+}
+
+test('thirty thousand events open on the phone within three seconds and stream all sealed history beside live moves [H5,H15,H17]', {
+  skip: !findChromeExecutable() && 'Chrome is not installed',
+}, async t => {
+  const { box, pairing, second, currentMarker, oldestMarker, liveMarker, oldest, before, uploadedStatus, link, writes, uploaded, cipherBytes, headers, headResponse, head, key, context, root, heldPage } = await thirtyThousandBoard(t);
+  const { chrome, first } = await openOnPhone(t, { box, link, heldPage, currentMarker });
   assert.equal(first.phone, 'phone'); assert.ok(first.firstBoardPaint < 3000);
   assert.equal(first.loopbackReads, 0); assert.equal(first.progress.complete, false);
   // Budget: this fixture streams thirty thousand historical records before reaching its deliberately held oldest event leaf.
@@ -395,6 +421,42 @@ test('thirty thousand events open on the phone within three seconds and stream a
     const screenshot = await chrome.send('Page.captureScreenshot', { format: 'png' });
     writeFileSync(join(output, 'oldest-shout-phone.png'), Buffer.from(screenshot.data, 'base64'), { mode: 0o600 });
   }
+});
+
+/** Whether the page met #903's first-readable-board bar, by the page's own measure of its first board paint. */
+function paintWithinBudget(first) {
+  return Number.isFinite(first.firstBoardPaint) && first.firstBoardPaint < 3000;
+}
+
+/** Hold busy processes on half the cores, as a loaded suite shares the CPU with the runner and Chrome; stop each by its own pid. */
+function cpuStandIn(t) {
+  const busy = Array.from({ length: Math.max(1, Math.floor(availableParallelism() / 2)) },
+    () => spawn(process.execPath, ['-e', 'for (;;) {}'], { stdio: 'ignore' }));
+  const stop = () => { for (const child of busy) if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); };
+  t.after(stop);
+  return { stop, count: busy.length };
+}
+
+test("the phone's first-paint budget is judged by the page, not by a loaded test runner [H5]", {
+  skip: !findChromeExecutable() && 'Chrome is not installed',
+}, async t => {
+  const board = await thirtyThousandBoard(t);
+  const load = cpuStandIn(t);
+  const paints = [];
+  try {
+    for (let run = 0; run < 5; run++) {
+      const { chrome, first } = await openOnPhone(t, board);
+      paints.push(first.firstBoardPaint);
+      await chrome.close();
+    }
+  } finally { load.stop(); }
+  t.diagnostic(JSON.stringify({ cpuStandIn: load.count, firstBoardPaintMs: paints.map(ms => Math.round(ms)) }));
+  assert.ok(paints.every(ms => paintWithinBudget({ firstBoardPaint: ms })), `every page-measured first paint stays under 3000 ms under load: ${paints.join(', ')}`);
+  // A test-only hold on the phone's current-state read really delays the paint past the bar, and the judgement turns red.
+  const { chrome, first } = await openOnPhone(t, board, { holdStateMs: 3_500 });
+  await chrome.close();
+  assert.ok(first.firstBoardPaint >= 3000, `the held state read delays the page's own paint: ${first.firstBoardPaint}`);
+  assert.equal(paintWithinBudget(first), false, 'a paint past three seconds fails the bar');
 });
 
 
