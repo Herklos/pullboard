@@ -4,12 +4,38 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
+import { ciObservations } from './ci-flakes.js';
 import { CONFIG_FILE } from './config.js';
+import { COORDINATOR } from './config.js';
+import { laneOf } from './lanes.js';
 import { flakeLedger } from './flakes.js';
 import { Refused } from './refused.js';
 
+/**
+ * Import CI results into the ledger (#918): each observation is an ordinary ordered board move, filed in the lane
+ * that owns its test, and the original red always stays red.
+ */
+async function importCi(ctx, folder, withBoard, { ordered, resourceAgent }) {
+  const observations = ciObservations(ctx.info.root, folder);
+  const agentId = resourceAgent(ctx);
+  const lanes = Object.keys(ctx.config.lanes ?? {});
+  const recorded = [];
+  for (const observation of observations) {
+    const owner = observation.file ? laneOf(ctx.config, observation.file) : COORDINATOR;
+    const lane = owner === COORDINATOR ? lanes[0] : owner;
+    const result = await withBoard(ctx, board => ordered(ctx, board, 'recordFlakeObservation', [{ agentId, observation, lane }]));
+    recorded.push({ id: observation.id, classification: observation.classification, file: observation.file, name: observation.name,
+      run: observation.ci.run, job: observation.ci.job, duplicate: Boolean(result?.duplicate), item: result?.item ?? null });
+    ctx.io.say(`${observation.classification}: ${observation.file ?? '(unnamed CI failure)'}${observation.name ? ' :: ' + observation.name : ''}; run ${observation.ci.run} attempts ${observation.ci.attempt}→${observation.ci.rerunAttempt}; ${observation.ci.job}${result?.duplicate ? ' (already recorded)' : ''}`);
+  }
+  if (!observations.length) ctx.io.say('no failed CI attempt with a rerun at the same commit; nothing to record');
+  ctx.io.result?.({ imported: recorded });
+  return 0;
+}
+
 /** List actual flake sightings separately from unknown failures and candidate regressions. */
-export function flakesCommand(ctx, { first, second, rest }, withBoard) {
+export function flakesCommand(ctx, { first, second, rest }, withBoard, services = {}) {
+  if (first === 'import' && second && !rest.length) return importCi(ctx, second, withBoard, services);
   if (first === 'rerun' && ['on', 'off'].includes(second) && !rest.length) {
     if (!ctx.info.isMain) throw new Refused('NOT_MAIN', 'only the coordinator sets this board’s diagnostic policy; ask it to run pullboard flakes rerun on or off');
     const file = join(ctx.info.root, CONFIG_FILE);
@@ -20,7 +46,7 @@ export function flakesCommand(ctx, { first, second, rest }, withBoard) {
     ctx.io.say(`paired flake diagnostics ${second}; commit ${CONFIG_FILE} to apply this board policy. The original red remains red.`);
     return 0;
   }
-  if (first || second || rest.length) throw new Refused('USAGE', 'pullboard flakes lists observations; pullboard flakes rerun on|off sets the coordinator’s opt-in policy');
+  if (first || second || rest.length) throw new Refused('USAGE', 'pullboard flakes lists observations; pullboard flakes rerun on|off sets the coordinator’s opt-in policy; pullboard flakes import <folder> records downloaded CI results');
   return withBoard(ctx, board => {
     const rows = flakeLedger(board);
     const flakes = rows.filter(row => row.count > 0);

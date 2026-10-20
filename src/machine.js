@@ -11,6 +11,7 @@
 
 import { RIGOR_NOTICE_ENGINE } from './rigor-source.js';
 import { HEALTH_CAP_ENGINE } from './health-receipts.js';
+import { CI_FLAKE_ENGINE } from './flake-engine.js';
 import { NATIVE_FLAKE_ENGINE } from './flake-engine.js';
 
 /** First writer for withdraw-and-remove milestone behavior; shipment remains engine 45. */
@@ -35,6 +36,7 @@ export const SUBMITTED_CONFLICT_ENGINE = 60;
 export const ENGINE_VERSION = Math.max(
   HEALTH_CAP_ENGINE,
   SUBMITTED_CONFLICT_ENGINE,
+  CI_FLAKE_ENGINE,
   NATIVE_FLAKE_ENGINE,
   ROW_DRAFT_ENGINE,
   AUTO_ESCALATE_ENGINE,

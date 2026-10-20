@@ -487,3 +487,50 @@ test('a ledger recording failure cannot replace the original red or discard its 
   assert.equal(Object.hasOwn(manifest, 'recording-error.addendum.json'), false, 'the original manifest remains immutable');
   assert.equal(JSON.parse(readFileSync(join(directory, 'recording-error.addendum.json'), 'utf8')).code, 'SYNTHETIC_LEDGER_UNAVAILABLE');
 });
+
+/** Save one CI attempt as the importer reads it: a manifest beside its TAP report. */
+function ciAttempt(folder, name, manifest, tap) {
+  const directory = join(folder, name);
+  mkdirSync(directory, { recursive: true });
+  writeFileSync(join(directory, 'run.tap'), tap);
+  writeFileSync(join(directory, 'ci-result.json'), JSON.stringify({ provider: 'github', root: '/home/runner/work/repo/repo', tap: 'run.tap', ...manifest }));
+}
+
+test('a CI job red then green on its rerun is one flake, and a CI failure with no test names stays unclassified [C7,H16]', t => {
+  const box = flakyProject(t);
+  const commit = box.git('rev-parse', 'HEAD').trim();
+  const ci = join(box.scratch, 'ci-results');
+  const location = "  location: '/home/runner/work/repo/repo/test/alternating.test.mjs:3:1'\n";
+  const job = { job: 'linux (22.13.1) 1/2', runner: 'ubuntu-24.04', node: 'v22.13.1', commit, at: '2026-10-20T10:00:00.000Z' };
+  ciAttempt(ci, 'run-111-1', { ...job, run: '111', attempt: 1, conclusion: 'failure' }, `TAP version 13\nnot ok 1 - ${TITLE}\n  ---\n${location}  ...\n1..1\n`);
+  ciAttempt(ci, 'run-111-2', { ...job, run: '111', attempt: 2, conclusion: 'success' }, `TAP version 13\nok 1 - ${TITLE}\n  ---\n${location}  ...\n1..1\n`);
+  const crash = { job: 'macos (22.13.1) 2/2', runner: 'macos-15', node: 'v22.13.1', commit, at: '2026-10-20T11:00:00.000Z' };
+  ciAttempt(ci, 'run-222-1', { ...crash, run: '222', attempt: 1, conclusion: 'failure' }, 'TAP version 13\nnot ok 1 - the shard stopped before its tests reported\n1..1\n');
+  ciAttempt(ci, 'run-222-2', { ...crash, run: '222', attempt: 2, conclusion: 'success' }, 'TAP version 13\n1..0\n');
+
+  const imported = box.cli('flakes', 'import', ci);
+  assert.equal(imported.code, 0, JSON.stringify(imported.document));
+  assert.equal(imported.document.imported.length, 2);
+  const listed = box.cli('flakes').document;
+  assert.equal(listed.flakes.length, 1, 'the red-then-green CI pair is one flake');
+  const flake = listed.flakes[0].observations[0];
+  assert.equal(listed.flakes[0].file, 'test/alternating.test.mjs', 'the CI location resolves inside the CI checkout');
+  assert.equal(listed.flakes[0].name, TITLE);
+  assert.equal(flake.kind, 'ci');
+  assert.deepEqual(flake.ci, { provider: 'github', run: '111', attempt: 1, rerunAttempt: 2, job: job.job, runner: job.runner, node: job.node });
+  assert.equal(flake.head, commit);
+  assert.equal(flake.original.green, false, 'the original CI red is kept');
+  assert.equal(flake.paired.green, true);
+  assert.equal(flake.load, null, 'a hosted runner reports no host load, and none is invented');
+  assertReceipts(box, flake);
+  const unnamed = listed.unclassified.flatMap(row => row.observations).find(entry => entry.ci?.run === '222');
+  assert.ok(unnamed, 'the CI failure with no test named by file is recorded');
+  assert.equal(unnamed.file, null);
+  assert.equal(unnamed.classification, 'unclassified');
+  assert.match(unnamed.reason, /no test named by file/u);
+
+  const again = box.cli('flakes', 'import', ci);
+  assert.equal(again.code, 0);
+  assert.ok(again.document.imported.every(entry => entry.duplicate), 'importing the same CI results again records nothing new');
+  assert.equal(box.cli('flakes').document.flakes[0].count, 1);
+});

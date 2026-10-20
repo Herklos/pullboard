@@ -2319,7 +2319,7 @@ function refuseUncommittedSetup(mainRoot, config) {
  */
 function readCommands(io, { first, second, rest, values }) {
   return {
-    flakes: () => nativeFlakes.command(context(io), { first, second, rest }, withBoard),
+    flakes: () => nativeFlakes.command(context(io), { first, second, rest }, withBoard, { ordered, resourceAgent }),
     doctrine: async () => {
       if (first !== 'check' || second || rest.length) throw new Refused('USAGE', 'pullboard doctrine check');
       const ctx = context(io);
