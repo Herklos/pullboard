@@ -11,13 +11,13 @@ const LINKED = ['test/readme.test.js', 'the README links every figure draw.mjs d
 const CARD = ['test/readme.test.js', 'each figure carries its own light and dark colors'];
 const DECLARED = ['test/readme.test.js', 'the lifecycle figure is drawn from the declaration'];
 const LAYOUT_ALT =
-  '![Where things live. The main checkout is the coordinator and holds SPEC.md, DOCTRINE.md, pullboard.json, AGENTS.md and the git hooks. Inside .git, shared by every worktree, are the board and the pinned submitted commits. Beside it, each agent works in its own worktree, builders in their lanes and a verifier, all on the same board. pullboard view lists every project on this machine.](';
+  'alt="Where things live. The main checkout is the coordinator and holds SPEC.md, DOCTRINE.md, pullboard.json, AGENTS.md and the git hooks. Inside .git, shared by every worktree, are the board and the pinned submitted commits. Beside it, each agent works in its own worktree, builders in their lanes and a verifier, all on the same board. pullboard view lists every project on this machine."';
 
 /** Row, the change, its edits as [file, from, to], the test that judges it, and the outcome expected. */
 const MUTANTS = [
   ['I10', 'a committed figure drifts from what draw.mjs draws', [['docs/img/loop.svg', '>a reject sends it back<', '>a reject sends it home<']], LINKED, 'red'],
-  ['I10', 'the README links a figure draw.mjs does not draw', [['README.md', '](docs/img/layout.svg)', '](docs/img/layout.png)']], LINKED, 'red'],
-  ['I10', 'a figure says nothing to a reader who cannot see it', [['README.md', LAYOUT_ALT, '![figure](']], LINKED, 'red'],
+  ['I10', 'the README links a figure draw.mjs does not draw', [['README.md', 'src="docs/img/layout.svg"', 'src="docs/img/layout.png"']], LINKED, 'red'],
+  ['I10', 'a figure says nothing to a reader who cannot see it', [['README.md', LAYOUT_ALT, 'alt="figure"']], LINKED, 'red'],
   ['I10', 'the figures have no dark colors', [['docs/img/draw.mjs', '@media (prefers-color-scheme: dark) {', '@media print {']], CARD, 'red'],
   ['I10', 'the card does not cover the figure', [['docs/img/draw.mjs', '<rect class="card" x="0.5" y="0.5"', '<rect class="card" x="40" y="0.5"']], CARD, 'red'],
   ['I10', 'a label runs off the card', [['docs/img/draw.mjs', "text(452, 158, 'a reject sends it back', 'label back')", "text(752, 158, 'a reject sends it back', 'label back')"]], CARD, 'red'],

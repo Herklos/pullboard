@@ -175,6 +175,9 @@ export function configProblems(config) {
     problems.push('"landingShards" is a whole number from 1 to 64: how many shards the landing gate splits its test files into');
   }
   if (typeof config.staticChecks !== 'string') problems.push('"staticChecks" is an optional project static-check command');
+  if (config.positiveControl !== undefined && (typeof config.positiveControl !== 'string' || !config.positiveControl.trim())) {
+    problems.push('"positiveControl" is a nonempty command for a known-good case the gate must pass, like "node --test test/known-good.test.js"');
+  }
   if (config.affectedTests !== undefined && (typeof config.affectedTests !== 'string' || !config.affectedTests.trim())) {
     problems.push('"affectedTests" is a nonempty command prefix used to run selected test files');
   }
