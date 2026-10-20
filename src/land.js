@@ -78,10 +78,15 @@ export function landingFailures(output, root, { excludeCancelled = false } = {})
   return [...unique.values()];
 }
 
+/** The merge header type an item with no spec rows takes from its lane; any other lane lands as chore. */
+const LANE_MERGE_TYPES = Object.freeze({ docs: 'docs', test: 'test' });
+
 /** Produce a hook-valid lower-case merge subject at a word boundary [R3]. */
 export function landingSubject(item) {
   const suffix = item.item_spec_ids ? ` [${item.item_spec_ids.split(/[\s,]+/u).filter(Boolean).join(',')}]` : '';
-  const prefix = 'chore(merge): ';
+  // An item with no rows cites none, so its merge header names its lane's type: docs or test; anything else is chore (B3).
+  const type = item.item_spec_ids ? 'chore' : (LANE_MERGE_TYPES[item.item_lane] ?? 'chore');
+  const prefix = `${type}(merge): `;
   const budget = 72 - prefix.length - suffix.length;
   if (budget < 1) throw new Refused('LAND_HEADER', `item #${item.item_id} cites too many rows for a merge header; shorten its cited set before landing`);
   const words = item.item_title.toLowerCase().replace(/[\p{Extended_Pictographic}\u200d\uFE0E\uFE0F]/gu, '').replace(/[\r\n]+/gu, ' ').replace(/\[[^\]]*\]/gu, '').trim().split(/\s+/u);
