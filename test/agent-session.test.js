@@ -347,3 +347,35 @@ test('a remote shell is recognized by any SSH marker [B26,E22]', () => {
   assert.equal(relayError?.code, 'RELAY_UNAVAILABLE', 'relay on over SSH reaches the relay');
   assert.match(relayError.message, /\/auth\/device\/start/u, 'relay on over SSH starts its device sign-in (#615)');
 });
+
+test('a verdict from the agent session that built the item is refused under any seat [V1,B3]', () => {
+  const box = project();
+  const builder = 'codex-thread-secret-builder-921';
+  const build = (args) => box.run(box.web, args, { session: builder, sessionKey: 'CODEX_THREAD_ID' });
+  assert.equal(build(['claim', '1', '--json']).status, 0);
+  writeFileSync(join(box.web, 'web', 'page.txt'), 'built\n');
+  box.git(box.web, 'commit', '-qam', 'feat(web): build the fixture item [G1]');
+  const submitted = build(['submit', '1', '--json']);
+  assert.equal(submitted.status, 0, `${submitted.stdout}${submitted.stderr}`);
+  // The same session opens a review seat of its own: a different seat name, the same session.
+  const review = join(box.dir, 'review-seat');
+  box.git(box.repo, 'worktree', 'add', '-q', '--detach', review, box.git(box.web, 'rev-parse', 'HEAD'));
+  const reviewAs = (session, args) => box.run(review, args, { session, sessionKey: 'CODEX_THREAD_ID' });
+  assert.equal(reviewAs(builder, ['join', 'web', '--json']).status, 0);
+  const before = boardSnapshot(box.boardFile);
+  const own = reviewAs(builder, ['verify', '1', 'accept', '--note', 'checked the page', '--json']);
+  assert.notEqual(own.status, 0, 'the building session cannot accept its own item from another seat');
+  const error = JSON.parse(own.stdout).error;
+  assert.equal(error.code, 'SELF_SESSION_VERIFY');
+  assert.match(error.message, /this agent session built or submitted #1/u);
+  assert.match(error.next, /another agent session/u);
+  assert.deepEqual(boardSnapshot(box.boardFile), before, 'the refused verdict records nothing');
+  assertNoRawSession(box, box.web, [builder], 'CODEX_THREAD_ID');
+  const ledger = readFileSync(resolve(box.repo, box.git(box.repo, 'rev-parse', '--git-common-dir'), 'pullboard', 'item-sessions.jsonl'), 'utf8');
+  assert.equal(ledger.includes(builder), false, 'the local item ledger keeps only the session digest');
+  // Another session takes over that review seat and gives the verdict.
+  const other = 'codex-thread-secret-reviewer-921';
+  assert.equal(reviewAs(other, ['takeover', '--json']).status, 0);
+  const accepted = reviewAs(other, ['verify', '1', 'accept', '--note', 'checked the page', '--json']);
+  assert.equal(accepted.status, 0, `${accepted.stdout}${accepted.stderr}`);
+});

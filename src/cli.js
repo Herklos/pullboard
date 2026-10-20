@@ -41,6 +41,8 @@ import {
   refuseNextIdle,
 } from './next-steps.js';
 import { reviewerStartup } from './next-steps.js';
+import { recordItemSession } from './item-sessions.js';
+import { refuseSelfSession } from './item-sessions.js';
 import * as store from './board.js';
 import {
   CONFIG_FILE,
@@ -964,6 +966,9 @@ async function reserveRow(ctx, row, written) {
 }
 
 /** Dispatch a board mutation locally, or seal it before any linked replica applies it. */
+/** Note the session behind a claim or submit (#921), then hand back the move's result unchanged. */
+function tapItemSession(info, operation, args, result) { if (operation === 'claim' || operation === 'submit') recordItemSession(info, args[0], operation); return result; }
+
 async function ordered(ctx, board, operation, args) {
   // Every engine-27 registration records the seat that made it: the coordinator from the main
   // checkout, the joined agent from its worktree, or `machine` for a join no seat made (#579).
@@ -973,8 +978,8 @@ async function ordered(ctx, board, operation, args) {
   }
   const command = ['add', 'edit', 'merged'].includes(ctx.io.relayCommand?.cliOperation) ? ctx.io.relayCommand : undefined;
   /** Dispatch while this session holds the checkout, including long-running next/run loops. */
-  const execute = () => relayLinked(ctx.info.root) || relayRecovered(ctx.info.root)
-    ? relayOperation(ctx.info.root, operation, args, ctx.io, command, () => store[operation](board, ...args)) : store[operation](board, ...args);
+  const execute = async () => tapItemSession(ctx.info, operation, args, await (relayLinked(ctx.info.root) || relayRecovered(ctx.info.root)
+    ? relayOperation(ctx.info.root, operation, args, ctx.io, command, () => store[operation](board, ...args)) : store[operation](board, ...args)));
   const digest = agentSessionDigest();
   const boardOnly = CHECKOUT_BOARD_ONLY.get(ctx.io);
   const boardOnlyOperation = (boardOnly === 'shout' && operation === 'shout') || (boardOnly === 'fact' && operation === 'appendFact');
@@ -2973,6 +2978,7 @@ async function verifyHere(ctx, id, { second, values }) {
       return await ordered(ctx, board, 'verify', recovered.args);
     }
     const item = store.getItem(board, id);
+    refuseSelfSession(ctx.info, item);
     const reReview = item.item_status === 'verified' && !item.item_merged_commit;
     const stale = reReview ? verdictProjector(root, board).state(item) : null;
     if (item.item_status !== 'submitted' && !stale) {
