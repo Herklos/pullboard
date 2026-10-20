@@ -345,3 +345,18 @@ test('a bare pipefail mention in an echo does not stop a masked pipe being refus
 test('a check that sets pipefail as a command is accepted [C7,V4]', () => {
   assert.equal(maskRefusal('set -o pipefail; node -e "process.exit(1)" | tail -5'), null);
 });
+
+test('an untested capture does not excuse a later masked pipe [C7,V4]', () => {
+  // A capture exempts only a pipeline that tests the captured value; this one is never read (#812 review).
+  assert.equal(maskRefusal(`out=$(printf ok); node -e "console.log('proof-red'); process.exit(7)" | tail -n1`), 'CHECK_MASKS_EXIT');
+});
+
+test('a masked pipe inside a plain subshell is refused [C7,V4]', () => {
+  // A ( ) subshell exits with its last stage, so its pipes count; only a $( ) substitution hides them (#812 review).
+  assert.equal(maskRefusal(`(node -e "console.log('proof-red'); process.exit(7)" | tail -n1)`), 'CHECK_MASKS_EXIT');
+});
+
+test("the board's own captured-output form is accepted [C7,V4]", () => {
+  assert.equal(maskRefusal(`out=$(node bin/run-tests.js test/x.test.js 2>&1); printf "%s\\n" "$out"; printf "%s\\n" "$out" | grep -Eq "^# fail 0$" && printf "%s\\n" "$out" | grep -Eq "ok"`), null);
+  assert.equal(maskRefusal(`out=$(node -e "process.exit(1)" | tail -5); echo "$out" | grep -q ok`), null, 'a pipe inside the capture is not a check pipeline');
+});
