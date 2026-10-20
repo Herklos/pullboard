@@ -16,6 +16,7 @@ export function personNeeds(state) {
     ...(state.holds ?? []).map(hold => ({ kind: 'hold', id: hold.hold_lane,
       ref: hold.hold_lane, text: hold.hold_reason, what: 'lane held by ' + name(hold.hold_by) })),
     ...rigorDrafts,
+    ...(state.sentinelDrafts ?? []),
     ...(drafts ? [{ kind: 'draft', id: 'drafts', count: drafts, ref: String(drafts),
       text: 'draft spec rows to approve or drop' + rows.filter(row => row.staleDecision).map(row => `; ${row.stage}`).join(''), what: 'review in SPEC.md', target: 'tab:spec' }] : []),
   ];
