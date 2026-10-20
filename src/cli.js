@@ -167,6 +167,7 @@ import {
 import { lifecycleMarkdown } from './machine.js';
 import {
   buildHelp,
+  SETTING_FORMS,
   VERSION,
 } from './help.js';
 import {
@@ -3855,7 +3856,7 @@ function settingsCommand(io, { first, second, rest }) {
     io.say(`gate.shortSlots: ${shortSlots}${shortSlots ? '' : ' (off; runs that name their test files wait for a gate slot)'}`);
     return 0;
   }
-  if (!['gateSlots', 'browserSlots', 'gate.shortSlots'].includes(first) || !second || rest.length) {
+  if (!SETTING_FORMS.includes(first) || !second || rest.length) {
     throw new Refused('USAGE', 'pullboard settings gateSlots <n> | browserSlots <n> | gate.shortSlots <n>');
   }
   if (first === 'gate.shortSlots') {

@@ -231,7 +231,7 @@ test('help add example runs on a fresh board [I1,L3]', (t) => {
 
 test('help covers every dispatched subcommand [N2]', () => {
   // Every printed subcommand phrase is one the CLI dispatches; each must have help, and an unknown name still refuses.
-  const subcommands = helpDeclaration.commandPhrases(HELP).filter((phrase) => phrase.includes(' '));
+  const subcommands = [...new Set([...helpDeclaration.commandPhrases(HELP).filter((phrase) => phrase.includes(' ')), ...helpDeclaration.SETTING_FORMS.map((form) => `settings ${form}`)])];
   assert.ok(subcommands.includes('milestone items') && subcommands.includes('relay devices') && subcommands.includes('spec approve'),
     'the walk covers the subcommands that were refused before');
   for (const phrase of subcommands) {
@@ -242,4 +242,22 @@ test('help covers every dispatched subcommand [N2]', () => {
   const unknown = run('help', 'milestone', 'bogus');
   assert.equal(unknown.status, 2, 'an unknown subcommand still exits 2');
   assert.equal(unknown.stdout, '');
+});
+
+test('the settings forms the CLI dispatches have help and reach their own refusal [N2]', () => {
+  // The expected forms are written out here, not read from the parser: each one must have help, and
+  // each must reach its own value check in settingsCommand, which proves the dispatcher knows it (#824).
+  assert.deepEqual([...helpDeclaration.SETTING_FORMS], ['gateSlots', 'browserSlots', 'gate.shortSlots']);
+  const folder = mkdtempSync(join(tmpdir(), 'pullboard-settings-'));
+  sandboxes.push(folder);
+  runFixtureGit(['init', '-q'], { cwd: folder });
+  const refusals = { gateSlots: '[USAGE]', browserSlots: '[BAD_BROWSER_SLOTS]', 'gate.shortSlots': '[BAD_SHORT_SLOTS]' };
+  for (const [form, code] of Object.entries(refusals)) {
+    const help = run('help', 'settings', form);
+    assert.equal(help.status, 0, `help settings ${form} exits 0: ${help.stderr}`);
+    assert.match(help.stdout, new RegExp(`^Usage: pullboard settings ${form.replace('.', '\\.')} `, 'u'), `help settings ${form} names its usage`);
+    const refused = runFixtureChild(process.execPath, [BIN, 'settings', form, 'abc'], { cwd: folder, encoding: 'utf8' });
+    assert.equal(refused.status, 1, `settings ${form} abc is refused: ${refused.stdout}`);
+    assert.ok(refused.stderr.includes(code), `settings ${form} reaches its own check ${code}: ${refused.stderr}`);
+  }
 });
