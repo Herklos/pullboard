@@ -258,16 +258,20 @@ function testEnvironment(sandbox, gateMarkers = {}) {
  */
 function runTests(args, env, concurrency) {
   let files = concurrency.files;
-  const forwarded = [];
-  const namePatterns = [];
+  // Node reads an option only before the files, so every option is placed ahead of them, wherever it was written (#931).
+  const placed = [];
+  const selectors = [];
   for (let at = 0; at < args.length; at += 1) {
     const argument = args[at];
-    if (argument === '--') { forwarded.push(...args.slice(at)); break; }
+    if (argument === '--') { selectors.push(...args.slice(at)); break; }
     if (/^--test[-_]name[-_]pattern(?:=|$)/u.test(argument)) {
-      // Node reads a name pattern only before the files, so a pattern written after them moves ahead [C7].
       const value = argument.includes('=') ? argument.slice(argument.indexOf('=') + 1) : args[++at];
       if (value === undefined) throw new Error('--test-name-pattern requires a value');
-      namePatterns.push(`--test-name-pattern=${value}`);
+      placed.push(`--test-name-pattern=${value}`);
+    } else if (/^--test[-_]skip[-_]pattern(?:=|$)/u.test(argument)) {
+      const value = argument.includes('=') ? argument.slice(argument.indexOf('=') + 1) : args[++at];
+      if (value === undefined) throw new Error('--test-skip-pattern requires a value');
+      placed.push(`--test-skip-pattern=${value}`);
     } else if (/^--test[-_]concurrency(?:=|$)/u.test(argument)) {
       const value = argument.includes('=') ? argument.slice(argument.indexOf('=') + 1) : args[++at];
       if (!/^[1-9][0-9]*$/u.test(value ?? '') || !Number.isSafeInteger(Number(value))) {
@@ -280,10 +284,15 @@ function runTests(args, env, concurrency) {
     } else if (argument === '--test-only') {
       // Node would apply it only to cases marked only, so a run would silently skip the rest of the file (#931).
       throw new Error('unknown option --test-only; run-tests does not apply it, so select cases with --test-name-pattern');
-    } else if (argument.startsWith('-') && !knownNodeOption(argument)) {
-      // Node ignores an option it does not know after the files; name it instead of running without it (#931).
-      throw new Error(`unknown option ${argument.split('=', 1)[0]}; check its spelling, or drop it`);
-    } else forwarded.push(argument);
+    } else if (argument.startsWith('-')) {
+      // An option Node does not know would be ignored; name it instead of running without it (#931).
+      if (!knownNodeOption(argument)) throw new Error(`unknown option ${argument.split('=', 1)[0]}; check its spelling, or drop it`);
+      placed.push(argument);
+      if (!argument.includes('=') && optionTakesValue(argument)) {
+        if (args[at + 1] === undefined) throw new Error(`${argument} requires a value`);
+        placed.push(args[++at]);
+      }
+    } else selectors.push(argument);
   }
   const reporter = args.some((argument) => argument === '--test-reporter' || argument.startsWith('--test-reporter='));
   const nodeArgs = [
@@ -293,8 +302,8 @@ function runTests(args, env, concurrency) {
     ...(!reporter ? ['--test-reporter=tap'] : []),
     '--import',
     runner,
-    ...namePatterns,
-    ...forwarded,
+    ...placed,
+    ...selectors,
   ];
   return spawnSync(process.execPath, nodeArgs, { env, stdio: 'inherit' });
 }

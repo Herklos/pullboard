@@ -27,3 +27,31 @@ test('--test-only after the file is refused by name [C7]', () => {
     assert.match(`${result.stdout}${result.stderr}`, /run-tests: unknown option --test-only/u, 'the refusal names the option');
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+/** A two-case file; each case says its own name when it runs. */
+function twoCaseFile(name) {
+  const root = mkdtempSync(join(tmpdir(), 'pullboard-skip-after-')); try {
+    writeFileSync(join(root, name), "import { test } from 'node:test';\ntest('alpha case runs', () => {});\ntest('beta case runs', () => {});\n");
+    return { root, runSkip: (args) => runFixtureChild(process.execPath, [runner, name, ...args], { cwd: root, encoding: 'utf8' }) };
+  } catch (error) { rmSync(root, { recursive: true, force: true }); throw error; }
+}
+
+test('a skip pattern after the file in the equals form runs only the other case [C7]', () => {
+  const fixture = twoCaseFile('skip-equals.test.mjs');
+  try {
+    const result = fixture.runSkip(['--test-skip-pattern=alpha']);
+    assert.equal(result.status, 0, result.context);
+    assert.match(result.stdout, /beta case runs/u, 'the unskipped case runs');
+    assert.doesNotMatch(result.stdout, /alpha case runs/u, 'the skipped case does not run');
+  } finally { rmSync(fixture.root, { recursive: true, force: true }); }
+});
+
+test('a skip pattern after the file in the separate-value form runs only the other case [C7]', () => {
+  const fixture = twoCaseFile('skip-separate.test.mjs');
+  try {
+    const result = fixture.runSkip(['--test-skip-pattern', 'alpha']);
+    assert.equal(result.status, 0, result.context);
+    assert.match(result.stdout, /beta case runs/u, 'the unskipped case runs');
+    assert.doesNotMatch(result.stdout, /alpha case runs/u, 'the skipped case does not run');
+  } finally { rmSync(fixture.root, { recursive: true, force: true }); }
+});
