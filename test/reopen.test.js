@@ -1,3 +1,4 @@
+/** @pullboard-test-loads src/board.js src/engine.js src/exchange.js src/machine.js */
 /** Real Git, SQLite and ordered-engine coverage for coordinator criterion reopen [V2,V6,H16]. */
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';

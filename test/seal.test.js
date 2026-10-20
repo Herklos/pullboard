@@ -1,3 +1,4 @@
+/** @pullboard-test-loads src/seal.js */
 /** Device-side sealing is the same bytes and WebCrypto code in Node and Chrome (H15, H17). */
 import assert from 'node:assert/strict';
 import { runFixtureChild as spawnSync } from './fixture-child.js';
