@@ -78,10 +78,15 @@ export function landingFailures(output, root, { excludeCancelled = false } = {})
   return [...unique.values()];
 }
 
+/** The merge header type an item with no spec rows takes from its lane; any other lane lands as chore. */
+const LANE_MERGE_TYPES = Object.freeze({ docs: 'docs', test: 'test' });
+
 /** Produce a hook-valid lower-case merge subject at a word boundary [R3]. */
 export function landingSubject(item) {
   const suffix = item.item_spec_ids ? ` [${item.item_spec_ids.split(/[\s,]+/u).filter(Boolean).join(',')}]` : '';
-  const prefix = 'chore(merge): ';
+  // An item with no rows cites none, so its merge header names its lane's type: docs or test; anything else is chore (B3).
+  const type = item.item_spec_ids ? 'chore' : (LANE_MERGE_TYPES[item.item_lane] ?? 'chore');
+  const prefix = `${type}(merge): `;
   const budget = 72 - prefix.length - suffix.length;
   if (budget < 1) throw new Refused('LAND_HEADER', `item #${item.item_id} cites too many rows for a merge header; shorten its cited set before landing`);
   const words = item.item_title.toLowerCase().replace(/[\p{Extended_Pictographic}\u200d\uFE0E\uFE0F]/gu, '').replace(/[\r\n]+/gu, ' ').replace(/\[[^\]]*\]/gu, '').trim().split(/\s+/u);
@@ -254,12 +259,12 @@ async function gateGroup(state, label) {
   await save(state, { state: 'gating', tip: headCommit(state.batch.root), logPath });
   const pin = flakeSource(state.batch.root, { commit, main: state.batch.base });
   const gate = await runGate(state.batch.root, state.config, { trustStamp: false, landing: true, agent: 'coordinator', onWait: state.onWait, stages: true, waivers: liveWaiverProjection(state.board),
-    onFailure: (run, { root, command, lease }) => observeNativeFailure({ root, config: state.config, pin, run, command, lease, kind: 'land',
+    onFailure: Object.assign((run, { root, command, lease }) => observeNativeFailure({ root, config: state.config, pin, run, command, lease, kind: 'land',
       record: observation => {
         const owner = observation.file ? laneOf(state.config, observation.file) : 'coordinator';
         const lane = owner === 'coordinator' ? store.getItem(state.board, state.batch.items[0].id).item_lane : owner;
         return state.write('recordFlakeObservation', [{ agentId: 'coordinator', observation, lane }]);
-      } }),
+      } }), { main: pin.main }),
   });
   copyFileSync(gate.log, logPath);
   if (gate.profilePath) copyFileSync(gate.profilePath, `${logPath}.profile.json`);

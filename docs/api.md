@@ -36,6 +36,8 @@ For a stale acceptance, merge current main into the submitted work and commit a 
 
 `pullboard stats [--since <date>] --json` returns `{version: 1, stats: {...}}` from the append-only event log. `submissions` and `rejections` count moves, including repeated attempts; `rejectionShare` is rejections divided by submissions (zero when the window has no submissions). `merged` counts distinct items with a merge move; `mergedWithoutAccept` counts those whose merge lacks an earlier acceptance of the latest submitted commit. That audit uses earlier history even when the acceptance falls before the selected window. Current item and verdict rows do not replace event evidence.
 
+`gateWaits`, beside `stats`, lists, for each kind of gated run in the last day (`check`, `review`, `doctrine`, `gate`, `landing`), its `runs`, `medianWaitMs`, `slowestWaitMs` and `medianRunMs`, read from the board's gate receipts; text `stats` prints them under `gate waits, last day:`. A gate receipt is written for every run that takes a gate slot. Its fields are `waitMs` (queued for a slot), `admissionMs` (deciding and queueing, then handing over), `setupMs`, `runMs` and `evidenceMs` (reading the result and writing its record), and `slot: {kind, reason}`, where `kind` is `ordinary`, `browser`, `short`, `runner` or `inherited`. A timing profile carries it as `receipt`, `check --json` returns it as `receipt`, and the timing lines print it as `phases: ...; slot: <kind> (<reason>)`. A doctrine hold at submit prints its own `doctrine hold phases:` line.
+
 `stats.bars` counts bar corrections, keyed by agent: `{corrections, barRejects, buildRejects}`. A correction is an `edit --criterion` or `--check` on an item that was ever claimed. It must carry `--reason "what the old bar got wrong"` (HTTP `args.reason`); without one it is refused with `BAR_REASON`. A correction that follows the item's newest, unexplained reject marks that reject as caused by the bar, counted to the correcting agent; every other reject counts to the build, under the agent who added the item. Text `stats` prints one `bars:` line per agent, and text `show` prints each correction with its reason.
 
 `stats.flow` adds the flow through the board:
@@ -96,7 +98,7 @@ For example: `flow: review wait average 61 min (1 measured; > 60 min); bottlenec
 | `milestone remove` | `version:number`, `milestone:object` |
 | `milestone ship` | `version:number`, `milestone:object`, `into:string|null`, `moved:array`, `notMoved:array` |
 | `show` | `version:number`, `item_id:number`, `item_title:string`, `item_lane:string`, `item_status:string`, `verdicts:array`, `thread:array` |
-| `stats` | `version:number`, `stats:object` |
+| `stats` | `version:number`, `stats:object`, `gateWaits:array` |
 | `status` | `version:number`, `me:object`, `mine:array`, `stats:object`, `reviewQueue:object`, `unread:number`, `relay:object` |
 | `doctor` | `version:number`, `problems:array` |
 | `health` | `version:number`, `asOf:string`, `thresholds:object`, `stuck:array`, `waiting:array` |
@@ -117,7 +119,7 @@ For example: `flow: review wait average 61 min (1 measured; > 60 min); bottlenec
 | `run` | `version:number`, `messages:array` |
 | `sweep` | `version:number`, `messages:array` |
 | `next` | `version:number`, `item:object`, `review:boolean`, `held:boolean`, `shared:array` |
-| `check` | `version:number`, `id:number`, `green:boolean`, `seconds:number`, `check:string`, `report:string` |
+| `check` | `version:number`, `id:number`, `green:boolean`, `seconds:number`, `check:string`, `receipt:object`, `report:string` |
 | `check accept` | `version:number`, `id:number`, `digest:string`, `check:string` |
 | `claim` | `version:number`, `id:number`, `renewed:boolean`, `leaseUntil:string`, `digest:string` |
 | `hold` | `version:number`, `lane:string`, `held:boolean` |
@@ -186,6 +188,8 @@ Each checkout is bound to the first agent session that writes there. The local G
 With `submitGate: "landing"`, `status.submitInvariantProposals` lists files that failed outside a recorded submit selection. Each proposal carries `file`, `escapes` (distinct tested merge commits), `runtimeMs`, `budgetMs: 60000`, `withinBudget`, `commits` and the participating `submissions`. Repeated escapes below budget come first. Unmeasured whole-file runtime is `null`, not a sum of test-case durations. A later whole-file diagnostic or full gate passing at the identical commit suppresses that escape; another commit or merely an equal Git tree does not. Submission events record versioned `submissionProof: { version: 1, files, full, deferred, reason }`, including the actual full-fallback reason. A deferred full fallback records only invariants actually selected to run, rather than its possible full selection. Historical submissions without this receipt remain unknown. Landing batches append versioned `invariantEvidence` with actual tested commits, participants and whole-file diagnostics; earlier evidence cannot be replaced. Status reads those canonical events and changes no configuration. Edit `submitInvariants` on main to accept a proposal. Outside the landing submit policy the proposal list is empty.
 
 Releasing a reserved review requires a nonempty one-line `--note` (or `--note-file`); the authenticated release action accepts the same `note` field. A refusal keeps the reservation and records no release. The same reviewer is not offered that submission again until it is resubmitted or an hour passes, while other reviewers remain eligible. Releasing a build claim keeps its existing behavior and does not require a reason.
+
+With `verify.unrelatedTrunkMoves: true` in `pullboard.json` (off by default), an accept whose review saw main move is still recorded when every moved commit changes none of the item's files and none of the files its check and affected tests read; the verdict note names those commits. Any other move, or a check that is not an explicit test selection, refuses `VERDICT_TRUNK_MOVED` as before, naming the file that reaches the review.
 
 When outstanding reviews reach `verify.reviewRatio` times the active reviewers (default 3, with zero reviewers counting as one), `next` first offers a review the agent may take. This creates no claim or reservation. Its additive v1 `offer` has the review's `item` id, exact `command` to reserve it, `queue` and `ratio`; `build` previews the otherwise available build or is `null`. `next --verify <id>` reserves explicitly. `next --build` claims explicitly; a fresh claim's event detail records `reviewSkipped` with the offered id (or `null`), ratio and queue snapshot. Renewing an existing claim creates no new skip.
 

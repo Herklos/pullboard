@@ -4,6 +4,7 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { request } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 import { SPEC, machine, project, build, sendBack, fetchLive, startView, styleOf, element, settle, storage, openPage, accept, chromeExecutable, openSnapshotChrome, closeSnapshotChrome, press } from './fixture.js';
 
@@ -697,4 +698,14 @@ test('targets are 44px for touch and compact under a mouse [N26]', { timeout: 15
     rmSync(profile, { recursive: true, force: true });
     await view.stop();
   }
+});
+
+test('no view source file is over the 1500-line cap [C7,D1]', async () => {
+  // The file-size check counts every source file in the repo; this test owns the view's source files (#745). The
+  // view's tests under test/cockpit are kept whole and unchanged, so they are not counted here.
+  const { fileSizeProblems } = await import('../../bin/checks/file-size.js');
+  const root = fileURLToPath(new URL('../../', import.meta.url));
+  const viewLane = /^(?:src\/cockpit\.js|src\/serve\.js|src\/view\.css|src\/view\/)/u;
+  const over = fileSizeProblems(root).filter((problem) => viewLane.test(problem.path)).map((problem) => `${problem.path}:${problem.line}`);
+  assert.deepEqual(over, [], 'every view file is under the 1500-line cap, so the file-size check prints no block for it');
 });
