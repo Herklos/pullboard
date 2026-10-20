@@ -3,6 +3,7 @@ import { Refused } from './refused.js';
 import { relayStorage } from './relay-storage.js';
 import { refusalDocument } from './json.js';
 import { withGitFacts } from './git.js';
+import { PAIR_PACKAGE_BODY_BYTES } from './relay-limits.js';
 
 const BODY_BYTES = 100_000;
 
@@ -29,7 +30,7 @@ function jsonState(res, status, state, eventLogVersion) {
 
 /** Read a bounded JSON object, draining oversize requests so a refusal reaches the caller. */
 async function readBody(req, { maxBytes = BODY_BYTES } = {}) {
-  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > 20_000_000) throw new TypeError('API body limit needs a positive safe integer no larger than twenty million');
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > PAIR_PACKAGE_BODY_BYTES) throw new TypeError('API body limit needs a positive safe integer within the shared request limit');
   if (!/^application\/json(?:\s*;|$)/i.test(String(req.headers['content-type'] ?? ''))) throw new Refused('BAD_REQUEST', 'send an application/json object as the request body');
   const chunks = [];
   let size = 0;

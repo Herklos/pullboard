@@ -5,12 +5,12 @@ import {
 } from 'node:crypto';
 import { ENGINE_VERSION } from './machine.js';
 import { Refused } from './refused.js';
+import { PAIR_PACKAGE_BYTES as MAX_PACKAGE_BYTES } from './relay-limits.js';
 
 const LOCATOR = /^[A-Za-z0-9_-]{22}$/;
 const SECRET = /^[A-Za-z0-9_-]{43}$/;
 const KEY = /^[A-Za-z0-9_-]{43}$/;
 const REPOSITORY = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
-const MAX_PACKAGE_BYTES = 14_000_000;
 
 /** Refuse noncanonical unpadded base64url instead of accepting aliases for a pairing secret. */
 function decode(encoded, bytes, code, next) {
