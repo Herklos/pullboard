@@ -268,7 +268,7 @@ test('each open-board state shows alone with its words [N26,H5]', { timeout: 150
     assert.deepEqual(absent.live, ['Still looking on this computer'], 'a live line says the page keeps looking');
     // A request waiting for the person on this device, as relay/browser-devices.js puts in the page, is never hidden
     // behind a screen: it stays where they can answer it.
-    assert.equal(await chrome.stable("(() => { const panel = document.createElement('section'); panel.id = 'phone-approvals'; panel.className = 'card-panel'; panel.textContent = 'Link notes from studio?'; document.querySelector('main').prepend(panel); const shown = panel.getClientRects().length > 0; panel.remove(); return shown; })()"), true, 'a waiting request on this device shows beside the screen');
+    assert.equal(await chrome.stable("(() => { const panel = document.createElement('section'); panel.id = 'phone-approvals'; panel.className = 'card-panel'; panel.textContent = 'Link notes from this device?'; document.querySelector('main').prepend(panel); const shown = panel.getClientRects().length > 0; panel.remove(); return shown; })()"), true, 'a waiting request on this device shows beside the screen');
     await pressCopy(chrome, '#local-note .ob-cmd button', 'pullboard view');
 
     // Pullboard on this computer speaks another version of the page's protocol: one command updates it, and a dashed
