@@ -4,6 +4,7 @@
  * Each check returns its problems; an empty list lets git go on.
  */
 import { spawnSync } from 'node:child_process';
+import { hostname } from 'node:os';
 import {
   chmodSync,
   existsSync,
@@ -142,6 +143,44 @@ export function commitMsgProblems(raw, { rules, spec, doctrine = null }) {
   if (rules.noEmoji && EMOJI_RE.test(all)) problems.push('remove the emoji');
   if (rules.noCoAuthor && /^\s*co-authored-by\s*:/im.test(all)) problems.push('remove the Co-Authored-By trailer');
   return problems;
+}
+
+/**
+ * This machine's names as a commit message would show them: the host name and its first label. Names
+ * under three characters are ignored, so a short word cannot refuse an honest message (C1).
+ *
+ * @returns {string[]} Lower-case names.
+ */
+export function machineNames() {
+  const full = hostname().trim().toLowerCase();
+  return [...new Set([full, full.split('.')[0]])].filter((name) => name.length >= 3);
+}
+
+/**
+ * Check the commits a submit adds for this machine's names in their messages (C1). With `refuse`, the
+ * first named commit stops the submit and the next step says how to reword it; without, each named
+ * commit is reported through `say` and the submit goes on. The names are never echoed, so the refusal
+ * cannot leak them into a shout or a board thread.
+ *
+ * @param {string} root - The worktree the commits are in.
+ * @param {string} range - The commits a submit adds, as `<trunk>..<head>`.
+ * @param {{ refuse: boolean, say: (line: string) => void, names?: string[] }} options
+ * @returns {void}
+ */
+export function machineNameProblems(root, range, { refuse, say, names = machineNames() }) {
+  if (!names.length) return;
+  const records = git(root, ['log', '--format=%H%x1f%B%x1e', range]).split('\x1e').filter(Boolean);
+  for (const record of records) {
+    const [sha, message = ''] = record.trim().split('\x1f');
+    const lower = message.toLowerCase();
+    if (!names.some((name) => lower.includes(name))) continue;
+    const short = sha.slice(0, 12);
+    if (refuse) {
+      throw new Refused('HOST_NAME', `commit ${short} names this machine in its message; a submit may not publish that name`,
+        `reword that commit's message without the machine's name, then run pullboard submit again`);
+    }
+    say(`warning: commit ${short} names this machine in its message; reword it before the branch is merged`);
+  }
 }
 
 /**

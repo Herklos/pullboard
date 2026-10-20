@@ -2,10 +2,12 @@
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
+import { hostname } from 'node:os';
 import { after, test } from 'node:test';
 import { createE2eHelpers } from './e2e-helpers.js';
 import { runFixtureChild } from './fixture-child.js';
 import { configProblems, defaults } from '../src/config.js';
+import { machineNameProblems } from '../src/hooks.js';
 import { installStep } from '../src/worktree.js';
 
 const e2e = createE2eHelpers();
@@ -248,4 +250,33 @@ test('worktree suggests no install for a zero-dependency project [I1,L3]', () =>
   box.git(loose, 'commit', '-q', '-m', 'chore: shrinkwrap');
   assert.deepEqual(installStep(loose), { command: 'npm ci', note: 'its own install from the committed npm-shrinkwrap.json, so its tests run its own code' },
     'an npm-shrinkwrap.json in HEAD is a committed lockfile');
+});
+
+test('the worktree and branch names Pullboard makes carry no host part [I1,I2]', () => {
+  const box = sandbox();
+  const { web } = project('true', box);
+  box.env.PULLBOARD_MODEL = 'Name Model';
+  const made = box.run(web, 'worktree', 'api', '--json');
+  assert.equal(made.code, 0, made.err || made.out);
+  const result = JSON.parse(made.out);
+  assert.equal(result.branch, 'api/1', 'the branch is <lane>/<n>');
+  const short = hostname().split('.')[0].toLowerCase();
+  for (const name of [result.branch, basename(result.path)]) {
+    assert.ok(!name.toLowerCase().includes(short), `"${name}" carries no host part`);
+  }
+});
+
+test('a submit naming a stand-in host refuses at HOST_NAME, and only warns when the setting is off [C1]', () => {
+  const box = sandbox();
+  const { repo } = project('true', box);
+  const base = box.git(repo, 'rev-parse', 'HEAD');
+  box.git(repo, 'commit', '-q', '--allow-empty', '-m', 'chore: note the stand-in-host branch');
+  const range = `${base}..HEAD`;
+  assert.throws(() => machineNameProblems(repo, range, { refuse: true, say: () => {}, names: ['stand-in-host'] }),
+    (error) => error.code === 'HOST_NAME' && /names this machine/u.test(error.message));
+  const said = [];
+  machineNameProblems(repo, range, { refuse: false, say: (line) => said.push(line), names: ['stand-in-host'] });
+  assert.equal(said.length, 1, 'the setting off warns once per named commit');
+  assert.match(said[0], /^warning: commit [0-9a-f]{12} names this machine/u);
+  machineNameProblems(repo, range, { refuse: true, say: () => {}, names: ['no-such-name-here'] });
 });
