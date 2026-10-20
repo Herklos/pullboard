@@ -32,6 +32,11 @@ import { sentinels } from '../src/sentinels.js';
 import { machineSettingsFile } from '../src/settings.js';
 import { runFixtureChild } from './fixture-child.js';
 import { runFixtureGit } from './fixture-child.js';
+import { submitFixture } from './board-submit-fixture.js';
+import { loadConfig } from '../src/config.js';
+import { loadDoctrine } from '../src/doctrine.js';
+import { frozenCriterion } from '../src/spec.js';
+import { loadSpec } from '../src/spec.js';
 import { parseProcessCensus } from '../src/process-census.js';
 import { requireSupportedEngine as requirePublished55Engine } from './fixtures/engine-55-reader.js';
 
@@ -74,7 +79,7 @@ function fixture(t) {
     store.closeBoard(board); rmSync(directory, { recursive: true, force: true });
     for (const [key, value] of Object.entries(original)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
   });
-  return { root, directory, board, agent, clock, ordered, cli,
+  return { root, directory, board, agent, clock, ordered, cli, env,
     run: () => runDueSentinels({ root, board, agentId: 'coordinator', ordered }) };
 }
 
@@ -86,6 +91,78 @@ function checker(box, source, name = 'check.mjs') {
   const path = join(box.root, name); writeFileSync(path, source);
   return `${quote(process.execPath)} ${quote(path)}`;
 }
+
+/**
+ * A cause that repeated on two real items, and two real commits that prove a check for it: the check is red where
+ * the items failed and green once the fix exists (#776).
+ */
+function repeatedCause(box) {
+  const git = (...args) => runFixtureGit(args, { cwd: box.root, env: box.env, encoding: 'utf8' });
+  writeFileSync(join(box.root, 'site.txt'), 'staging is down\n');
+  git('add', 'site.txt'); git('commit', '-q', '-m', 'chore: staging down [A6]');
+  const red = git('rev-parse', 'HEAD').trim();
+  writeFileSync(join(box.root, 'up.txt'), 'staging is up\n');
+  git('add', 'up.txt'); git('commit', '-q', '-m', 'chore: staging up [A6]');
+  const green = git('rev-parse', 'HEAD').trim();
+  const reviewer = store.register(box.board, { lane: 'core', path: join(box.directory, 'reviewer') });
+  const config = loadConfig(box.root);
+  const freeze = (item) => frozenCriterion(loadSpec(box.root, config), item, loadDoctrine(box.root, config));
+  const items = [];
+  for (const title of ['Staging first', 'Staging second']) {
+    const id = store.addItem(box.board, { by: 'coordinator', lane: 'core', title });
+    store.claim(box.board, id, { agentId: box.agent, lane: 'core', leaseMs: 3_600_000, freeze });
+    submitFixture(box.board, id, { agentId: box.agent, commit: red, tree: `tree-${red}` });
+    store.verify(box.board, id, { agentId: reviewer, decision: 'REJECT', reason: 'TEST_FAILURE', note: 'staging check failed', cause: 'row:A6',
+      head: store.getItem(box.board, id).item_commit, digest: store.getItem(box.board, id).item_frozen_digest, policy: 'any' });
+    items.push(id);
+  }
+  return { red, green, items, check: 'test -f up.txt' };
+}
+
+test('a repeated cause can be drafted as a sentinel [A6,D1,D3]', async t => {
+  const box = fixture(t);
+  const cause = repeatedCause(box);
+  const spec = readFileSync(join(box.root, 'SPEC.md'), 'utf8');
+  const drafted = await box.cli(['rigor', 'draft', 'row:A6', '--sentinel', '--check', cause.check, '--red', cause.red, '--green', cause.green,
+    '--every', 'daily', '--owner', 'core']);
+  assert.equal(drafted.code, 0, drafted.error);
+  const sentinel = drafted.document.sentinel;
+  assert.deepEqual([sentinel.name, sentinel.status, sentinel.check, sentinel.every, sentinel.owner], ['rigor-row-a6', 'pending', cause.check, 'daily', 'core'],
+    'the draft is a pending watch with its command, cadence and owner');
+  assert.equal(sentinel.evidence.key, 'row:A6');
+  assert.deepEqual(sentinel.evidence.items.map(item => item.id), cause.items, 'it cites both repeats');
+  assert.equal(sentinel.evidence.occurrences, 2);
+  assert.deepEqual([sentinel.evidence.proof.red.commit, sentinel.evidence.proof.green.commit], [cause.red, cause.green], 'and the commits that prove its check');
+  assert.deepEqual(drafted.document.drafts, [], 'a sentinel draft writes no spec or doctrine row');
+  assert.equal(readFileSync(join(box.root, 'SPEC.md'), 'utf8'), spec);
+  const listed = await box.cli(['sentinels']);
+  assert.equal(listed.document.sentinels[0].status, 'pending');
+  assert.equal(listed.document.sentinels[0].evidence.key, 'row:A6');
+  await box.run(); assert.equal(sentinels(box.board)[0].lastRun, null, 'a drafted watch never runs before the person approves it');
+});
+
+test('a sentinel draft waits in Needs-you with its evidence [A6,D1,D3]', async t => {
+  const box = fixture(t);
+  const cause = repeatedCause(box);
+  assert.equal((await box.cli(['rigor', 'draft', 'row:A6', '--sentinel', '--check', cause.check, '--red', cause.red, '--green', cause.green])).code, 0);
+  // Asking an agent to watch something drafts the same kind of row, with no repeat to cite.
+  assert.equal((await box.cli(['sentinel', 'propose', 'staging-site', '--check', 'true', '--every', 'hourly', '--owner', 'core'])).code, 0);
+  const pending = (await box.cli(['resume'])).document.needsYou.filter(entry => entry.kind === 'sentinel-draft');
+  assert.deepEqual(pending.map(entry => entry.ref).sort(), ['rigor-row-a6', 'staging-site'], 'each pending watch is one Needs-you call');
+  const drafted = pending.find(entry => entry.ref === 'rigor-row-a6');
+  assert.equal(drafted.cause, 'row:A6');
+  assert.deepEqual(drafted.evidence.items.map(item => item.id), cause.items, 'the call carries the repeats it cites');
+  assert.equal(drafted.evidence.proof.green.commit, cause.green);
+  assert.match(drafted.text, /^Sentinel draft: rigor-row-a6 runs test -f up\.txt hourly, reporting to coordinator$/u);
+  assert.match(drafted.what, /pullboard sentinel approve rigor-row-a6/u);
+  const approved = await box.cli(['sentinel', 'approve', 'rigor-row-a6'], 'view');
+  assert.equal(approved.code, 0, approved.error);
+  const after = (await box.cli(['resume'])).document.needsYou.filter(entry => entry.kind === 'sentinel-draft').map(entry => entry.ref);
+  assert.deepEqual(after, ['staging-site'], 'the person’s approval closes the call');
+  const watched = sentinels(box.board).find(row => row.name === 'rigor-row-a6');
+  assert.equal(watched.status, 'approved');
+  assert.equal(watched.lastRun?.green, true, 'approving it starts it: the next resume runs the watch, now green');
+});
 
 test('an approved sentinel runs by itself and reports to its owner once [A6,D1,D3]', async t => {
   const box = fixture(t);

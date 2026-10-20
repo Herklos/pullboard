@@ -13,6 +13,7 @@ export const SENTINEL_OPTIONS = {
   directory: { type: 'string' },
   timeout: { type: 'string' },
   next: { type: 'string' },
+  sentinel: { type: 'boolean' },
 };
 
 /** Run due approved watches from ordinary resume, respecting the health switches. */

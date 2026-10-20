@@ -16,6 +16,10 @@ import {
   undraftedRigor,
 } from './rigor-notices.js';
 import { personNeeds } from './needs.js';
+import {
+  sentinelDraftNeeds,
+  sentinels,
+} from './sentinels.js';
 
 /** Borrow an existing connection or open a read-only one; retain exact row-decision matching. */
 export function personNeedsState(root, { board: providedBoard = null, includeRigorUndrafted = false } = {}) {
@@ -27,7 +31,7 @@ export function personNeedsState(root, { board: providedBoard = null, includeRig
     const config = loadConfig(root);
     const rows = projectRowDecisions(decisions, { root, spec: loadSpec(root, config).rows, practice: loadDoctrine(root, config).rows });
     const rigorDrafts = rigorDraftNeeds(rows);
-    const projected = { ...state, rigorDrafts, ...(includeRigorUndrafted
+    const projected = { ...state, rigorDrafts, sentinelDrafts: sentinelDraftNeeds(sentinels(board)), ...(includeRigorUndrafted
       ? { rigorUndrafted: undraftedRigor(store.events(board), rows, { person: store.PERSON }) } : {}) };
     return { ...projected, needs: personNeeds(projected) };
   } finally {
