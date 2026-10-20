@@ -550,6 +550,39 @@ test('auth trace retains a completed refusal while its body delivery is pending 
   }
 });
 
+/** A stand-in Chrome whose every Fetch.continueRequest answers Invalid InterceptionId, as a retired interception does. */
+function retiredInterceptionChrome() {
+  const socket = new EventTarget();
+  const send = async (method) => {
+    if (method === 'Network.getCookies') return { cookies: [] };
+    if (method === 'Fetch.continueRequest') throw new Error('{"code":-32602,"message":"Invalid InterceptionId."}');
+    // The new document commits as Chrome reports it: a main-frame frameNavigated after the navigation was asked for.
+    if (method === 'Page.navigate') queueMicrotask(() => socket.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ method: 'Page.frameNavigated', params: { frame: { id: 'main' } } }) })));
+    return {};
+  };
+  const pause = (id) => socket.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ method: 'Fetch.requestPaused',
+    params: { requestId: id, resourceType: 'XHR', request: { url: JOURNEY_HOSTED + '/api/v2/boards/b/objects/' + id, method: 'GET', headers: {} } } }) }));
+  return { socket, send, pause };
+}
+
+test('only an API read paused before the journey\'s navigation commits is set aside as orphaned [N40,N26]', async () => {
+  const site = { base: 'http://127.0.0.1:9' };
+  const before = retiredInterceptionChrome();
+  const orphanRoute = await routeJourneyOrigins(before, site, site);
+  before.pause('paused-before');
+  await orphanRoute.navigate('about:blank');
+  await orphanRoute();
+  // The control: the same retired interception, paused after the new document committed, is a routing failure the journey reports.
+  const after = retiredInterceptionChrome();
+  const failingRoute = await routeJourneyOrigins(after, site, site);
+  await failingRoute.navigate('about:blank');
+  after.pause('paused-after');
+  await assert.rejects(failingRoute(), (error) => /Invalid InterceptionId/u.test(error.message) && /orphaned by navigation: \[\]/u.test(error.message));
+  assert.equal(journeyNavigationOrphan(JOURNEY_HOSTED + '/index.html', 1, [2]), false, 'a page asset is never an orphan');
+  assert.equal(journeyNavigationOrphan(JOURNEY_HOSTED + '/api/v1/boards', 3, [2]), false, 'a read that paused after the commit is not an orphan');
+  assert.equal(journeyNavigationOrphan(JOURNEY_HOSTED + '/api/v1/boards', 1, []), false, 'without a commit nothing is an orphan');
+});
+
 test('auth refusal protocol bodies decode without exposing invalid payloads [N40]', () => {
   const value = JSON.stringify({ error: { code: 'AUTH_REQUIRED', message: 'this credential is expired or revoked' } });
   const expected = { code: 'AUTH_REQUIRED', kind: 'session-expired-or-revoked' };
@@ -797,46 +830,50 @@ async function journeyForwardHeaders(chrome, asked, condition, pauses) {
 }
 
 /**
+ * Whether a retired interception (Invalid InterceptionId) is an API read this journey orphaned by navigating the page
+ * away (#935). The old document keeps reading until the new one commits, and Chrome then retires its paused requests
+ * without a loadingFailed. Only an /api/ request that paused before a main-frame commit the harness's own navigation
+ * caused qualifies; anything else is a real routing failure.
+ *
+ * @param {string} url - The paused request's URL.
+ * @param {number} pausedAt - When it paused (performance.now()).
+ * @param {number[]} commits - Main-frame commits seen after the harness's first navigation (performance.now()).
+ */
+function journeyNavigationOrphan(url, pausedAt, commits) {
+  return new URL(url).pathname.startsWith('/api/') && commits.some((committedAt) => committedAt > pausedAt);
+}
+
+/**
  * Fulfill only the hosted document/assets; rewrite live API and local requests to owned HTTP servers. With `slow`
  * armed, the next discovery read of this machine's view answers only after `slow.ms`, once: the CI condition (#786),
  * where a macOS runner's first local answer outlasted the page's three-second wait. Off unless a test arms it.
  *
  * @param {{armed: boolean, ms: number, cookieless?: boolean}|null} [slow] - The stand-in for a slow first discovery answer.
  * @param {object[]} [pauses] - Receives each hosted API pause's cookie case (see journeyForwardHeaders).
+ * @returns {Promise<(() => Promise<void>) & {navigate: (url: string) => Promise<void>}>} The stop check, and the only way this journey navigates the page.
  */
 async function routeJourneyOrigins(chrome, site, view, slow = null, pauses = []) {
   const failures = [];
+  const orphaned = [];
+  const retired = [];
+  const commits = [];
   const tasks = [];
+  let navigatedAt = -Infinity;
   const listener = ({ data }) => {
     const message = JSON.parse(String(data));
+    // A main-frame commit after the harness navigated replaces the document whose paused reads Chrome then retires.
+    if (message.method === 'Page.frameNavigated' && !message.params.frame?.parentId && Number.isFinite(navigatedAt)) commits.push(performance.now());
     if (message.method !== 'Fetch.requestPaused') return;
+    const pausedAt = performance.now();
     tasks.push((async () => {
       const { requestId, request: asked } = message.params;
       const address = new URL(asked.url);
       if (address.origin === JOURNEY_HOSTED && address.pathname.startsWith('/api/')) {
-        const accept = Object.entries(asked.headers).find(([name]) => name.toLowerCase() === 'accept')?.[1] || '';
-        const liveStream = address.pathname.endsWith('/events') || String(accept).includes('text/event-stream');
-        if (liveStream) {
-          const headers = (await journeyForwardHeaders(chrome, asked, slow, pauses)).map(([name, value]) => ({ name, value }));
-          await chrome.send('Fetch.continueRequest', {
-            requestId, url: site.base + address.pathname + address.search, headers,
-          });
-          return;
-        }
-        const headers = Object.fromEntries(await journeyForwardHeaders(chrome, asked, slow, pauses));
-        const response = await fetchLive(site.base + address.pathname + address.search, {
-          method: asked.method, headers, redirect: 'manual',
-          ...(asked.postData === undefined ? {} : { body: asked.postData }),
-          signal: AbortSignal.timeout(10_000),
-        });
-        const body = Buffer.from(await response.arrayBuffer());
-        await chrome.send('Fetch.fulfillRequest', {
-          requestId,
-          responseCode: response.status,
-          responseHeaders: [...response.headers]
-            .filter(([name]) => !['content-length', 'connection', 'transfer-encoding', 'keep-alive', 'date'].includes(name.toLowerCase()))
-            .map(([name, value]) => ({ name, value })),
-          body: body.toString('base64'),
+        // Every hosted API request goes on to the owned site, as live streams always did. Answering one by hand raced
+        // the browser for paged object reads, which then failed at Fetch.fulfillRequest with Invalid InterceptionId (#935).
+        const headers = (await journeyForwardHeaders(chrome, asked, slow, pauses)).map(([name, value]) => ({ name, value }));
+        await chrome.send('Fetch.continueRequest', {
+          requestId, url: site.base + address.pathname + address.search, headers,
         });
         return;
       }
@@ -868,7 +905,16 @@ async function routeJourneyOrigins(chrome, site, view, slow = null, pauses = [])
         body: body.toString('base64'),
       });
     })().catch(async (error) => {
-      failures.push(error.message);
+      // A request paused before this harness navigated the page away is dropped with its document, and Chrome
+      // retires its interception without a loadingFailed. Only that case is set aside; every other error stays a failure (#935).
+      // Name the request without its query or ids, and when it paused against the last navigation, so a failure is diagnosable.
+      const asked = new URL(message.params.request.url);
+      const kind = asked.pathname.startsWith('/api/') ? journeyApiPathKind(asked.pathname) : asked.origin === JOURNEY_LOCAL ? 'local' : 'page';
+      const since = Number.isFinite(navigatedAt) ? Math.round(pausedAt - navigatedAt) + ' ms after the last navigation' : 'before any navigation';
+      const failure = `${error.message} (${message.params.request.method} ${kind}, ${message.params.resourceType}, paused ${since})`;
+      // A retired interception is judged at stop, once every document commit is known: the commit can arrive after the error.
+      if (/Invalid InterceptionId/u.test(error.message)) retired.push({ url: message.params.request.url, pausedAt, kind, failure });
+      else failures.push(failure);
       try { await chrome.send('Fetch.failRequest', { requestId: message.params.requestId, errorReason: 'Failed' }); } catch { /* Chrome may already have closed. */ }
     }));
   };
@@ -877,12 +923,23 @@ async function routeJourneyOrigins(chrome, site, view, slow = null, pauses = [])
     { urlPattern: JOURNEY_HOSTED + '/*', requestStage: 'Request' },
     { urlPattern: JOURNEY_LOCAL + '/*', requestStage: 'Request' },
   ] });
-  return async () => {
+  /** Stop routing and require that no request failed, other than API reads this harness's own navigation orphaned. */
+  const stop = async () => {
     chrome.socket.removeEventListener('message', listener);
     await Promise.all(tasks);
     await chrome.send('Fetch.disable');
-    assert.deepEqual(failures, [], 'owned hosted and loopback HTTP routes finish without cancelling event streams');
+    for (const entry of retired) {
+      if (journeyNavigationOrphan(entry.url, entry.pausedAt, commits)) { if (orphaned.length < 64) orphaned.push(entry.kind); }
+      else failures.push(entry.failure);
+    }
+    assert.deepEqual(failures, [], `owned hosted and loopback HTTP routes finish without cancelling event streams (orphaned by navigation: ${JSON.stringify(orphaned)})`);
   };
+  /** Navigate the page, marking the moment so requests already paused for the old document are known as orphaned. */
+  stop.navigate = async (url) => {
+    navigatedAt = performance.now();
+    await chrome.send('Page.navigate', { url });
+  };
+  return stop;
 }
 
 /**
@@ -970,7 +1027,7 @@ async function everyBoardJourney(t, slow = null) {
       try { await chromeB.send('Browser.grantPermissions', { origin: JOURNEY_HOSTED, permissions }); break; }
       catch { /* Chrome versions expose different local-network permission names. */ }
     }
-    await chromeB.send('Page.navigate', { url: JOURNEY_HOSTED + '/#device=' + pending.locator + '.' + pending.secret });
+    await stopRoutes.navigate(JOURNEY_HOSTED + '/#device=' + pending.locator + '.' + pending.secret);
     try {
       await waitFor(() => setup.child.exitCode !== null || setup.child.signalCode !== null,
         'A completes the actual phone enrollment within its relay work allowance', relayWorkBudgetMs());
@@ -983,14 +1040,14 @@ async function everyBoardJourney(t, slow = null) {
     assert.equal(linkedSetup.document.linked.length, 1, 'the one registered A board links through the CLI');
     assert.equal(linkedSetup.document.paired, true, 'the fixture phone completes the actual device enrollment');
     await chromeB.waitFor("location.hash === '' && document.querySelector('#chain')?.textContent.includes('linked machine A board')", 45_000); // budget: bounded setup wait within this journey test’s declared outer timeout (5x relay-work budget plus 180 seconds).
-    await chromeB.send('Page.navigate', { url: 'about:blank' });
+    await stopRoutes.navigate('about:blank');
     journeyTrace.begin();
     networkAtStart = networkServicePids(profileB);
     authTrace.begin();
     cookiePauses.length = 0;
     // The CI condition: a slow first discovery answer, and from here Chrome's paused requests arrive without cookies (#835).
     if (slow) Object.assign(slow, { armed: true, cookieless: true });
-    await chromeB.send('Page.navigate', { url: JOURNEY_HOSTED + '/' });
+    await stopRoutes.navigate(JOURNEY_HOSTED + '/');
     const rowPredicate = `(${journeySidebarReady.toString()})([...document.querySelectorAll('#proj-list .proj.repo .pname')].map(node => node.textContent.trim()), ${JSON.stringify(JOURNEY_BOARD_NAMES)})`;
     const rowObservation = await observeJourneyRows(
       () => chromeB.waitFor(rowPredicate, 45_000), // budget: bounded setup wait within this journey test’s declared outer timeout (5x relay-work budget plus 180 seconds).
