@@ -5,7 +5,7 @@ import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { MACHINE } from '../../src/machine.js';
+import { IN_STATE, MACHINE, effectiveGuards } from '../../src/machine.js';
 import { machine, project, build, sendBack, fetchLive, startView, styleOf, element, storage, openPage, timelineRows, agentEntries, drawing, textBoxes, meet, accept, itemRow, chromeExecutable, openSnapshotChrome, closeSnapshotChrome } from './fixture.js';
 
 const verifiedIsFinal = Boolean(MACHINE.states.find((state) => state.id === 'verified').final);
@@ -224,7 +224,15 @@ test('the activity tab draws the lifecycle from the declaration, as the README d
     for (const move of MACHINE.moves) {
       for (const from of move.from.filter((from) => from !== move.to)) assert.ok(routes.find((route) => route.pair === `${from}>${move.to}`).title.includes(`${move.verb}, ${from} to ${move.to}, by the ${move.by.join(' or ')}: `), `${move.verb} from ${from} is on its route`);
     }
-    assert.ok(routes.some((route) => route.title.includes('claim, open to claimed, by the agent or coordinator: pullboard claim &lt;id&gt;. Made 6 times.\nChecks, in order:\n  the caller is the main checkout, or a worktree that joined a lane (NOT_JOINED)\n  the item exists (NO_ITEM)\n  the item is open or claimed (NOT_CLAIMABLE)')), 'each check in order, escaped');
+    const claimMove = MACHINE.moves.find((move) => move.verb === 'claim');
+    assert.ok(claimMove, 'the claim move is declared');
+    const claimChecks = effectiveGuards(claimMove).map((id) => {
+      if (id === IN_STATE) return `the item is ${claimMove.from.join(' or ')} (${claimMove.refuse})`;
+      const guard = MACHINE.guards.find((entry) => entry.id === id);
+      assert.ok(guard, `${id} is a declared guard`);
+      return `${guard.rule} (${guard.refuse})`;
+    });
+    assert.ok(routes.some((route) => route.title.includes(`claim, open to claimed, by the agent or coordinator: pullboard claim &lt;id&gt;. Made 6 times.\nChecks, in order:\n  ${claimChecks.map(esc).join('\n  ')}`)), 'each check in order, escaped');
     // The moves made along a route and how often, or its moves when none was; the routes into the
     // state below the row join into one, labelled once with their total.
     assert.deepEqual(Object.fromEntries(routes.map((route) => [route.pair, route.label])), {
