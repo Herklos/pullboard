@@ -562,7 +562,7 @@ function fullGateRun(root, config, trustStamp = false, { waitMs = 0, log = gitPa
   const { isGreen, output, seconds, profile, profilePath } = run;
   writeFileSync(log, output);
   // The environment refusing a run says nothing about the gate, so only a real result is recorded (U41).
-  if (!run.sandboxBlocked) recordGateRun(root, gateRunRecord(root, config, isGreen));
+  if (!run.sandboxBlocked) recordGateRun(root, gateRunRecord(root, config, isGreen, gateLease));
   refuseSandboxBlocked(run);
   if (isGreen && before !== null && committedTree(root) === before) writeFileSync(gitPath(root, STAMP), `${before}\n`);
   return { isGreen, isCached: false, output, seconds, log, profile, profilePath, ...(run.executionRoot ? { executionRoot: run.executionRoot } : {}), ...(stages ? { stages: run.stages } : {}) };
@@ -570,17 +570,24 @@ function fullGateRun(root, config, trustStamp = false, { waitMs = 0, log = gitPa
 
 /**
  * The record one real gate run leaves for health: its result, and the positive control's result when the project
- * declares one, so a gate that stops passing its known-good case shows up without a person reading the log.
+ * declares one. The control runs under the gate's own lease, so a child that runs the gate again inherits the
+ * admission it already holds instead of asking for another slot (U41). Its raw output and profile stay in the
+ * gate evidence, next to the gate's own.
  *
  * @param {string} root
  * @param {{ gate: string, positiveControl?: string }} config
  * @param {boolean} isGreen whether the gate itself passed
- * @returns {{ at: string, green: boolean, control: boolean | null, gate: string, positiveControl: string | null }}
+ * @param {object} [gateLease] the lease the gate runs under
+ * @returns {{ at: string, green: boolean, control: boolean | null, gate: string, positiveControl: string | null, controlLog?: string, controlProfile?: string }}
  */
-function gateRunRecord(root, config, isGreen) {
+function gateRunRecord(root, config, isGreen, gateLease) {
+  const at = new Date().toISOString();
   const positiveControl = config.positiveControl?.trim() ? config.positiveControl : null;
-  const control = positiveControl ? runShell(root, positiveControl).isGreen : null;
-  return { at: new Date().toISOString(), green: isGreen, control, gate: config.gate, positiveControl };
+  if (!positiveControl) return { at, green: isGreen, control: null, gate: config.gate, positiveControl };
+  const control = runProfiledShell(root, positiveControl, { gateLease, artifactPrefix: 'pullboard-gate-control', persistLog: true });
+  // A control the environment refused says nothing about the gate, the same rule that keeps a refused gate run out of the record.
+  const result = control.sandboxBlocked ? null : control.isGreen;
+  return { at, green: isGreen, control: result, gate: config.gate, positiveControl, controlLog: control.logPath, controlProfile: control.profilePath };
 }
 
 /** Quote a fixed executable or selected path without permitting shell expansion. */

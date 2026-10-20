@@ -5,7 +5,7 @@
 import { submitFixture } from './board-submit-fixture.js';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { test } from 'node:test';
@@ -14,6 +14,7 @@ import { pathToFileURL } from 'node:url';
 import * as store from '../src/board.js';
 import { main } from '../src/cli.js';
 import { boardHealth } from '../src/health.js';
+import { gateRuns } from '../src/gate-control.js';
 import { JSON_SHAPES } from '../src/json.js';
 import { runFixtureChild, runFixtureGit } from './fixture-child.js';
 
@@ -382,4 +383,20 @@ test('health reports a gate that refused every run [C7,D1]', async (t) => {
   assert.ok(alarm, 'health names a gate that refused every run in its window');
   assert.equal(alarm.subject, 'gate');
   assert.deepEqual(alarm.detail.runs.map((run) => run.green), [false, false, false], 'the finding lists the last runs, all refused');
+});
+
+test('a positive control inherits the gate slot it runs under [C7,D1]', async (t) => {
+  const box = repo(t);
+  const resources = pathToFileURL(resolve('src/resources.js')).href;
+  // The control asks whether it inherited the gate's admission; a child that does not is refused and reads red.
+  const probe = `node --input-type=module -e "const { inheritedGateSlot } = await import('${resources}'); process.exit(inheritedGateSlot({ root: process.cwd() }) ? 0 : 1)"`;
+  commitPolicy(box, { gate: 'true', positiveControl: probe });
+  const { runGate } = await import('../src/gate.js');
+  const config = JSON.parse(readFileSync(join(box.root, 'pullboard.json'), 'utf8'));
+  const gate = await runGate(box.root, config, { trustStamp: false });
+  assert.equal(gate.isGreen, true, 'the gate itself is green');
+  const run = gateRuns(box.root).at(-1);
+  assert.equal(run.control, true, 'the positive control saw the inherited gate slot and passed');
+  assert.ok(run.controlLog && existsSync(run.controlLog), 'the control keeps its raw output in the gate evidence');
+  assert.ok(run.controlProfile && existsSync(run.controlProfile), 'the control keeps its timing profile in the gate evidence');
 });
