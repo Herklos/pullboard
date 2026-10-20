@@ -125,8 +125,8 @@ function laneNameFor(folder) {
 /**
  * The lanes init proposes from the repo's layout (I1, I2): one lane per top-level package for a
  * packages/* or apps/* layout, and one app lane owning the top-level folders otherwise. Nothing is
- * proposed once any lane owns a folder. Proposals are never written: the person accepts each one
- * by running its `pullboard lane add` command.
+ * proposed once any lane owns a folder. Init never writes them: the agent in the main checkout adds them
+ * with the printed `pullboard lane add` command and tells the person (#914).
  *
  * @param {string} root
  * @param {any} [config] - The repo's config; read from root when omitted.
@@ -156,7 +156,7 @@ export function proposeLanes(root, config = loadConfig(root)) {
  * so a starter filed there had to be withdrawn and filed again (blueprint trial, finding 3). In
  * order: the starter's own lane when it exists or is proposed, else the first declared lane that
  * owns folders, else the first lane init proposes. A proposed lane is used by name and never
- * written: the person accepts it with its `pullboard lane add` command, and the starters are
+ * written: the agent adds it with its `pullboard lane add` command, and the starters are
  * waiting in it from then on.
  *
  * @param {string | undefined} wanted - The lane the blueprint names for this starter, if any.
@@ -202,7 +202,7 @@ export function askedLaneNotes(placed, config) {
 
 /**
  * The lines blueprint add prints when its starters went into a proposed lane: where they are,
- * and the one command that accepts the lane.
+ * and the one command that adds the lane.
  *
  * @param {{ name: string, owns: string[] }[]} proposed - The proposed lanes starters were filed in.
  * @returns {string[]}
@@ -210,7 +210,7 @@ export function askedLaneNotes(placed, config) {
 export function starterLaneNotes(proposed) {
   if (!proposed.length) return [];
   const [, accept] = laneProposalNotes(proposed);
-  return [`starter items filed in the ${proposed.map((lane) => lane.name).join(' and ')} lane, proposed, not written until the person accepts`, accept];
+  return [`starter items filed in the ${proposed.map((lane) => lane.name).join(' and ')} lane, proposed; add it to start them`, accept];
 }
 
 /**
@@ -222,7 +222,7 @@ export function starterLaneNotes(proposed) {
 const shellWord = (word) => (/^[A-Za-z0-9_./,@%+=:-]+$/u.test(word) ? word : `'${word.replaceAll("'", "'\\''")}'`);
 
 /**
- * The init lines that show proposed lanes and the one command that accepts them.
+ * The init lines that show proposed lanes and the one command that adds them; the agent runs it and tells the person.
  *
  * @param {{ name: string, owns: string[] }[]} proposals
  * @returns {string[]}
@@ -230,8 +230,9 @@ const shellWord = (word) => (/^[A-Za-z0-9_./,@%+=:-]+$/u.test(word) ? word : `'$
 export function laneProposalNotes(proposals) {
   if (!proposals.length) return [];
   return [
-    `proposed lanes, not written until the person accepts: ${proposals.map((lane) => `${lane.name} owns ${lane.owns.join(' ')}`).join('; ')}`,
-    `ask the person; to accept, run: ${proposals.map((lane) => `pullboard lane add ${shellWord(lane.name)} --owns ${shellWord(lane.owns.join(','))}`).join(' && ')}`,
+    `proposed lanes: ${proposals.map((lane) => `${lane.name} owns ${lane.owns.join(' ')}`).join('; ')}`,
+    // An agent adds the first lanes itself and says so; stopping to ask stalled every model in the #849 trial (#914).
+    `add them from the main checkout, then tell the person which lanes you made: ${proposals.map((lane) => `pullboard lane add ${shellWord(lane.name)} --owns ${shellWord(lane.owns.join(','))}`).join(' && ')}`,
   ];
 }
 
