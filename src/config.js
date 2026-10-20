@@ -205,6 +205,9 @@ export function configProblems(config) {
   if (!timeout || timeoutMs <= 0 || !Number.isFinite(timeoutMs) || timeoutMs > MAX_CHECK_TIMEOUT_MS) {
     problems.push('"check.timeout" is a positive duration no longer than 2,147,483,647ms, like "5m"');
   }
+  if (config.verify?.unrelatedTrunkMoves !== undefined && typeof config.verify.unrelatedTrunkMoves !== 'boolean') {
+    problems.push('"verify.unrelatedTrunkMoves" is true or false');
+  }
   if (!Number.isFinite(config.verify?.reviewRatio) || config.verify.reviewRatio <= 0) {
     problems.push('"verify.reviewRatio" is a positive number, such as 3');
   }
