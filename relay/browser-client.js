@@ -10,7 +10,9 @@ import { enqueueStream, followStream } from './browser-stream.js';
 import { emptyBoardStep, homeLineDismissed, homeScreenLine, noticeLines, rememberOwnedRequestId, showRelayScreen, storedOwnedRequestState } from './browser-notice.js';
 import { registerApp, requestPairingPersistence } from './install.js';
 import { browserJSON, withBrowserDeadline } from './browser-deadline.js';
-import { phoneApprovalStatus, placePhoneApprovals } from './browser-approval-card.js';
+import { phoneApprovalStatus, placePhoneApprovals, forgetPhoneApprovals } from './browser-approval-card.js';
+import { phoneSnapshotPages } from './browser-pages.js';
+import { createPhoneHistory } from './browser-history.js';
 
 const KEYS = 'pullboard.relay.keys.v1';
 const PENDING = 'pullboard.relay.pair.v1';
@@ -121,14 +123,32 @@ export async function createTransport({ onUpdate = () => {}, onOpenBoard = () =>
   if (pair && (!BOARD.test(pair.board ?? '') || typeof pair.key !== 'string')) pair = null;
   try { if (pair) decodeBoardKey(pair.key); } catch { pair = null; }
 
+  /** Preserve shared collections across updates: the cockpit shallow-copies state and revocation must clear those arrays too. */
+  function installState(entry, value) {
+    if (!entry.state) { entry.state = value; return; }
+    for (const [field, previous] of Object.entries(entry.state)) {
+      if (Array.isArray(previous) && previous !== value[field]) {
+        previous.length = 0;
+        if (Array.isArray(value[field])) {
+          for (const row of value[field]) previous.push(row);
+          Object.defineProperty(value, field, { ...Object.getOwnPropertyDescriptor(value, field), value: previous });
+        }
+      }
+      if (!Object.hasOwn(value, field)) delete entry.state[field];
+    }
+    Object.defineProperties(entry.state, Object.getOwnPropertyDescriptors(value));
+  }
+
   /** Discard decrypted memory and this document when relay authorization is lost. */
   async function denied(error) {
     if (accessLost) return;
     accessLost = true;
     accessError = error ?? new Refused('AUTH_REQUIRED', 'Sign in again to read this board.');
     access.abort();
+    forgetPhoneApprovals(document);
     for (const entry of paired.values()) {
       entry.stream?.close();
+      entry.history?.close(); entry.pageCache?.clear(); entry.pages = null;
       // The cockpit holds this same projection. Clear its arrays before releasing our reference.
       if (entry.state) for (const [field, value] of Object.entries(entry.state)) {
         if (Array.isArray(value)) value.length = 0;
@@ -186,7 +206,7 @@ export async function createTransport({ onUpdate = () => {}, onOpenBoard = () =>
     const phoneWaiting = root.dataset.relayDevice === 'phone' && (!rendered || paired.size === 0);
     const step = emptyBoardStep({ available, waitingBoards, approvedBoards, loaded: inventoryLoaded, browserPaired, failure });
     showRelayScreen(root, phoneWaiting || paired.size === 0 ? 'share' : null,
-      phoneWaiting && (failure || waitingBoards.size) ? lines.join(' ') : '', step);
+      phoneWaiting && (failure || waitingBoards.size || warnings.some(value => value?.code === 'ACCOUNT_STORAGE_LIMIT')) ? lines.join(' ') : '', step);
     placePhoneApprovals(document);
   }
 
@@ -205,6 +225,7 @@ export async function createTransport({ onUpdate = () => {}, onOpenBoard = () =>
   /** Keep one missing-snapshot board visible as waiting without clearing other authorized boards. */
   function waitForFirstSnapshot(entry) {
     entry.stream?.close();
+    entry.history?.close(); entry.history = null; entry.pageCache?.clear(); entry.pages = null;
     entry.state = null;
     entry.shouts = null;
     paired.delete(entry.id);
@@ -215,21 +236,53 @@ export async function createTransport({ onUpdate = () => {}, onOpenBoard = () =>
 
   /** Retain one warning per board without duplicating it on the next live poll. */
   function warning(value, boardId) {
-    if (!value || value.code !== 'BOARD_INACTIVE') return;
-    warnings = warnings.filter(entry => entry.board !== boardId);
+    if (!value || !['BOARD_INACTIVE', 'ACCOUNT_STORAGE_LIMIT'].includes(value.code)) return;
+    warnings = warnings.filter(entry => entry.board !== boardId || entry.code !== value.code);
     warnings.push({ ...value, board: boardId });
     notice();
   }
 
+  /** Keep full history beside the live cursor; a completed old checkpoint never replaces newer current state. */
+  function historyFor(entry) {
+    entry.history ??= createPhoneHistory({
+      active: () => !accessLost && paired.get(entry.id) === entry,
+      current: () => ({ id: entry.pages?.id, sequence: entry.cursor }),
+      install(full, details) {
+        const state = presentationState(full, entry.id);
+        if (details) state.items = state.items.map(item => details.get(item.id) ?? item);
+        installState(entry, { ...state, historyProgress: entry.history.status() });
+        entry.historyChanged = true;
+      },
+      changed() {
+        if (entry.state) entry.state.historyProgress = entry.history.status();
+        // Progress itself is local state. Only new board data or completion asks the cockpit to refresh the relay.
+        if (entry.historyChanged || entry.history.status().complete) { entry.historyChanged = false; onUpdate(); }
+      },
+      failed() {
+        failure = 'Older history did not finish loading. Open this board again to retry.';
+        failureBoard = entry.id; notice();
+      },
+    });
+    return entry.history;
+  }
+
   /** Authenticate the latest native snapshot before installing its presentation in this device. */
   async function snapshot(entry) {
-    const { response, document } = await browserJSON('/api/v1/boards/' + entry.id + '/state', {
+    let path = '/api/v' + (entry.snapshotApiVersion === 2 ? '2' : '1') + '/boards/' + entry.id + '/state';
+    const settings = {
       credentials: 'same-origin', cache: 'no-store', redirect: 'error',
-      headers: { 'x-pullboard-engine': String(ENGINE_VERSION), ...(entry.state && entry.snapshotTag ? { 'if-none-match': entry.snapshotTag } : {}) },
-    });
+      signal: access.signal,
+      headers: { 'x-pullboard-engine': String(ENGINE_VERSION), ...(entry.snapshotApiVersion !== 2 && entry.state && entry.snapshotTag ? { 'if-none-match': entry.snapshotTag } : {}) },
+    };
+    let { response, document } = await browserJSON(path, settings);
+    if (!response.ok && document?.error?.code === 'RELAY_API_VERSION' && entry.snapshotApiVersion !== 2) {
+      entry.snapshotApiVersion = 2; entry.snapshotTag = null;
+      path = '/api/v2/boards/' + entry.id + '/state';
+      ({ response, document } = await browserJSON(path, { ...settings, headers: { 'x-pullboard-engine': String(ENGINE_VERSION) } }));
+    }
     if (response.status === 304 && entry.state) return;
     if (!response.ok) {
-      await checkAuthorization('/api/v1/boards/' + entry.id + '/state', response.status, denied, document.error);
+      await checkAuthorization(path, response.status, denied, document.error);
       if (document.error?.code === 'NO_BOARD' || document.error?.code === 'NO_SNAPSHOT') waitForFirstSnapshot(entry);
       throw new Error(document.error ? '[' + document.error.code + '] ' + document.error.message : 'The relay snapshot is unavailable. Retry.');
     }
@@ -237,13 +290,35 @@ export async function createTransport({ onUpdate = () => {}, onOpenBoard = () =>
     const row = document.state;
     if (!row || !Number.isSafeInteger(row.sequence) || row.sequence < 0) throw new Error('The relay snapshot cursor is invalid. Refresh this board.');
     warning(row.warning, entry.id);
+    if (row.apiVersion === 2) {
+      entry.pageCache ??= new Map();
+      const page = await phoneSnapshotPages(row, { boardId: entry.id, key: entry.key, maxEngine: ENGINE_VERSION, cache: entry.pageCache,
+        read: target => documentAt(target, denied, { signal: access.signal }),
+        bound: work => withBrowserDeadline(work, { signal: access.signal }),
+      });
+      if (accessLost) throw accessError;
+      const unchanged = entry.pages?.id === page.id && entry.state;
+      if (row.sequence >= entry.cursor && !unchanged) {
+        const value = await page.presentation();
+        if (accessLost) throw accessError;
+        installState(entry, presentationState(value, entry.id));
+        entry.shouts = null; entry.cursor = row.sequence;
+      }
+      entry.pages = page;
+      const history = historyFor(entry);
+      history.queue(page, row.sequence);
+      if (entry.state) entry.state.historyProgress = history.status();
+      if (rendered) history.start();
+      return;
+    }
     const plain = await withBrowserDeadline(() => unseal(entry.key, transportBytes(row.sealed), { boardId: entry.id, kind: 'snapshot', sequence: row.sequence }));
     const value = await snapshotDocument(plain);
     const state = snapshotState(value, entry.id);
     if (accessLost) throw new Error('Sign in again to read this board.');
     entry.snapshotTag = response.headers.get('etag');
     if (row.sequence >= entry.cursor) {
-      entry.state = state;
+      entry.history?.close(); entry.history = null; entry.pages = null; entry.pageCache?.clear();
+      installState(entry, state);
       entry.shouts = Array.isArray(value.presentation?.shouts) ? value.presentation.shouts : null;
       entry.cursor = row.sequence;
     }
@@ -291,7 +366,8 @@ export async function createTransport({ onUpdate = () => {}, onOpenBoard = () =>
     if (move.version !== 1 || !Number.isSafeInteger(move.engine) || move.engine < 1) throw new Error('This sealed move has an unsupported format. Refresh it from a linked machine.');
     if (move.engine !== ENGINE_VERSION) throw new Refused('RELAY_ENGINE_VERSION', 'This board needs engine ' + move.engine + '; this browser reads engine ' + ENGINE_VERSION + '. Upgrade the browser client.');
     if (move.presentation) {
-      entry.state = presentationState(move.presentation, entry.id);
+      entry.history?.close(); entry.history = null; entry.pages = null; entry.pageCache?.clear();
+      installState(entry, presentationState(move.presentation, entry.id));
       entry.shouts = Array.isArray(move.presentation.shouts) ? move.presentation.shouts : null;
       entry.cursor = row.event_id;
     } else {
@@ -414,7 +490,7 @@ export async function createTransport({ onUpdate = () => {}, onOpenBoard = () =>
     waitingBoards = new Map();
     warnings = document.warnings ?? [];
     const visible = new Set(available.map(board => board.id));
-    for (const [id, entry] of paired) if (!visible.has(id)) { entry.stream?.close(); paired.delete(id); }
+    for (const [id, entry] of paired) if (!visible.has(id)) { entry.stream?.close(); entry.history?.close(); entry.pageCache?.clear(); paired.delete(id); }
     for (const board of available) {
       const encoded = pair?.board === board.id ? pair.key : keys[board.id];
       if (paired.has(board.id) && pair?.board !== board.id && encodeBoardKey(paired.get(board.id).key) === encoded) continue;
@@ -424,8 +500,9 @@ export async function createTransport({ onUpdate = () => {}, onOpenBoard = () =>
         await snapshot(entry);
         await catchUp(entry);
         if (accessLost) throw new Error('Sign in again to read this board.');
-        paired.get(board.id)?.stream?.close();
+        paired.get(board.id)?.stream?.close(); paired.get(board.id)?.history?.close(); paired.get(board.id)?.pageCache?.clear();
         paired.set(board.id, entry);
+        if (rendered) entry.history?.start();
         waitingBoards.delete(board.id);
         keys[board.id] = encoded;
         try {
@@ -502,14 +579,15 @@ export async function createTransport({ onUpdate = () => {}, onOpenBoard = () =>
   }
 
   /** Resolve one addressed shout from this paired device's complete sealed presentation. */
-  function addressedShout(entry, rawId) {
+  async function addressedShout(entry, rawId) {
     if (!/^[1-9]\d*$/.test(rawId) || !Number.isSafeInteger(Number(rawId))) {
       throw new Refused('BAD_REQUEST', 'shout needs a positive integer id; use the id from the event or recent state');
     }
+    const id = Number(rawId);
+    if (entry.pages) return { version: 1, shout: entry.history?.shout(id) ?? await entry.pages.shout(id) };
     if (!Array.isArray(entry.shouts)) {
       throw new Refused('SHOUT_NOT_AVAILABLE', 'this snapshot does not include addressed shout history; refresh it with a current CLI');
     }
-    const id = Number(rawId);
     const found = entry.shouts.find(shout => shout.shout_id === id);
     if (!found) throw new Refused('NO_SHOUT', `no shout #${id}`);
     const answer = found.shout_decision ? entry.shouts.find(shout => shout.shout_answers === id) ?? null : null;
@@ -592,7 +670,7 @@ export async function createTransport({ onUpdate = () => {}, onOpenBoard = () =>
   addEventListener('hashchange', pairingChanged);
   // A pairing link opened in another tab, as a scanned QR does, saves its key here: this page fills in by itself.
   addEventListener('storage', event => { if (event.key === KEYS && !accessLost) listing().then(onUpdate, notice); });
-  addEventListener('pagehide', () => { for (const entry of paired.values()) entry.stream?.close(); });
+  addEventListener('pagehide', () => { access.abort(); for (const entry of paired.values()) { entry.stream?.close(); entry.history?.close(); entry.pageCache?.clear(); } });
   // Keep the first screen while inventory is unknown; a pending read is not evidence that nothing is linked.
   let devicePairing = /(?:^#|&)device=/u.test(location.hash);
   try { devicePairing ||= sessionStorage.getItem('pullboard.relay.device-pair.v1') !== null; } catch { /* No storage: no saved pairing. */ }
@@ -612,7 +690,9 @@ export async function createTransport({ onUpdate = () => {}, onOpenBoard = () =>
   });
   return {
     /** Give the startup frame back only after an opted-in viewer has drawn a readable board. */
-    didRender() { rendered = true; notice(); },
+    didRender() { rendered = true; notice(); for (const entry of paired.values()) entry.history?.start(); },
+    /** The View can paint loading counts without making another relay request. */
+    historyProgress(boardId) { return paired.get(boardId)?.history?.status() ?? { loaded: 0, total: 0, complete: true, sequence: paired.get(boardId)?.cursor ?? null }; },
     /** Return decoded API state or seal narrow person intent; no board key or plaintext leaves the device. */
     async request(path, body) {
       if (accessLost) throw accessError;
@@ -621,11 +701,12 @@ export async function createTransport({ onUpdate = () => {}, onOpenBoard = () =>
       if (url.pathname === '/api/v1/boards') { if (body !== undefined && body !== null) throw new Refused('BAD_REQUEST', 'Send person intent to a paired board.'); return listing(); }
       const match = /^\/api\/v1\/boards\/([0-9a-f]{32})\/(state|events|moves|requests)$/.exec(url.pathname);
       const shoutMatch = /^\/api\/v1\/boards\/([0-9a-f]{32})\/shouts\/([^/]+)$/.exec(url.pathname);
-      const route = match ?? shoutMatch;
+      const itemMatch = /^\/api\/v1\/boards\/([0-9a-f]{32})\/items(?:\/([^/]+))?$/.exec(url.pathname);
+      const route = match ?? shoutMatch ?? itemMatch;
       const entry = route && paired.get(route[1]);
       if (!entry) throw new Error('Pair this browser to read that board.');
       if (body !== undefined && body !== null) {
-        if (shoutMatch) throw new Refused('BAD_REQUEST', 'read an addressed shout with GET; use a board move to create or answer shouts');
+        if (shoutMatch || itemMatch) throw new Refused('BAD_REQUEST', 'Read item or shout detail with GET; send person intent to the board moves endpoint.');
         if (!['moves', 'requests'].includes(match[2])) throw new Refused('BAD_REQUEST', 'Send person intent to this board’s moves endpoint.');
         const value = preparePersonRequest(body);
         const send = enqueue(entry, async () => {
@@ -637,6 +718,20 @@ export async function createTransport({ onUpdate = () => {}, onOpenBoard = () =>
         });
         return send;
       }
+      if (itemMatch) return enqueue(entry, async () => {
+        await flushOutbox(entry); await snapshot(entry); await catchUp(entry);
+        if (!itemMatch[2]) {
+          const query = (url.searchParams.get('q') ?? '').trim().toLowerCase();
+          const ids = entry.pages ? await entry.pages.searchItems(query) : entry.state.items.filter(item =>
+            ('#' + item.id + ' ' + item.title + ' ' + item.lane + ' ' + item.specs.join(' ') + ' ' + (item.criterion || '')).toLowerCase().includes(query)).map(item => item.id);
+          return { version: 1, ids };
+        }
+        if (!/^[1-9]\d*$/u.test(itemMatch[2]) || !Number.isSafeInteger(Number(itemMatch[2]))) throw new Refused('BAD_REQUEST', 'Read an item by its positive integer id.');
+        const id = Number(itemMatch[2]);
+        const item = entry.pages ? entry.history?.item(id) ?? await entry.pages.item(id) : entry.state.items.find(value => value.id === id);
+        if (!item) throw new Refused('NO_ITEM', `no item #${id}`);
+        return { version: 1, item };
+      });
       if (shoutMatch) {
         return enqueue(entry, async () => {
           await flushOutbox(entry);

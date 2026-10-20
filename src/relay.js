@@ -1,3 +1,10 @@
+import {
+  clearUploadPauseNotices,
+  firstUploadPauseNotice,
+  permanentUploadRefusal,
+  uploadPauseType,
+  uploadRetryReady,
+} from './relay-upload-pause.js';
 /** Opt-in, sealed relay ordering, with crash-safe migration from the older mirror [H1,H3,H5,H16,H17,P5]. */
 import {
   createHash,
@@ -102,16 +109,22 @@ import {
   requireRelayOnChannel,
 } from './person.js';
 import { listApiProjects } from './projects.js';
+import {
+  relaySnapshotRequest,
+  relayStorage,
+  relayStorageLine,
+} from './relay-page-client.js';
+export { relayStorageLine };
 
 export const DEFAULT_RELAY = 'https://app.pullboard.dev';
 const LINK_FILES = new WeakMap();
+const STATE_FILES = new WeakMap();
 const WARNED_COMMANDS = new WeakSet();
 const KEY_WARNED_COMMANDS = new WeakSet();
 const BASELINE_ATTEMPTS = new WeakMap();
 const BASELINE_NOTICES = new WeakSet();
 const CHECKPOINT_NOTICES = new WeakMap();
 const CHECKPOINT_MOVES = new WeakMap();
-const BASELINE_LOCAL_MOVES = new WeakSet();
 const BASELINE_FAILURES = new WeakMap();
 const AUTH_NOTICES = new WeakSet();
 const DELETION_NOTICES = new WeakSet();
@@ -283,11 +296,13 @@ function loadLink(file) {
     state.personReauth = true;
     saveLink(file, state);
   }
+  STATE_FILES.set(state, file);
   return state;
 }
 
 /** Atomically persist acknowledgements and an exact sealed retry before attempting its send. */
 export function saveLink(file, state) {
+  STATE_FILES.set(state, file);
   mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
   const temporary = file + '.' + randomUUID() + '.tmp';
   try {
@@ -347,10 +362,21 @@ function transportFailure(error) {
   return typeof code === 'string' && /^[A-Z][A-Z0-9_]{1,40}$/u.test(code) ? code : 'no connection';
 }
 
-/** The sole outbound transport in the CLI: explicit sign-in or a saved, opted-in board link. */
-export async function request(state, path, { method = 'GET', body, allowMissing = false, initialBaseline = false, signal } = {}, io) {
+/** Use the page adapter only for snapshot requests; the saved opt-in still owns every network call. */
+export async function request(state, path, options = {}, io) {
+  return relaySnapshotRequest(state, path, options, io, {
+    raw: (target, settings) => rawRequest(state, target, settings, io), key: () => readBoardKey(state.board),
+    decode: (record, key) => decoded(key, record, state, 'snapshot', record.sequence),
+    encode: (value, sequence, key) => sealedRecord(key, value, state, 'snapshot', sequence),
+    maxEngine: ENGINE_VERSION, legacyLimit: SEALED_SNAPSHOT_LIMIT,
+    persist: () => { const file = STATE_FILES.get(state); if (file) saveLink(file, state); },
+  });
+}
+
+/** The sole raw HTTP transport: explicit sign-in or a saved, opted-in board link, with bounded deadlines. */
+async function rawRequest(state, path, { method = 'GET', body, allowMissing = false, initialBaseline = false, signal } = {}, io) {
   const supplied = io?.ignoreRelayEnvironmentToken ? undefined : process.env.PULLBOARD_RELAY_TOKEN;
-  const readToken = method === 'GET' && path.startsWith('/api/v1/boards/') ? supplied : undefined;
+  const readToken = method === 'GET' && /^\/api\/v[12]\/boards\//u.test(path) ? supplied : undefined;
   if (readToken !== undefined && !/^pa_[A-Za-z0-9_-]{43}$/.test(readToken)) throw new Refused('AUTH_REQUIRED', 'supply a current scoped board token without including it in command arguments');
   const token = readToken ?? state.token;
   let response;
@@ -394,6 +420,9 @@ export async function request(state, path, { method = 'GET', body, allowMissing 
     error.relayVersion = document.version;
     error.relayCode = document.error?.code;
     error.relayMessage = document.error?.message;
+    if (/^[0-9a-f]{64}$/u.test(document.error?.page ?? '')) error.page = document.error.page;
+    const storage = relayStorage(document.error?.storage);
+    if (storage) error.storage = storage;
     throw error;
   }
   if (document.version !== 1) throw new Refused('RELAY_VERSION', 'the relay API version is unsupported; upgrade Pullboard before syncing');
@@ -456,6 +485,7 @@ function summary(root, state, { pairing = false } = {}) {
     link: 'https://app.pullboard.dev/#board=' + state.board + fragment,
     sequence: state.sequence, behind: (state.baselinePause ? behind(root, state) : state.mode === 'ordered' ? Number(Boolean(state.pending)) : behind(root, state)) + Number(Boolean(state.snapshot || state.checkpoint)),
     recovery: recoverySummary(state),
+    ...(relayStorage(state.storage) ? { storage: relayStorage(state.storage) } : {}),
     ...(oversizedSnapshot ? { oversizedSnapshot } : {}),
     ...(state.baselinePause ? { pausedUpload: structuredClone(state.baselinePause) } : {}),
     ...(state.checkpointRefusal ? { refusedCheckpoint: checkpointProblem(state) } : {}) };
@@ -463,6 +493,7 @@ function summary(root, state, { pairing = false } = {}) {
 
 /** Measure a pending sealed snapshot against the relay's decoded journal limit. */
 function snapshotSize(state) {
+  if (state?.snapshotApiVersion === 2) return null;
   const sealed = state?.snapshot?.sealed ?? state?.checkpoint?.sealed;
   if (typeof sealed !== 'string') return null;
   const bytes = Buffer.from(sealed, 'base64url');
@@ -479,7 +510,7 @@ export function pendingSnapshotSize(root) {
 export function formatSnapshotLimit(problem, { paused = false } = {}) {
   const size = `${(problem.sealedBytes / 1_000_000).toFixed(1)} MB`;
   const limit = `${(problem.limit / 1_000_000).toFixed(1)} MB`;
-  if (paused) return `relay paused for ${problem.board}: snapshot ${size} over the relay limit ${limit}; it resumes on its own once a snapshot fits`;
+  if (paused) return `relay paused for ${problem.board}: snapshot ${size} over the relay limit ${limit}; it resumes when the relay supports bounded snapshots`;
   return `relay snapshot for ${problem.board}: sealed snapshot ${size} over the relay limit ${limit}`;
 }
 
@@ -519,18 +550,15 @@ function expiredSignInMoveRefusal(state, error) {
   return new Refused('AUTH_REQUIRED', `relay sign-in expired or was revoked for board ${state.board}: ${reason}; run pullboard relay on to give this machine a credential or pullboard relay off to stop syncing`);
 }
 
-/** Pause only definitive baseline 4xx refusals; throttling and transient errors retain retries. */
-function permanentBaselineRefusal(error) {
-  return Number.isInteger(error?.httpStatus) && error.httpStatus >= 400 && error.httpStatus < 500 &&
-    ![408, 425, 429].includes(error.httpStatus);
-}
-
 /** Explain a refused later checkpoint without changing the ordered-move recovery policy. */
 function checkpointProblem(state) {
   const refusal = state.checkpointRefusal;
   const code = safePauseCode(refusal);
   const reason = safePauseMessage(refusal);
   const size = snapshotSize(state);
+  if (refusal.code === 'ACCOUNT_STORAGE_LIMIT') return { code: refusal.code,
+    message: `relay checkpoint paused for ${state.board}: ${relayStorageLine(state.storage)}; free relay storage or ask the operator to raise the quota; moves still sync in order`,
+    next: 'Free relay storage or ask the operator to raise the account quota; uploads resume automatically.' };
   const next = 'upgrade pullboard (npm i -g pullboard) or run pullboard relay off then relay on --all';
   const message = `relay checkpoint refused for ${state.board}: ${code} ${reason}`
     + (size ? '; ' + formatSnapshotLimit(size) : '')
@@ -550,6 +578,7 @@ function reportCheckpointRefusal(state, io) {
   if (!boards) { boards = new Set(); CHECKPOINT_NOTICES.set(io, boards); }
   if (boards.has(state.board)) return;
   boards.add(state.board);
+  if (uploadPauseType(state.checkpointRefusal) && !firstUploadPauseNotice(state)) return;
   const line = 'pullboard: ' + checkpointProblem(state).message;
   if (['status', 'doctor'].includes(io.relayCommand?.cliOperation) && io.relayJson === false) io.say(line);
   else io.err(line);
@@ -559,7 +588,7 @@ function reportCheckpointRefusal(state, io) {
 function pauseFix(state) {
   const pause = state.baselinePause;
   if (pause.size || /(?:exceeds?|over|larger than|too large).{0,40}(?:bytes|snapshot|limit)|(?:snapshot|limit).{0,40}(?:exceeds?|over|too large)/iu.test(pause.message)) {
-    return 'it resumes automatically once a snapshot fits';
+    return 'upgrade the configured relay to API version 2 for bounded snapshots, then it resumes automatically';
   }
   if ([401, 403].includes(pause.status) || pause.code === 'AUTH_REQUIRED') return 'run pullboard relay on to sign in again';
   return 'upgrade Pullboard or run pullboard relay on again, then report the refusal if it persists';
@@ -578,7 +607,7 @@ function baselinePauseLine(state) {
 function reportBaselinePause(state, io) {
   if (!BASELINE_NOTICES.has(io)) {
     BASELINE_NOTICES.add(io);
-    io.err(baselinePauseLine(state));
+    if (firstUploadPauseNotice(state)) io.err(baselinePauseLine(state));
   }
 }
 
@@ -646,16 +675,18 @@ async function uploadInitialBaseline(root, file, state, io) {
     state.baselineAccepted = true;
     state.cursor = Number.isSafeInteger(state.baselineCursor) ? state.baselineCursor : localRecords(root, (board) => board.db.prepare('SELECT COALESCE(MAX(event_id), 0) AS id FROM event').get().id);
     delete state.baselineCursor;
+    const resumed = Boolean(state.baselinePause);
     delete state.baselinePause;
     delete state.snapshot;
     state.presentationDigest = state.snapshotPresentationDigest ?? state.presentationDigest;
     delete state.snapshotPresentationDigest;
     state.needsPresentation = false;
     saveLink(file, state);
+    if (resumed) clearUploadPauseNotices(state);
     return true;
   } catch (error) {
     if (error.relayVersion === 1 && error.code === 'BASELINE_EXISTS') fenceBaseline(file, state);
-    if (!permanentBaselineRefusal(error) || state.baselineAccepted) {
+    if (!permanentUploadRefusal(error) || state.baselineAccepted) {
       rememberBaselineFailure(io, file, error);
       throw error;
     }
@@ -672,19 +703,20 @@ async function uploadInitialBaseline(root, file, state, io) {
       message: safePauseMessage(error),
       ...(size ? { size: { sealedBytes: size.sealedBytes, limit: size.limit } } : {}),
     };
-    delete state.snapshot;
-    delete state.snapshotPresentationDigest;
-    delete state.baselineCursor;
+    // Retain the refused ciphertext and its source cursor; blocked commands do not re-seal it.
     saveLink(file, state);
     reportBaselinePause(state, io);
     return false;
   }
 }
 
-/** Rebuild from current local state once per command, so paused moves become the accepted baseline. */
+/** Probe blocked limits first; only a recovered relay receives a fresh baseline containing all paused local moves. */
 async function retryPausedBaseline(root, file, state, io) {
   if (!state.baselinePause || attemptedBaselineThisCommand(io, file)) return !state.baselinePause;
   try {
+    if (!await uploadRetryReady(state, state.baselinePause, path => request(state, path, {}, io))) {
+      saveLink(file, state); reportBaselinePause(state, io); return false;
+    }
     const document = relaySnapshot(root);
     state.snapshot = { sequence: 0, sealed: await sealedRecord(readBoardKey(state.board), document, state, 'snapshot', 0) };
     state.snapshotPresentationDigest = presentationDigest(document.presentation);
@@ -841,21 +873,30 @@ async function replayRelayRecord(board, key, state, record) {
 /** Persist the exact checkpoint before uploading, so a lost reply retries identical ciphertext. */
 async function publishCheckpoint(root, file, state, io) {
   if (!state.token?.startsWith('pm_') || process.env.PULLBOARD_RELAY_TOKEN) return;
-  const document = relaySnapshot(root);
-  const sequence = Number(document.tables.board_meta.find((row) => row.meta_key === 'relay_applied_sequence')?.meta_value ?? 0);
-  const digest = presentationDigest(document.presentation);
-  if (!state.checkpoint || state.checkpoint.sequence !== sequence || state.checkpointPresentationDigest !== digest) {
+  const resumed = Boolean(state.checkpointRefusal);
+  if (state.checkpointRefusal && uploadPauseType(state.checkpointRefusal)) {
+    if (!await uploadRetryReady(state, state.checkpointRefusal, path => request(state, path, {}, io))) {
+      saveLink(file, state); reportCheckpointRefusal(state, io); return;
+    }
     delete state.checkpointRefusal;
-    state.checkpointPresentationDigest = digest;
-    state.checkpoint = { sequence, sealed: await sealedRecord(readBoardKey(state.board), document, state, 'snapshot', sequence) };
     saveLink(file, state);
+  } else {
+    const document = relaySnapshot(root);
+    const sequence = Number(document.tables.board_meta.find((row) => row.meta_key === 'relay_applied_sequence')?.meta_value ?? 0);
+    const digest = presentationDigest(document.presentation);
+    if (!state.checkpoint || state.checkpoint.sequence !== sequence || state.checkpointPresentationDigest !== digest) {
+      delete state.checkpointRefusal;
+      state.checkpointPresentationDigest = digest;
+      state.checkpoint = { sequence, sealed: await sealedRecord(readBoardKey(state.board), document, state, 'snapshot', sequence) };
+      saveLink(file, state);
+    }
+    // A definitive rejection retries only a fresh image after the board changes.
+    if (state.checkpointRefusal) { reportCheckpointRefusal(state, io); return; }
   }
-  // A definitive rejection retries only a fresh image after the board changes.
-  if (state.checkpointRefusal) { reportCheckpointRefusal(state, io); return; }
   let reply;
   try { reply = await request(state, '/api/v1/boards/' + state.board + '/state', { method: 'PUT', body: state.checkpoint }, io); }
   catch (error) {
-    if (!(error instanceof Refused) || !permanentBaselineRefusal(error)) throw error;
+    if (!(error instanceof Refused) || !permanentUploadRefusal(error)) throw error;
     state.checkpointRefusal = { code: safePauseCode(error), message: safePauseMessage(error), status: error.httpStatus };
     saveLink(file, state);
     reportCheckpointRefusal(state, io);
@@ -866,6 +907,7 @@ async function publishCheckpoint(root, file, state, io) {
   delete state.checkpoint;
   delete state.checkpointPresentationDigest;
   saveLink(file, state);
+  if (resumed) clearUploadPauseNotices(state);
 }
 
 /** Drain a legacy source once, refusing foreign history before it can be silently checkpointed. */
@@ -1133,10 +1175,7 @@ export async function relayOperation(root, operation, args, io, command, applyLo
     moves.add(state.board);
     try {
       if (!await ensureOrdered(root, file, state, io)) {
-        // Preflight's notice covers the first move; long-running commands still name every later move.
-        if (BASELINE_LOCAL_MOVES.has(io)) BASELINE_NOTICES.delete(io);
         reportBaselinePause(state, io);
-        BASELINE_LOCAL_MOVES.add(io);
         return applyPausedMoveLocally();
       }
       await catchUp(root, file, state, io);

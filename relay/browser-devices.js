@@ -5,7 +5,7 @@ import { ENGINE_VERSION } from './engine.js';
 import { Refused } from './refused.js';
 import { approvalContext, openApproval, sealApproval, verifyApprovalIntent } from './relay-approval.js';
 import { devicePublicKey } from './device-keys.js';
-import { approvalCardText, approvalNames, deletedText, phoneApprovalStatus } from './browser-approval-card.js';
+import { approvalCardText, approvalNames, deletedText, phoneApprovalStatus, forgetPhoneApprovals } from './browser-approval-card.js';
 import { withBrowserDeadline } from './browser-deadline.js';
 
 const PENDING = 'pullboard.relay.device-pair.v1';
@@ -163,7 +163,7 @@ export async function installPhoneApprovals(documentAt, boardKeys, onApproved, s
   let stopped = false;
   let timer;
   /** Release the private device key and pending cards when this page loses relay access. */
-  function stop() { stopped = true; clearTimeout(timer); device = null; panel.replaceChildren(); panel.remove(); }
+  function stop() { stopped = true; clearTimeout(timer); device = null; forgetPhoneApprovals(document); }
   signal?.addEventListener('abort', stop, { once: true });
   /** Refresh pending metadata without approving it or replacing a button whose request is in flight. */
   async function refresh() {

@@ -1,5 +1,8 @@
 /** The words on a paired phone's approval card: which computer asks, which board, and until when [H17,H5]. */
 
+/** The transport owns these live nodes even while the View replaces its current board children. */
+const APPROVAL_PANELS = new WeakMap();
+
 /** Keep one sealed display name only when it is a short single line; otherwise the card falls back. */
 function displayName(value) {
   return typeof value === 'string' && value.trim() && value.length <= 200 && !/[\u0000-\u001f\u007f]/u.test(value) ? value.trim() : null;
@@ -47,7 +50,7 @@ export const APPROVAL_CARD_STYLES = `
 
 /** Show the requests feed's own progress without making it a prerequisite for reading a board. */
 export function phoneApprovalStatus(doc, message) {
-  let panel = doc.getElementById('phone-approvals');
+  let panel = doc.getElementById('phone-approvals') ?? APPROVAL_PANELS.get(doc);
   if (!panel && message) {
     const main = doc.querySelector('main');
     if (!main) return null;
@@ -57,6 +60,7 @@ export function phoneApprovalStatus(doc, message) {
     main.prepend(panel);
   }
   if (!panel) return null;
+  APPROVAL_PANELS.set(doc, panel);
   placePhoneApprovals(doc);
   let status = panel.querySelector('.phone-approval-status');
   if (!message) { status?.remove(); return panel; }
@@ -70,7 +74,7 @@ export function phoneApprovalStatus(doc, message) {
 
 /** Keep the same authenticated cards and live handlers on the phone's visible screen until a board can draw. */
 export function placePhoneApprovals(doc) {
-  const panel = doc.getElementById('phone-approvals');
+  const panel = doc.getElementById('phone-approvals') ?? APPROVAL_PANELS.get(doc);
   if (!panel) return null;
   const root = doc.documentElement;
   const frame = root?.dataset.relayDevice === 'phone' && root.dataset.relayScreen === 'share'
@@ -81,4 +85,12 @@ export function placePhoneApprovals(doc) {
   if (mark) mark.after(panel);
   else host.prepend(panel);
   return panel;
+}
+
+/** Release retained cards, handlers and progress when this document loses access or leaves the page. */
+export function forgetPhoneApprovals(doc) {
+  const panel = APPROVAL_PANELS.get(doc) ?? doc.getElementById('phone-approvals');
+  APPROVAL_PANELS.delete(doc);
+  panel?.replaceChildren();
+  panel?.remove();
 }

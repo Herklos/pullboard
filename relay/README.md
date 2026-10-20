@@ -120,7 +120,7 @@ credentials, repositories, or board databases are needed.
 ## Sealed API relay
 
 createRelayHandler({ directory, auth, publicOrigin, pollMs }) from service.js
-mounts API v1 on the existing sign-in component. Mount the auth handler first,
+mounts the version-1 envelope and the API1/API2 transports on the existing sign-in component. Mount the auth handler first,
 then this handler, on one HTTP server; call the handler's close() at shutdown.
 serveRelay({ directory, auth, port, host, publicOrigin }) is a convenience
 server for these API routes. Its default address is loopback and its default
@@ -155,11 +155,75 @@ The client owns the encryption format and engine-version checks.
   It requires a person's signed-in session and current write access.
   It removes the link and its board-scoped credentials too; other boards and person sessions remain valid.
 
-All responses and refusals retain API version 1. Moves use the shared 100,000
-byte JSON-body limit. Snapshots allow a bounded 14,000,000 byte JSON body and
-10,000,000 decoded bytes. One private SQLite journal per board stores only its
+All responses and refusals retain envelope `version: 1`. Moves use the shared
+100,000 byte JSON-body limit. Legacy API1 snapshots allow a bounded 14,000,000
+byte JSON body and 10,000,000 decoded bytes; API2 uses the bounded objects below. One private SQLite journal per board stores only its
 identity, format, head cursor, receive times, public sender identities and sealed payloads. Compaction
 keeps the head cursor, so the next move never reuses an earlier sequence.
+
+### Paged snapshots and account storage
+
+Upgrade the relay before linking a board larger than the legacy cap. `GET /api/v2`
+advertises `apiVersion: 2`, `snapshot: "sealed-pages"` and the per-object bounds.
+A new CLI preserves legacy reads and uses API2 for every new snapshot write
+when the relay supports it. Small boards use the same complete-history transport;
+a tiny compressed carrier cannot bypass the bounded phone boot. Old relays keep
+their original snapshot interface. Once paged, a board cannot silently
+downgrade. An older API1 reader receives `RELAY_API_VERSION` and
+`npm i -g pullboard@latest`; it never receives an incomplete legacy snapshot.
+This transport does not change the executable move engine or seal envelope.
+
+API2 routes are under `/api/v2/boards/:id`:
+
+- `POST /uploads` takes `{sequence, resume?}` and returns a principal-bound
+  upload id. An unfinished upload lasts one hour and can resume after a lost reply.
+- `PUT /uploads/:upload/objects/:hash` takes `{sequence, sealed, children}`.
+  Ciphertext has a SHA-256 content id, at most 400,000 bytes, at most 64 opaque
+  child ids, and a JSON request smaller than 600,000 bytes. Devices authenticate
+  and decrypt every object; a private plaintext fingerprint is never uploaded.
+- `POST /uploads/:upload/publish` takes `{root, initialOnly?}`. The relay checks
+  the complete opaque graph and commits its root with journal coverage in one
+  SQLite transaction. A partially staged graph never replaces the readable head.
+- `GET /state` returns a legacy head or `{apiVersion: 2, sequence, sender,
+  root, read, storage, warning?}`. The short-lived read pin retains this exact
+  root while a newer head is published. It expires after fifteen idle minutes.
+- `GET /objects/:hash?pin=...&via=...` reads only an object reachable along the
+  bounded path from that principal's pinned root. Knowing a staged hash grants
+  no read access. Every request rechecks the board's authorization.
+- `GET /storage` returns only `{storage, warning?}` plus version fields. It
+  reclaims expired staging across the server-derived account before reporting
+  whether uploads can resume. It sends no snapshot or plaintext board record.
+
+The phone decrypts a current-state presentation under 900,000 bytes first.
+Full current fields and all native tables, item threads and old shouts follow
+in sealed background pages, newest history first; addressed reads can fetch
+one older item or shout immediately. `transport.historyProgress(boardId)` names
+`loaded`, `total`, `complete`, and `sequence`; partial or failed streams do not
+claim completion. Live ordered moves continue while a prior read pin finishes.
+Native restoration retains every table, counter, event and receipt.
+
+The default account quota is **256,000,000 decimal bytes**. Set
+`PULLBOARD_ACCOUNT_STORAGE_BYTES` to a positive whole-byte value and restart the
+service to change it. The board's link owner is assigned by authenticated server
+state; no request can choose another account. Usage counts logical retained
+sealed journal payloads and cipher pages, including unfinished uploads and
+live pinned roots, across that account's boards. SQLite allocation, auth
+metadata and backups are separate operator disk costs. A quota refusal is
+`ACCOUNT_STORAGE_LIMIT` (HTTP 507) with validated account, used-byte and limit
+fields; the phone notice and CLI relay status name that account and limit.
+Unlinking deletes its stored relay copy only through the normal approved flow.
+Maintenance and storage probes collect unreachable pages after upload/read
+expiry; live read pins and the current complete head remain protected.
+
+While a size or quota limit blocks an upload, ordinary commands probe only
+capabilities or account totals. They retain the encrypted pending candidate
+without re-sealing it and report the pause once per local session. A relay
+upgrade resumes a baseline containing all locally accumulated work. Quota
+recovery retries a retained checkpoint before capturing newer state; accepted
+baselines keep subsequent moves in relay order. General malformed-upload
+refusals retain their existing retry policy. Device cache files hold ciphertext,
+private fingerprints and hashed notice receipts under `PULLBOARD_HOME/relay-pages/`;
+no board key or decrypted record is written there.
 
 Every CLI relay request carries `X-Pullboard-Engine` with its executable engine
 version. Board-content requests require engine 3 once the board has issued any

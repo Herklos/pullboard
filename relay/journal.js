@@ -4,8 +4,9 @@ import { closeSync, lstatSync, mkdirSync, openSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { Refused } from '../src/refused.js';
 import { SEALED_SNAPSHOT_BYTES } from '../src/relay-limits.js';
+import { createRelayPages } from './page-store.js';
 
-const FORMAT = 3;
+const FORMAT = 4;
 const DEFAULT_BYTES = 100_000;
 
 /** Validate a persistent identity before it can name an internal file. */
@@ -33,8 +34,9 @@ export function createRelayJournal({ directory, boardId, maxBytes = DEFAULT_BYTE
   if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0) throw new Refused('RELAY_STORAGE', 'the journal must be a private regular database file');
   const db = new DatabaseSync(file);
   let closed = false;
+  let writing = false;
   try {
-    db.exec('PRAGMA busy_timeout = 30000; PRAGMA journal_mode = WAL; PRAGMA secure_delete = ON; BEGIN IMMEDIATE');
+    db.exec('PRAGMA busy_timeout = 30000; PRAGMA journal_mode = WAL; PRAGMA foreign_keys=ON; PRAGMA secure_delete = ON; BEGIN IMMEDIATE');
     db.exec(`CREATE TABLE IF NOT EXISTS journal_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS journal_record (sequence INTEGER PRIMARY KEY, received_at TEXT NOT NULL,
         kind TEXT NOT NULL CHECK(kind IN ('move','request')), payload BLOB NOT NULL,
@@ -43,9 +45,13 @@ export function createRelayJournal({ directory, boardId, maxBytes = DEFAULT_BYTE
           (sender_kind IN ('agent','machine') AND sender_agent IS NOT NULL)))`);
     const saved = db.prepare('SELECT key, value FROM journal_meta ORDER BY key').all();
     if (saved.length === 0) {
+      if (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='page_meta'").get()) {
+        const owner = db.prepare("SELECT value FROM page_meta WHERE key='board'").get();
+        if (owner && owner.value !== id) throw new Refused('RELAY_STORAGE', 'Restore sealed pages with their original journal board identity.');
+      }
       if (db.prepare('SELECT 1 FROM journal_record LIMIT 1').get()) throw new Refused('RELAY_STORAGE', 'restore the journal with its original identity and format metadata');
       db.prepare('INSERT INTO journal_meta (key,value) VALUES (?,?), (?,?)').run('board', id, 'format', String(FORMAT));
-    } else if (saved.length !== 2 || saved[0].key !== 'board' || saved[0].value !== id || saved[1].key !== 'format' || !['2', String(FORMAT)].includes(saved[1].value)) {
+    } else if (saved.length !== 2 || saved[0].key !== 'board' || saved[0].value !== id || saved[1].key !== 'format' || !['2', '3', String(FORMAT)].includes(saved[1].value)) {
       throw new Refused('RELAY_STORAGE', 'open this journal with its original board identity and supported transport format');
     }
     db.exec(`CREATE TABLE IF NOT EXISTS journal_head (slot INTEGER PRIMARY KEY CHECK(slot=1), sequence INTEGER NOT NULL);
@@ -72,6 +78,10 @@ export function createRelayJournal({ directory, boardId, maxBytes = DEFAULT_BYTE
         DROP TABLE journal_snapshot_v2;
         UPDATE journal_meta SET value='3' WHERE key='format';`);
     }
+    for (const [column, type] of [['api_version', 'INTEGER NOT NULL DEFAULT 1'], ['page_bytes', 'INTEGER']]) {
+      if (!db.prepare('PRAGMA table_info(journal_snapshot)').all().some(row => row.name === column)) db.exec(`ALTER TABLE journal_snapshot ADD COLUMN ${column} ${type}`);
+    }
+    db.prepare('UPDATE journal_meta SET value=? WHERE key=?').run(String(FORMAT), 'format');
     // Engine-27 attribution (#579): the relay's policy stamp, the person-set coordinator flag and a
     // seat receipt. Older records keep these empty, so they replay exactly as they did.
     for (const [column, type] of [['sender_policy', 'INTEGER'], ['sender_root', 'INTEGER'], ['sender_lineage', 'TEXT'], ['registration', 'TEXT']]) {
@@ -96,6 +106,25 @@ export function createRelayJournal({ directory, boardId, maxBytes = DEFAULT_BYTE
   /** Keep calls after shutdown from exposing a native SQLite error. */
   function open() { if (closed) throw new Refused('RELAY_CLOSED', 'open the journal before reading or appending records'); }
 
+  /** Share one SQLite transaction between a sealed-object publication and its journal coverage cursor. */
+  function transaction(work) {
+    open();
+    if (writing) return work();
+    db.exec('BEGIN IMMEDIATE'); writing = true;
+    try {
+      const result = work();
+      if (result && typeof result.then === 'function') throw new Refused('RELAY_CONFIG', 'Finish the journal transaction before awaiting.');
+      db.exec('COMMIT'); return result;
+    } catch (error) { db.exec('ROLLBACK'); throw error; }
+    finally { writing = false; }
+  }
+
+  /** Store page objects beside the head so existing consistent backups and unlink cleanup cover both. */
+  function pages(options = {}) {
+    open();
+    return createRelayPages({ directory: root, boardId: id, now: options.now ?? Date.now, database: db, transaction });
+  }
+
   /** Convert an SQLite row to detached opaque bytes so callers cannot mutate a stored record. */
   function record(row) {
     return { sequence: row.sequence, receivedAt: row.received_at, kind: row.kind ?? 'snapshot',
@@ -103,7 +132,8 @@ export function createRelayJournal({ directory, boardId, maxBytes = DEFAULT_BYTE
         ...(row.sender_kind === 'agent' ? { agent: row.sender_agent } : row.sender_kind === 'machine' ? { machine: row.sender_agent } : {}),
         ...(row.sender_policy ? { policy: row.sender_policy } : {}), ...(row.sender_root ? { root: true } : {}),
         ...(row.sender_lineage ? { lineage: row.sender_lineage } : {}) },
-      ...(row.registration ? { registration: JSON.parse(row.registration) } : {}), bytes: Buffer.from(row.payload) };
+      ...(row.registration ? { registration: JSON.parse(row.registration) } : {}),
+      ...(row.api_version === 2 ? { apiVersion: 2, pageBytes: row.page_bytes } : {}), bytes: Buffer.from(row.payload) };
   }
 
   /** Require server-derived attribution, copying only its public identity and never a credential. */
@@ -217,25 +247,34 @@ export function createRelayJournal({ directory, boardId, maxBytes = DEFAULT_BYTE
   }
 
   /** Replace a covered snapshot and compact only its acknowledged prefix, keeping the head. */
-  function saveSnapshot(sequence, bytes, principal, { initialOnly = false } = {}) {
+  function saveSnapshot(sequence, bytes, principal, { initialOnly = false, apiVersion = 1, pageBytes = null } = {}) {
     open();
     if (!Number.isSafeInteger(sequence) || sequence < 0) throw new Refused('BAD_SEQUENCE', 'name the nonnegative sequence this snapshot covers');
+    if (![1, 2].includes(apiVersion) || apiVersion === 2 && (!Number.isSafeInteger(pageBytes) || pageBytes < 1)) throw new Refused('SNAPSHOT_VERSION', 'Publish a supported snapshot transport version and its sealed root length.');
     const sealed = payload(bytes);
     const who = sender(principal, true);
-    db.exec('BEGIN IMMEDIATE');
-    try {
+    return transaction(() => {
       if (sequence > latest()) throw new Refused('SEQUENCE_GAP', 'upload the missing moves before a snapshot that covers them');
       const previous = snapshot();
       if (initialOnly && previous) throw new Refused('BASELINE_EXISTS', 'this board already has a baseline; preserve the local board before choosing which history to keep');
       if (previous && sequence < previous.sequence) throw new Refused('SNAPSHOT_STALE', 'use the latest stored snapshot and seal a snapshot that covers at least its sequence');
       const at = now();
       if (!(at instanceof Date) || !Number.isFinite(at.getTime())) throw new Refused('RELAY_CONFIG', 'the journal clock must return a valid Date');
-      db.prepare('INSERT INTO journal_snapshot (slot,sequence,received_at,payload,sender_kind,sender_user,sender_agent) VALUES (1,?,?,?,?,?,?) ON CONFLICT(slot) DO UPDATE SET sequence=excluded.sequence,received_at=excluded.received_at,payload=excluded.payload,sender_kind=excluded.sender_kind,sender_user=excluded.sender_user,sender_agent=excluded.sender_agent').run(sequence, at.toISOString(), sealed, who.kind, who.userId, who.agent);
+      db.prepare('INSERT INTO journal_snapshot (slot,sequence,received_at,payload,sender_kind,sender_user,sender_agent,api_version,page_bytes) VALUES (1,?,?,?,?,?,?,?,?) ON CONFLICT(slot) DO UPDATE SET sequence=excluded.sequence,received_at=excluded.received_at,payload=excluded.payload,sender_kind=excluded.sender_kind,sender_user=excluded.sender_user,sender_agent=excluded.sender_agent,api_version=excluded.api_version,page_bytes=excluded.page_bytes').run(sequence, at.toISOString(), sealed, who.kind, who.userId, who.agent, apiVersion, apiVersion === 2 ? pageBytes : null);
       db.prepare('DELETE FROM journal_record WHERE sequence <= ?').run(sequence);
       const result = snapshot();
-      db.exec('COMMIT');
       return result;
-    } catch (error) { db.exec('ROLLBACK'); throw error; }
+    });
+  }
+
+  /** Measure the exact retained-byte change of a replacement and its compacted acknowledged prefix. */
+  function snapshotDelta(sequence, bytes) {
+    open();
+    if (!Number.isSafeInteger(sequence) || sequence < 0) throw new Refused('BAD_SEQUENCE', 'Name the snapshot coverage sequence before accounting for storage.');
+    const size = payload(bytes).byteLength;
+    const previous = db.prepare('SELECT COALESCE(SUM(length(payload)),0) AS bytes FROM journal_snapshot').get().bytes;
+    const compacted = db.prepare('SELECT COALESCE(SUM(length(payload)),0) AS bytes FROM journal_record WHERE sequence<=?').get(sequence).bytes;
+    return size - previous - compacted;
   }
 
   /** Replay the committed prefix in order, without parsing or executing its payloads. */
@@ -252,5 +291,5 @@ export function createRelayJournal({ directory, boardId, maxBytes = DEFAULT_BYTE
     closed = true;
   }
 
-  return { board: id, latest, activity, append, appendNext, recordAt, registrationFor, after, snapshot, saveSnapshot, close };
+  return { board: id, latest, activity, append, appendNext, recordAt, registrationFor, after, snapshot, saveSnapshot, snapshotDelta, pages, close };
 }

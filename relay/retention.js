@@ -36,9 +36,9 @@ function privateDirectory(directory) {
 }
 
 /** Keep lifecycle mutations in the host's trusted process; this is never an unauthenticated HTTP API. */
-export function createRelayRetention({ directory, backupsDirectory = directory + '-backups', auth, now = Date.now }) {
+export function createRelayRetention({ directory, backupsDirectory = directory + '-backups', auth, now = Date.now, onDelete = () => {} }) {
   if (typeof directory !== 'string' || !directory.trim() || typeof backupsDirectory !== 'string' ||
-      !backupsDirectory.trim() || typeof now !== 'function' || !auth?.linkedBoards || !auth?.forgetBoard || !auth?.withBoard || !auth?.pendingCleanup || !auth?.finishCleanup || !auth?.withCleanup) {
+      !backupsDirectory.trim() || typeof now !== 'function' || typeof onDelete !== 'function' || !auth?.linkedBoards || !auth?.forgetBoard || !auth?.withBoard || !auth?.pendingCleanup || !auth?.finishCleanup || !auth?.withCleanup) {
     throw new Refused('RELAY_CONFIG', 'configure private relay storage, authentication and a retention clock');
   }
   const root = resolve(directory);
@@ -116,6 +116,8 @@ export function createRelayRetention({ directory, backupsDirectory = directory +
       for (const file of files) {
         try { unlinkSync(file); } catch (error) { if (error.code !== 'ENOENT') throw error; }
       }
+      const result = onDelete(id);
+      if (result && typeof result.then === 'function') throw new Refused('RELAY_CONFIG', 'Finish relay cleanup notices synchronously before completing deletion.');
       auth.finishCleanup(id);
     });
   }
