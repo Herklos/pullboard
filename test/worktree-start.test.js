@@ -287,3 +287,45 @@ test('a submit naming a stand-in host refuses at HOST_NAME, and only warns when 
   assert.throws(() => machineNameProblems(repo, `${second}..HEAD`, { refuse: true, say: () => {}, names: computer }),
     (error) => error.code === 'HOST_NAME' && /names this machine/u.test(error.message), 'a stand-in computer name is refused');
 });
+
+/**
+ * Build a claimed web item whose only commit names this machine in its message, then submit it. The
+ * setting is written to the main checkout first, since submit reads the accepted main's policy [C1].
+ */
+function submitNamingThisMachine(box, noHostName) {
+  const { repo, web } = project('true', box);
+  const configPath = join(repo, 'pullboard.json');
+  const config = JSON.parse(readFileSync(configPath, 'utf8'));
+  config.commits = { ...(config.commits ?? {}), noHostName };
+  writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
+  box.git(repo, 'add', 'pullboard.json');
+  box.git(repo, 'commit', '-q', '-m', `chore: set the host-name guard to ${noHostName}`);
+  box.git(web, 'merge', '-q', '--ff-only', 'main');
+  assert.equal(box.run(repo, 'add', 'web', 'Page', '--specs', 'G1', '--criterion', 'renders a heading').code, 0);
+  assert.equal(box.run(web, 'claim', '1').code, 0);
+  mkdirSync(join(web, 'web'), { recursive: true });
+  writeFileSync(join(web, 'web', 'a.html'), '<h1>Hi</h1>\n');
+  box.git(web, 'add', '-A');
+  // The host name comes from the machine at run time; it is never written into a file or a shout.
+  box.git(web, 'commit', '-q', '-m', 'feat(web): page [G1]', '-m', `built on ${hostname()}`);
+  return box.run(web, 'submit', '1');
+}
+
+test('a submit naming this machine is refused at HOST_NAME when commits.noHostName is on, and the host name stays out of the output [C1]', () => {
+  const box = sandbox();
+  const host = hostname().toLowerCase();
+  const refused = submitNamingThisMachine(box, true);
+  assert.equal(refused.code, 1, 'the submit is refused');
+  assert.match(refused.err, /\[HOST_NAME\]/u);
+  assert.equal(`${refused.out}\n${refused.err}`.toLowerCase().includes(host), false, 'the output does not name the host');
+});
+
+test('the same submit only warns when commits.noHostName is off, and the submit goes on [C1]', () => {
+  const box = sandbox();
+  const host = hostname().toLowerCase();
+  const submitted = submitNamingThisMachine(box, false);
+  assert.equal(submitted.code, 0, submitted.err);
+  assert.match(submitted.out, /warning: commit [0-9a-f]{12} names this machine in its message/u, 'the warning line is printed');
+  assert.match(submitted.out, /submitted #1 at [0-9a-f]{12}/u, 'the submit continues to its record');
+  assert.equal(`${submitted.out}\n${submitted.err}`.toLowerCase().includes(host), false, 'the output does not name the host');
+});
