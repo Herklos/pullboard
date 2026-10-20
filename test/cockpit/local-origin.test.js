@@ -1051,3 +1051,40 @@ test('the page tells its transport when the board drew, and today\'s transport n
     finally { rmSync(profile, { recursive: true, force: true }); }
   }
 });
+
+test('an item whose detail read is dropped once loads on its own [N26]', { timeout: 90_000 }, async () => { // budget: hang ceiling for one view, one Chrome and a retried read.
+  const executable = chromeExecutable();
+  assert.ok(executable, 'the detail retry check needs real Chrome');
+  const box = machine();
+  const board = project(box, 'detail-retry');
+  box.run(board.repo, 'add', 'web', 'An item whose first read is dropped', '--specs', 'G1');
+  const profile = mkdtempSync(join(tmpdir(), 'pullboard-detail-retry-'));
+  let view, chrome, listener;
+  const reads = [];
+  try {
+    view = await startView(box);
+    chrome = await openSnapshotChrome(executable, 'about:blank', profile);
+    // The first read of the item's detail fails at the network, as CI's 'Failed to fetch' did (#908); later ones go through.
+    listener = ({ data }) => {
+      const message = JSON.parse(String(data));
+      if (message.method !== 'Fetch.requestPaused') return;
+      const { requestId, request } = message.params;
+      reads.push(request.url);
+      const send = reads.length === 1 ? chrome.send('Fetch.failRequest', { requestId, errorReason: 'Failed' }) : chrome.send('Fetch.continueRequest', { requestId });
+      send.catch(() => { /* the page may have moved on */ });
+    };
+    chrome.socket.addEventListener('message', listener);
+    await chrome.send('Fetch.enable', { patterns: [{ urlPattern: view.base + '/api/v1/boards/*/items/1*', requestStage: 'Request' }] });
+    await chrome.send('Page.navigate', { url: view.link.href + '#/items/1' });
+    await chrome.waitFor("document.querySelector('#detail')?.textContent.includes('Could not load #1')", 30_000); // budget: hang ceiling for the first, dropped read.
+    await chrome.waitFor("document.querySelectorAll('#detail button[data-shout], #detail button[data-new]').length === 2", 30_000); // budget: hang ceiling for the page's own retry 3 s later.
+    assert.ok(reads.length >= 2, 'the page read the item again after the dropped read');
+    assert.doesNotMatch(await chrome.stable("document.querySelector('#detail').textContent"), /Could not load/u, 'the failure no longer shows');
+  } finally {
+    try { if (chrome) { if (listener) chrome.socket.removeEventListener('message', listener); await closeSnapshotChrome(chrome); } }
+    finally {
+      try { if (view) await view.stop(); }
+      finally { rmSync(profile, { recursive: true, force: true }); }
+    }
+  }
+});

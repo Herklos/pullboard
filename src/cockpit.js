@@ -1576,14 +1576,15 @@ function detailOf(project, item, ask, root = view.root) {
   /** Keep the prior detail visible during a refresh, or return the short initial loading state. */
   const waiting = (entry) => (entry?.shown ? { item: { ...item, ...entry.shown } } : { loading: true });
   if (kept?.loading) return waiting(kept);
-  if (kept && kept.summary === summary && !movedSince(project, item.id, kept.cursor)) {
+  if (kept && kept.summary === summary && !movedSince(project, item.id, kept.cursor) && !(ask && kept.error && Date.now() - kept.failedAt >= 2_500)) {
     return kept.error ? { error: kept.error } : { item: { ...item, ...kept.detail } };
   }
   if (!ask) return waiting(kept && { shown: kept.detail });
   const entry = { loading: true, summary, cursor: project.events?.[0]?.event_id ?? 0, detail: null, error: null, shown: kept?.detail ?? null };
   itemDetails.set(key, entry);
   detailRead = api(boardPath(root) + '/items/' + encodeURIComponent(String(item.id))).then((reply) => { entry.detail = reply.item; },
-    (error) => { entry.error = String(error.message || error); }).finally(() => {
+    // A failed read is not the answer: while this item stays open it reads again in 3 s, so a dropped request recovers (#908).
+    (error) => { entry.error = String(error.message || error); entry.failedAt = Date.now(); setTimeout(() => { if (view.root === drawnRoot && view.item === item.id) render(); }, 3_000); }).finally(() => {
     entry.loading = false;
     if (view.root === drawnRoot && ((root === view.root && view.item === item.id) || view.tab === 'roadmap')) render();
   });
