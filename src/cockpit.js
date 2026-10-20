@@ -31,6 +31,8 @@ import {
   roadmapSummary,
 } from './view/roadmap-summary.js';
 import { roadmapBlock } from './view/roadmap-block.js';
+import { openPageDialog } from './view/page-dialog.js';
+import { closePageDialog } from './view/page-dialog.js';
 import { applyStateDelta } from './api-http.js';
 
 /** The CLI's default phrases, ordered by depth for the existing prose inventory guard. */
@@ -323,7 +325,7 @@ let data = null;
 let seen = '';
 let addressReady = false;
 let heldClickPointer = null;
-let deferredClickRender = false;
+let deferredClickRender = false; const pageDialogs = new Set(); // open page dialogs; the page holds its redraws while one is open
 // Detail replies stay with an unchanged summary, while search results are keyed by board and words.
 const itemDetails = new Map();
 const itemSearches = new Map();
@@ -613,6 +615,7 @@ const chip = (s) => '<span class="chip ' + STATES[s][1] + '">' + STATES[s][0] + 
 const staleChip = (${staleChip.toString()});
 // A roadmap item's blocker dot and unfolded reason from src/view/roadmap-block.js (#605), read from the summaries held.
 const roadmapBlock = (${roadmapBlock.toString()});
+const openPageDialog = (${openPageDialog.toString()}), closePageDialog = (${closePageDialog.toString()});
 /** Parse the bounded reference syntax before requesting additional committed line windows. */
 function codeReferenceParts(ref) {
   const match = /^(.+):(\\d+)(?:-(\\d+))?@([0-9a-f]{7,40})$/.exec(String(ref));
@@ -2326,7 +2329,7 @@ function readMilestone(milestone, p) {
   const numeric = value => Number.isInteger(value) && value >= 0 ? value : null;
   const done = numeric(milestone.summary?.landed) ?? numeric(milestone.landed) ?? verified.length;
   const total = numeric(milestone.summary?.total) ?? numeric(milestone.total) ?? rows.length;
-  // Nothing left (every item landed or withdrawn) is finished and sits under Shipped, shipped or not (the person, 18 Oct).
+  // Nothing left (every item landed or withdrawn) is finished and sits under Shipped, shipped or not.
   const left = numeric(milestone.summary?.left), finished = milestone.items.length > 0 && (left !== null ? left === 0 : rows.every((row) => row.stage === 'merged'));
   const shipped = finished || (milestone.shipped !== undefined ? Boolean(milestone.shipped) : rows.length > 0 && verified.length === rows.length);
   return { milestone, rows, done, total, shipped };
@@ -2478,7 +2481,7 @@ function renderReleaseNotes(project) {
 function render() {
   // A refresh that moved the page to another board closes a confirmation opened on the last one.
   closeIfLeft();
-  if (heldClickPointer !== null) { deferredClickRender = true; return; }
+  if (heldClickPointer !== null || pageDialogs.size) { deferredClickRender = true; return; }
   deferredClickRender = false;
   const statsFocus = document.activeElement?.id === 'proof-stats-summary' ? document.activeElement.id : null;
   const p = data.project;
@@ -3402,15 +3405,12 @@ function leaveDialogs() {
  * cannot act on the page, or switch the board, under a question the page is asking.
  */
 function openModal(dialog, focus) {
-  dialog.hidden = false;
-  for (const element of document.body.children || []) if (element !== dialog && element.tagName !== 'SCRIPT') element.inert = true;
-  focus.focus();
+  openPageDialog(dialog, focus, pageDialogs);
 }
 
 /** Hide a page dialog and give the page back its clicks and focus. */
 function closeModal(dialog) {
-  dialog.hidden = true;
-  for (const element of document.body.children || []) element.inert = false;
+  if (closePageDialog(dialog, pageDialogs) && deferredClickRender) requestAnimationFrame(() => { if (!pageDialogs.size && heldClickPointer === null && deferredClickRender) { deferredClickRender = false; render(); } });
 }
 
 /** Keep Tab and Shift+Tab cycling through an open page dialog's own controls. */

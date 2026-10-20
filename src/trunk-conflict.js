@@ -8,7 +8,10 @@
  * builder claims it with its bar unchanged, merges main and resubmits; the re-review checks the
  * frozen check at the new head and nothing else.
  */
-import { ENGINE_VERSION } from './machine.js';
+import {
+  ENGINE_VERSION,
+  SUBMITTED_CONFLICT_ENGINE,
+} from './machine.js';
 import { Refused } from './refused.js';
 
 /** The engine whose reopen may carry a trunk conflict; older engines refuse it before replay. */
@@ -101,13 +104,17 @@ export function reopenConflict({ item, coordinator, values, trunkMerge }) {
 export function conflictProblem(board, item, conflict, found) {
   const engine = board.executionEngineVersion ?? ENGINE_VERSION;
   if (engine < CONFLICT_ENGINE) return new Refused('ENGINE_VERSION', `a reopen for a main merge requires engine ${CONFLICT_ENGINE}; this board uses engine ${engine}; upgrade Pullboard before using --conflict`);
-  if (item.item_status !== 'verified') return new Refused('NOT_ACCEPTED', `item #${item.item_id} is ${item.item_status}; --conflict reopens accepted work for a main merge, and a submission reopens with --note "why"`);
+  // A submitted head that no longer merges goes back to its builder before anyone reviews it (#807).
+  // Only the automatic return names Git's trunk for a submission; a hand-written --conflict on one stays refused.
+  const returning = item.item_status === 'submitted' && engine >= SUBMITTED_CONFLICT_ENGINE && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(conflict?.trunk ?? '');
+  if (item.item_status !== 'verified' && !returning) return new Refused('NOT_ACCEPTED', `item #${item.item_id} is ${item.item_status}; --conflict reopens accepted work for a main merge, and a submission reopens with --note "why"`);
   const shape = /** @type {any} */ (conflict);
   const files = Array.isArray(shape?.files) ? shape.files : [];
   if (!files.length || files.some((file) => typeof file !== 'string' || !file || file.includes('\0')) || new Set(files).size !== files.length
     || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(shape?.trunk ?? '')) {
     return new Refused('BAD_CONFLICT', 'a trunk conflict names its files and the full trunk commit; run pullboard reopen <id> --conflict <file> from the main checkout');
   }
+  if (returning) return null;
   const accept = board.db.prepare("SELECT event_id FROM event WHERE item_id = ? AND event_kind = 'accept' AND json_extract(event_detail, '$.commit') = ? ORDER BY event_id DESC LIMIT 1").get(item.item_id, item.item_commit);
   if (!accept) return new Refused('NOT_ACCEPTED', `item #${item.item_id} has no accept at ${String(item.item_commit).slice(0, 12)}; --conflict reopens accepted work for a main merge`);
   found(accept.event_id);
@@ -142,14 +149,16 @@ export function conflictNote({ files, trunk }) {
  *
  * @param {any} board
  * @param {number} id
- * @returns {{ files: string[], trunk: string, commit: string, at: string, accept: { by: string, commit: string } | null } | null}
+ * @returns {{ files: string[], trunk: string, commit: string, at: string, accept: { by: string, commit: string } | null, returned: boolean } | null}
+ *   returned: a submission sent back before any review (#807), which sets no accept aside.
  */
 export function mainMergeFor(board, id) {
   const last = board.db.prepare("SELECT event_detail, event_at FROM event WHERE item_id = ? AND event_kind IN ('reopen', 'accept', 'reject') ORDER BY event_id DESC LIMIT 1").get(id);
   const detail = last ? JSON.parse(last.event_detail) : null;
   if (!detail?.conflict) return null;
-  const accept = board.db.prepare('SELECT event_by, event_detail FROM event WHERE event_id = ?').get(detail.supersedes);
-  return { ...detail.conflict, commit: detail.commit, at: last.event_at,
+  const returned = !Number.isSafeInteger(detail.supersedes);
+  const accept = returned ? null : board.db.prepare('SELECT event_by, event_detail FROM event WHERE event_id = ?').get(detail.supersedes);
+  return { ...detail.conflict, commit: detail.commit, at: last.event_at, returned,
     accept: accept ? { by: accept.event_by, commit: JSON.parse(accept.event_detail).commit } : null };
 }
 
@@ -163,8 +172,10 @@ export function mainMergeFor(board, id) {
  * @returns {string[]}
  */
 export function mainMergeLines(item, merge, name = (id) => id) {
-  const accepted = merge.accept ? `accepted by ${name(merge.accept.by)} at ${merge.accept.commit.slice(0, 12)}` : 'accepted';
+  const accepted = merge.returned ? 'returned unreviewed' : merge.accept ? `accepted by ${name(merge.accept.by)} at ${merge.accept.commit.slice(0, 12)}` : 'accepted';
   const head = `${MAIN_MERGE_LABEL}: ${accepted}; conflicts with the trunk at ${merge.trunk.slice(0, 12)} in ${shownPaths(merge.files)}`;
+  // A returned head was never reviewed, so its next review is a whole one.
+  if (item.item_status === 'submitted' && merge.returned) return [head, `review: the whole criterion at ${item.item_commit.slice(0, 12)}; nothing was reviewed before it went back`];
   if (item.item_status === 'submitted') return [head, `re-review: main merge only; run the frozen check at ${item.item_commit.slice(0, 12)}; the accept above stands for the rest`];
   return [head, `next: pullboard claim ${item.item_id} (the bar is unchanged), merge main, resolve ${shownPaths(merge.files)}, commit, pullboard submit ${item.item_id}`];
 }
@@ -192,4 +203,17 @@ export function reopenedLine(id, result) {
   return result.landingFailure
     ? `reopened #${id} after landing failure; previous accept remains recorded at ${result.commit.slice(0, 12)}`
     : `reopened #${id} without a verdict; previous commit ${result.commit.slice(0, 12)} remains recorded`;
+}
+
+/**
+ * What the builder of a returned submission is told (#807): its head no longer merges onto the trunk, the files
+ * that conflict, and the one step back: claim it, merge main and submit again.
+ *
+ * @param {number} id
+ * @param {string} commit - the submitted head
+ * @param {{ files: string[], trunk: string }} conflict
+ * @returns {string}
+ */
+export function returnedHeadNotice(id, commit, conflict) {
+  return `#${id} went back to you unreviewed: ${String(commit).slice(0, 12)} no longer merges onto the trunk at ${conflict.trunk.slice(0, 12)} (${shownPaths(conflict.files)}). Claim it, merge main, resolve ${conflict.files.length === 1 ? 'that file' : 'those files'} and submit again: pullboard claim ${id}`;
 }

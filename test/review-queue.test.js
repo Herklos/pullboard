@@ -4,6 +4,12 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { test } from 'node:test';
 import * as store from '../src/board.js';
+import { mkdirSync } from 'node:fs';
+import { writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { createE2eHelpers } from './e2e-helpers.js';
+import { nextReview } from '../src/next-review.js';
+import { Refused } from '../src/refused.js';
 
 const HOUR = 60 * 60 * 1000;
 const REVIEW_LEASE = 1_000;
@@ -140,4 +146,101 @@ test('[Q1,V15,O2,B13] policy, family and route rules still decide which reviewer
   assert.equal(store.reviewOffer(board, {
     agentId: agents.lightReviewer, lane: 'review', policy: 'any', ratio: 1,
   }), null, 'a light reviewer cannot take a strong item');
+});
+
+/**
+ * A real board where web-1 submits #1, then main changes the same file (#807). A second seat in the api lane
+ * reviews, so the builder never verifies its own work. Returns the box and helpers.
+ */
+function staleHeadFixture(t) {
+  const helpers = createE2eHelpers();
+  t.after(helpers.cleanup);
+  const box = helpers.project('true');
+  /** Demand real command success and its versioned result. */
+  const json = (result) => { assert.equal(result.code, 0, result.out + result.err); return JSON.parse(result.out); };
+  /** Add, claim, build and submit one web item from a web seat's worktree. */
+  const build = (title, path, text, seat = box.web) => {
+    const id = json(box.run(box.repo, 'add', 'web', title, '--criterion', `${path} exists`, '--json')).item.item_id;
+    json(box.run(seat, 'claim', String(id), '--json'));
+    mkdirSync(join(seat, 'web'), { recursive: true });
+    writeFileSync(join(seat, path), text);
+    box.git(seat, 'add', path);
+    box.git(seat, 'commit', '-q', '-m', `feat(web): ${title.toLowerCase()} [G1]`);
+    json(box.run(seat, 'submit', String(id), '--json'));
+    return id;
+  };
+  const conflicted = build('Show the list', 'web/list.html', '<ul>from the branch</ul>\n');
+  // The trunk moves: the same file lands on main with other lines.
+  mkdirSync(join(box.repo, 'web'), { recursive: true });
+  writeFileSync(join(box.repo, 'web/list.html'), '<ol>from main</ol>\n');
+  box.git(box.repo, 'add', 'web/list.html');
+  box.git(box.repo, 'commit', '-q', '-m', 'feat(web): main lands its own list [G1]');
+  const reviewer = join(box.dir, 'api-1');
+  box.git(box.repo, 'worktree', 'add', '-q', reviewer, '-b', 'api/review');
+  json(box.run(reviewer, 'join', 'api', '--json'));
+  return { box, json, build, conflicted, reviewer };
+}
+
+test('a submitted head that no longer merges is returned to its builder [C7,V4]', (t) => {
+  const { box, json, conflicted, reviewer } = staleHeadFixture(t);
+  assert.equal(json(box.run(box.repo, 'show', String(conflicted), '--json')).item_status, 'submitted', 'the head waits for review before the trunk check');
+  const next = box.run(reviewer, 'next', '--verify', '--json');
+  assert.match(next.err, new RegExp(`returned #${conflicted} to its builder unreviewed: it no longer merges onto the trunk \\(web/list\\.html\\)`, 'u'), next.out + next.err);
+  const item = json(box.run(box.repo, 'show', String(conflicted), '--json'));
+  assert.equal(item.item_status, 'open', 'the head that no longer merges goes back, unreviewed');
+  assert.equal(item.item_review_by, null, 'no reviewer holds it');
+  assert.equal(item.item_verdict, null, 'returning it is not a reject');
+  const reopen = item.thread.findLast((entry) => entry.type === 'move' && entry.kind === 'reopen');
+  assert.ok(reopen, 'the return is a recorded reopen');
+  const inbox = box.run(box.web, 'inbox').out;
+  assert.match(inbox, new RegExp(`#${conflicted} went back to you unreviewed: .* no longer merges onto the trunk at [0-9a-f]{12} \\(web/list\\.html\\)\\. Claim it, merge main, resolve that file and submit again: pullboard claim ${conflicted}`, 'u'),
+    'the builder is told the conflicting file and the one step back');
+  json(box.run(box.web, 'claim', String(conflicted), '--json'));
+});
+
+test('next --verify skips a head that does not merge [C7,V4]', (t) => {
+  const { box, json, build, conflicted, reviewer } = staleHeadFixture(t);
+  // A second web seat on a fresh branch from main builds work that merges cleanly.
+  const second = join(box.dir, 'web-2');
+  box.git(box.repo, 'worktree', 'add', '-q', second, '-b', 'web/two', 'main');
+  json(box.run(second, 'join', 'web', '--json'));
+  const clean = build('Show the footer', 'web/footer.html', '<footer>clean</footer>\n', second);
+  const next = json(box.run(reviewer, 'next', '--verify', '--json'));
+  assert.equal(next.item.item_id, clean, 'the reviewer gets the head that merges, though the conflicting one is older');
+  assert.equal(json(box.run(box.repo, 'show', String(conflicted), '--json')).item_status, 'open');
+  assert.equal(json(box.run(box.repo, 'show', String(clean), '--json')).item_review_by !== null, true, 'the clean head is reserved for review');
+});
+
+/** Drive nextReview over a board with one submitted head that conflicts, recording each ordered operation. */
+async function refusedReturn(t, reopen) {
+  const { board, agents } = fixture(t);
+  const id = submitted(board, { builder: agents.alphaBuilder, title: 'Conflicting head' });
+  const operations = [];
+  const ordered = async (operation, args) => {
+    operations.push(operation);
+    if (operation === 'reopen') return await reopen(board, id);
+    return store.reserveNextReview(board, args[0]);
+  };
+  const ctx = { info: { root: '/fixture' }, io: { err: () => {} }, config: { reviewLeaseMs: REVIEW_LEASE, verify: { policy: 'any' } } };
+  const me = { id: agents.betaReviewer, lane: 'review' };
+  const trunkMerge = () => ({ commit: 'a'.repeat(40), files: ['web/list.html'] });
+  const run = () => nextReview(ctx, board, me, {}, { ordered, idArg: Number, trunkMerge });
+  return { board, id, operations, run };
+}
+
+test('a refused return of a conflicting head is never followed by reserving it [C7,V4]', async (t) => {
+  const { board, id, operations, run } = await refusedReturn(t, () => { throw new Refused('RELAY_BUSY', 'the relay is busy'); });
+  await assert.rejects(run, (error) => error.code === 'RELAY_BUSY', 'the refusal reaches the reviewer');
+  assert.deepEqual(operations, ['reopen'], 'nothing is reserved after the return failed');
+  assert.equal(store.itemById(board, id).item_review_by, null, 'the conflicting head is not reserved');
+});
+
+test('a return refused because the head already left review is a race, not a stop [C7,V4]', async (t) => {
+  const { board, id, operations, run } = await refusedReturn(t, (raced, item) => {
+    store.reopen(raced, item, { agentId: 'coordinator', note: 'another seat returned it first' });
+    throw new Refused('NOT_SUBMITTED', `item #${item} is open, not submitted`);
+  });
+  await run();
+  assert.deepEqual(operations, ['reopen', 'reserveNextReview'], 'the loop goes on to the next review');
+  assert.equal(store.itemById(board, id).item_status, 'open');
 });

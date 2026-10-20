@@ -906,7 +906,7 @@ test('the roadmap shows landed, accepted and past target [N26]', { timeout: 90_0
   }
   for(const id of [1,2,4,5,6]) {build(box,alpha,id,`item-${id}.txt`);accept(box,alpha,id);if([1,4,5].includes(id))land(id);}
   box.run(alpha.repo,'withdraw','11','Removed from this release');
-  // A release that finished, every item landed or withdrawn, without milestone ship (the person, 18 Oct).
+  // A release that finished, every item landed or withdrawn, without milestone ship.
   build(box,alpha,12,'item-12.txt');accept(box,alpha,12);land(12);box.run(alpha.repo,'withdraw','13','Not needed after all');
   box.run(alpha.repo,'milestone','add','Finished unshipped','--items','12,13');
   box.run(alpha.repo,'milestone','add','Empty plan','--note','Nothing filed yet.');
@@ -1087,7 +1087,7 @@ test('a blocked roadmap item shows its dot and expands to say why [N26]', { time
       await opened('#5');
       const landed = JSON.parse(await chrome.stable(`JSON.stringify((()=>{const r=${row('#5')},panel=r.parentElement.querySelector('.milestone-why');return {color:getComputedStyle(panel.querySelector('.roadmap-event:last-child .roadmap-step')).backgroundColor,chip:r.querySelector('.roadmap-landed')?.textContent,icon:!!r.querySelector('.roadmap-landed svg')};})())`));
       assert.equal(landed.color, colors.success, `${scheme}: landing history uses the success token`);
-      assert.equal(landed.chip, 'verified'); assert.equal(landed.icon, false, 'a landed row reads verified, with no checkmark (the person, 18 Oct)');
+      assert.equal(landed.chip, 'verified'); assert.equal(landed.icon, false, 'a landed row reads verified, with no checkmark');
       await press(chrome, row('#5'));
     }
     for (const width of [375,1280]) for (const scheme of ['light','dark']) {

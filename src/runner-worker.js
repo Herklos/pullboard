@@ -15,6 +15,7 @@ import {
   openSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   readSync,
   renameSync,
   rmSync,
@@ -65,6 +66,7 @@ let cleanupTimer = null;
 let cleanupStage = 'command exit';
 let cleanupDirectory = null;
 let cleanupDetails = null;
+const setupPrivatePaths = new Set();
 
 /** Start the post-run budget once; later cleanup phases cannot extend it. */
 function beginCleanup() {
@@ -651,8 +653,11 @@ function createDescendantTracker(directory) {
     catch (error) {
       if (error.code === 'ESRCH') return false;
       // macOS answers EPERM for a group whose members exited but are not yet reaped. Throwing here escaped cleanup and
-      // skipped the lease release (#888); retry on a fresh census instead, as for any other ambiguity.
-      if (error.code === 'EPERM') return null;
+      // skipped the lease release (#888, and the load flake in #850); retry on a fresh census instead, and say so.
+      if (error.code === 'EPERM') {
+        process.stderr.write(`runner: signal to process group ${pgid} answered EPERM; its members have exited, so the next census decides\n`);
+        return null;
+      }
       throw error;
     }
     return true;
@@ -834,16 +839,49 @@ async function acquireResourceApi(api, options, machineHomePath) {
   }
 }
 
-/** Invoke one bounded Git command in an owned group and return its exact stdout. */
+/** Bound Git diagnostics and hide runner-private paths, URL credentials and credential assignments. */
+function safeGitDiagnostic(value, root, env) {
+  let text = String(value).replace(/\u001b\[[0-?]*[ -/]*[@-~]/gu, '').replace(/\r\n?/gu, '\n').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/gu, '');
+  for (const [path, label] of [[root, '<source>'], [env.HOME, '<job-home>'], [process.env.HOME, '<runner-home>'], [env.TMPDIR, '<job-tmp>'], ...[...setupPrivatePaths].map(path => [path, '<runner-state>'])]) {
+    if (path && path.length > 1) text = text.split(path).join(label);
+  }
+  text = text.replace(/https?:\/\/[^\s"'<>]+/giu, '<url>')
+    .replace(/\b(authorization|cookie)\s*[:=][ \t]*[^\n]+/giu, '$1=<redacted>')
+    .replace(/\b(authorization|cookie|token|secret|password|api[_-]?key|access[_-]?key)\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s;]+)/giu, '$1=<redacted>')
+    .replace(/\b(?:gh[pousr]_|github_pat_|ps_|pa_|pm_|pg_|sk-)[A-Za-z0-9_-]{8,}/gu, '<redacted>')
+    .replace(/\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})\b/gu, '<private-address>').trim();
+  const bytes = Buffer.from(text);
+  return bytes.length > 2_048 ? `${bytes.subarray(0, 768).toString('utf8')}\n...[truncated]...\n${bytes.subarray(-1_024).toString('utf8')}` : text;
+}
+
+/** Keep the failed Git operation and bounded cause without exposing command arguments or raw errors. */
+function gitSetupFailure(root, args, env, result, stderr, overflow, inputError) {
+  const commands = new Set(['init', 'fetch', 'checkout', 'index-pack', 'cat-file', 'rev-parse', 'rev-list', 'for-each-ref', 'update-ref', 'merge-base', 'verify-pack', 'check-ref-format']);
+  const operation = args.find(arg => commands.has(arg)) ?? 'command';
+  const role = root.endsWith('.git') || args.includes('--bare') ? 'source cache' : 'source checkout';
+  const code = result.error?.code ?? inputError?.code;
+  const status = overflow ? 'stdout limit exceeded' : result.error && /^[A-Z][A-Z0-9_]{0,63}$/u.test(code ?? '') ? code
+    : Number.isInteger(result.code) && result.code !== 0 ? `exit ${result.code}`
+    : result.signal ? `signal ${result.signal}` : /^[A-Z][A-Z0-9_]{0,63}$/u.test(code ?? '') ? code : 'input failed';
+  const error = new Error('source checkout could not be verified');
+  error.runnerSetup = { step: `${role}: git ${operation}`, status, stderr: safeGitDiagnostic(stderr, root, env) };
+  return error;
+}
+
+/** Invoke bounded Git in an owned group, retaining stderr if it fails instead of erasing the cause. */
 async function git(root, args, env, input) {
-  const owned = spawnOwned('git', args, { cwd: root, env, stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'ignore'] });
+  const owned = spawnOwned('git', args, { cwd: root, env, stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'] });
   const output = [];
+  let stderr = Buffer.alloc(0);
+  owned.child.stderr.on('data', chunk => { stderr = Buffer.concat([stderr, chunk]).subarray(-8_192); });
   let bytes = 0;
   let overflow = false;
   let inputError;
+  let inputDone;
   if (input !== undefined) {
     owned.child.stdin.on('error', error => { inputError ??= error; });
-    owned.child.stdin.end(input);
+    if (typeof input.pipe === 'function') inputDone = pipeline(input, owned.child.stdin).catch(error => { inputError ??= error; });
+    else owned.child.stdin.end(input);
   }
   owned.child.stdout.on('data', chunk => {
     bytes += chunk.length;
@@ -852,8 +890,9 @@ async function git(root, args, env, input) {
     } else if (!overflow) output.push(chunk);
   });
   const result = await owned.closed;
+  await inputDone;
   await drainOwned(owned);
-  if (overflow || inputError || result.error || result.code !== 0 || result.signal) throw new Error('source checkout could not be verified');
+  if (overflow || inputError || result.error || result.code !== 0 || result.signal) throw gitSetupFailure(root, args, env, result, stderr.toString('utf8'), overflow, inputError);
   return Buffer.concat(output).toString('utf8').trim();
 }
 
@@ -872,7 +911,10 @@ async function checkoutHistory(api, runnerRoot, root, packFile, spec, env) {
     name: `repo-${spec.repoId}`, capacity: 1, scope: 'machine', root: runnerRoot,
     repo: runnerRoot, agent: `pullboard-ssh-cache-${spec.id}`, kind: 'source-cache',
     onWait: () => assertTransportLive(),
-  }, join(runnerRoot, 'cache', 'resource-pool'));
+  }, join(runnerRoot, 'cache', 'resource-pool')).catch(error => {
+    if (error && typeof error === 'object') error.runnerSetupStep = 'source cache admission';
+    throw error;
+  });
   const deliveryRefs = [];
   try {
     if (!existsSync(cache)) {
@@ -880,24 +922,14 @@ async function checkoutHistory(api, runnerRoot, root, packFile, spec, env) {
       const staged = join(build, 'cache.git');
       try {
         const initialize = async () => {
-          const initialized = spawnOwned('git', ['init', '--bare', `--object-format=${spec.commit.length === 64 ? 'sha256' : 'sha1'}`, staged], {
-            cwd: build, env, stdio: ['ignore', 'ignore', 'ignore'],
-          });
-          const result = await initialized.closed;
-          await drainOwned(initialized);
-          if (result.error || result.code !== 0 || result.signal) throw new Error('source history cache could not be initialized');
+          await git(build, ['init', '--bare', `--object-format=${spec.commit.length === 64 ? 'sha256' : 'sha1'}`, staged], env);
         };
         await initialize();
         if (spec.origin && spec.originBase) {
           let seeded = false;
           try {
-            const fetch = spawnOwned('git', ['-c', 'protocol.version=2', 'fetch', '--no-tags', '--no-recurse-submodules', spec.origin, spec.originBase], {
-              cwd: staged, env, stdio: ['ignore', 'ignore', 'ignore'],
-            });
-            const result = await fetch.closed;
-            await drainOwned(fetch);
-            seeded = !result.error && result.code === 0 && !result.signal
-              && await git(staged, ['cat-file', '-t', spec.originBase], env) === 'commit'
+            await git(staged, ['-c', 'protocol.version=2', 'fetch', '--no-tags', '--no-recurse-submodules', spec.origin, spec.originBase], env);
+            seeded = await git(staged, ['cat-file', '-t', spec.originBase], env) === 'commit'
               && Number(await git(staged, ['rev-list', '--count', spec.originBase], env)) > 0
               && !existsSync(join(staged, 'shallow'));
             if (seeded) await git(staged, ['update-ref', `refs/pullboard/published/${spec.originBase}`, spec.originBase], env);
@@ -953,15 +985,7 @@ async function checkoutHistory(api, runnerRoot, root, packFile, spec, env) {
 
     const priorIndexes = new Set(readdirSync(join(cache, 'objects', 'pack')).filter(name => name.endsWith('.idx')));
     if (statSync(packFile).size < 12 + spec.commit.length / 2) throw new Error('source history pack is incomplete');
-    {
-      const index = spawnOwned('git', ['index-pack', '--stdin'], { cwd: cache, env, stdio: ['pipe', 'ignore', 'ignore'] });
-      try {
-        await pipeline(createReadStream(packFile), index.child.stdin);
-        const result = await index.closed;
-        await drainOwned(index);
-        if (result.error || result.code !== 0 || result.signal) throw new Error('source history pack could not be indexed');
-      } catch (error) { await drainOwned(index, true); throw error; }
-    }
+    await git(cache, ['index-pack', '--stdin'], env, createReadStream(packFile));
     const objectType = await git(cache, ['cat-file', '-t', spec.commit], env);
     if (objectType !== 'commit' || await git(cache, ['rev-parse', `${spec.commit}^{tree}`], env) !== spec.tree) {
       throw new Error('source history does not match the requested commit and tree');
@@ -1201,12 +1225,18 @@ function stopReading() {
   process.stdin.destroy();
 }
 
-/** Turn an internal setup failure into a fixed safe line rather than disclosing paths or runner state. */
-function safeSetupMessage(error) {
+/** Name a setup phase and bounded cause while hiding private paths and credentials. */
+function safeSetupMessage(error, step) {
+  if (error?.runnerSetup) {
+    const detail = error.runnerSetup;
+    return `runner setup refused: ${detail.step} failed (${detail.status})\ngit stderr: ${detail.stderr || '(none)'}`;
+  }
   const message = String(error?.message ?? '');
-  if (message.includes('npm') || message.includes('dependency')) return 'runner setup refused: committed dependencies are unavailable';
-  if (message.includes('capacity') || message.includes('queue')) return 'runner setup refused: remote capacity is unavailable';
-  return 'runner setup refused: source checkout could not be prepared';
+  const category = message.includes('npm') || message.includes('dependency') ? 'committed dependencies are unavailable'
+    : message.includes('capacity') || message.includes('queue') ? 'remote capacity is unavailable' : 'source checkout could not be prepared';
+  const code = /^[A-Z][A-Z0-9_]{0,63}$/u.test(error?.code ?? '') ? ` (${error.code})` : '';
+  const cause = safeGitDiagnostic(message, '', { HOME: process.env.HOME, TMPDIR: process.env.TMPDIR });
+  return `runner setup refused: ${category}; step: ${error?.runnerSetupStep ?? step}${code}\ncause: ${cause || '(unavailable)'}`;
 }
 
 /** Execute one remote job end to end; stdout is reserved for raw command bytes and stderr for one receipt. */
@@ -1220,15 +1250,20 @@ async function main() {
   let lease = null;
   let tracker = null;
   let runDirectory;
+  let setupStep = 'runner directories';
   let final = { code: 1, signal: null, root: '' };
   try {
     const runnerHome = isAbsolute(process.env.HOME || '') ? process.env.HOME : userInfo().homedir;
     const runnerRoot = spec.root ?? join(runnerHome, '.pullboard-runner');
+    setupPrivatePaths.add(runnerRoot);
     mkdirSync(runnerRoot, { recursive: true, mode: 0o700 });
+    setupPrivatePaths.add(realpathSync(runnerRoot));
     chmodSync(runnerRoot, 0o700);
     const configuredMachineHome = process.env.PULLBOARD_MACHINE_HOME;
     if (configuredMachineHome !== undefined && !isAbsolute(configuredMachineHome)) throw new Error('machine home is invalid');
     const machineHomePath = configuredMachineHome ?? join(runnerHome, '.pullboard');
+    setupPrivatePaths.add(machineHomePath);
+    setupStep = 'trusted resource API';
     api = loadResourceApi(spec.runtime);
     const previousMachineHome = process.env.PULLBOARD_MACHINE_HOME;
     let resources;
@@ -1243,6 +1278,7 @@ async function main() {
     // pullboard settings browserSlots writes this row and settings.json under one lock, so the row carries
     // this machine's setting without reading settings.json; a machine that set nothing keeps one browser slot.
     const browserCapacity = resources.find(resource => resource.name === 'browser')?.capacity ?? 1;
+    setupStep = 'job directories';
     const base = join(runnerRoot, 'jobs');
     mkdirSync(base, { recursive: true, mode: 0o700 });
     chmodSync(base, 0o700);
@@ -1255,6 +1291,7 @@ async function main() {
     writeFileSync(join(privateHome, 'npm-userconfig'), '', { mode: 0o600 });
     writeFileSync(join(privateHome, 'npm-globalconfig'), '', { mode: 0o600 });
     const packFile = join(runDirectory, 'source.pack');
+    setupStep = 'runner gate admission';
     lease = await acquireResourceApi(api, {
       name: 'gate', capacity: gateCapacity, scope: 'machine', root: runnerRoot,
       repo: runnerRoot, agent: `pullboard-ssh-${spec.id}`,
@@ -1269,12 +1306,15 @@ async function main() {
     cleanupDetails = tracker.cleanupState;
     activeDescendantTracker = tracker;
     const env = scopedEnvironment(privateHome, temporary, canonicalMachineHome, lease, api, tracker.nodeOptions);
+    setupStep = 'source history checkout';
     await checkoutHistory(api, runnerRoot, root, packFile, spec, env);
+    setupStep = 'committed dependencies';
     await installDependencies(root, runnerRoot, env, tracker);
+    setupStep = 'command start';
     final = { ...(await runCommand(spec, root, { ...env, PULLBOARD_LANDING_RUN: spec.landing === true ? '1' : '0', PULLBOARD_LANDING_WAIVERS: JSON.stringify(spec.landing === true ? spec.waivers ?? [] : []) }, sink, tracker)), root };
   } catch (error) {
     const refused = setupRefusalCode(error);
-    const message = refused ? `${safeSetupMessage(error)} [${refused}]` : safeSetupMessage(error);
+    const message = refused ? `${safeSetupMessage(error, setupStep)} [${refused}]` : safeSetupMessage(error, setupStep);
     if (!transportLost) await sink.write(`${message}\n`);
     final = { code: 1, signal: transportLost ? 'SIGHUP' : null, error: message, root: '', ...(refused ? { refused } : {}) };
   } finally {

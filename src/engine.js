@@ -28,6 +28,7 @@ import {
   VERDICT_REVIEW_ENGINE,
   MILESTONE_RANK_ENGINE,
   ROW_DRAFT_ENGINE,
+  SUBMITTED_CONFLICT_ENGINE,
 } from './machine.js';
 import {
   MILESTONE_SHIP_ENGINE,
@@ -70,7 +71,7 @@ function minimumOperationEngine(operation, args, board) {
   if (['proposeSentinel', 'decideSentinel', 'beginSentinelRun', 'finishSentinelRun'].includes(operation) || typeof args[1]?.cause === 'string' && args[1].cause.startsWith('sentinel:')) return BOARD_SENTINEL_ENGINE;
   if (operation === 'recordHealthFindings') return HEALTH_SENTINEL_ENGINE;
   const options = args[1];
-  if (carriesConflict(operation, args)) return CONFLICT_ENGINE;
+  if (carriesConflict(operation, args)) return board && store.itemById(board, args[0])?.item_status === 'submitted' ? SUBMITTED_CONFLICT_ENGINE : CONFLICT_ENGINE;
   if (operation === 'submit' && options?.submissionProof !== undefined
     || operation === 'recordLandingBatch' && args[0]?.batch?.invariantEvidence !== undefined) return SUBMISSION_PROOF_ENGINE;
   const given = (name) => Boolean(options && typeof options === 'object' && Object.hasOwn(options, name) && options[name] !== undefined && options[name] !== null && options[name] !== false);
