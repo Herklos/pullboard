@@ -1,0 +1,52 @@
+/**
+ * pullboard next --verify (V15, #807): before a review is offered, every submitted head that no longer merges onto
+ * the trunk goes back to its builder with Git's conflicting files, so no reviewer reserves work that cannot land.
+ */
+import * as store from './board.js';
+import { Refused } from './refused.js';
+import { shownPath } from './trunk-conflict.js';
+
+/**
+ * Return each submitted head that conflicts with the trunk to its builder, recorded as a conflict reopen (#807).
+ * Git decides, in memory, exactly as landing does; a board with no recorded trunk keeps today's offers.
+ *
+ * @param {string} root
+ * @param {any} board
+ * @param {{ ordered: (operation: string, args: any[]) => Promise<any>, trunkMerge: (root: string, commit: string) => { commit: string, files: string[] | null } }} deps
+ * @returns {Promise<{ id: number, files: string[] }[]>}
+ */
+export async function returnUnmergeable(root, board, me, { ordered, trunkMerge }) {
+  const returned = [];
+  for (const item of store.listItems(board).filter((entry) => entry.item_status === 'submitted' && entry.item_commit)) {
+    let merge;
+    try { merge = trunkMerge(root, item.item_commit); }
+    catch (error) { if (error instanceof Refused) return returned; throw error; }
+    if (!merge.files?.length) continue;
+    try {
+      await ordered('reopen', [item.item_id, { agentId: me.id, conflict: { files: merge.files, trunk: merge.commit } }]);
+      returned.push({ id: item.item_id, files: merge.files });
+    } catch (error) { if (!(error instanceof Refused)) throw error; }
+  }
+  return returned;
+}
+
+/**
+ * The review half of one next loop: return heads that no longer merge, then reserve the named review or the next one.
+ *
+ * @param {any} ctx
+ * @param {any} board
+ * @param {{ id: string, lane: string }} me
+ * @param {any} values
+ * @param {{ ordered: (operation: string, args: any[]) => Promise<any>, idArg: (value: any, what: string) => number, trunkMerge: Function }} deps
+ */
+export async function nextReview(ctx, board, me, values, { ordered, idArg, trunkMerge }) {
+  for (const { id, files } of await returnUnmergeable(ctx.info.root, board, me, { ordered, trunkMerge })) {
+    // Stderr in every mode, so a --json caller still sees why the queue shrank.
+    const line = `returned #${id} to its builder unreviewed: it no longer merges onto the trunk (${files.map(shownPath).join(', ')})`;
+    if (ctx.io.stderr) ctx.io.stderr.write(line + '\n'); else ctx.io.err?.(line);
+  }
+  const reservation = { agentId: me.id, leaseMs: ctx.config.reviewLeaseMs, policy: ctx.config.verify.policy, familyPolicy: ctx.config.verify.family };
+  if (values.verifyId !== undefined) return { item: await ordered('reserveReview', [idArg(values.verifyId, 'an item id after --verify'), reservation]), reasons: [] };
+  return await ordered('reserveNextReview', [{ agentId: me.id, lane: me.lane, leaseMs: ctx.config.reviewLeaseMs, policy: ctx.config.verify.policy,
+    familyPolicy: ctx.config.verify.family, runnable: values.runnable, routes: values.routes }]);
+}

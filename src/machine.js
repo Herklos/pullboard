@@ -24,7 +24,14 @@ export const ROW_DRAFT_ENGINE = 55;
 export const STRONG_REJECTION_NOTICE_ENGINE = 54;
 
 /** Executable move semantics, carried by every sealed move and retained during replay [H16]. */
+/**
+ * The engine at which a conflict reopen may return a submitted head, not only an accepted one, and any joined
+ * seat may record it (#807; allocated by the coordinator, 19 Oct).
+ */
+export const SUBMITTED_CONFLICT_ENGINE = 60;
+
 export const ENGINE_VERSION = Math.max(
+  SUBMITTED_CONFLICT_ENGINE,
   ROW_DRAFT_ENGINE,
   AUTO_ESCALATE_ENGINE,
   RIGOR_NOTICE_ENGINE,
