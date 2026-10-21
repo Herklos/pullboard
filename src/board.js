@@ -44,6 +44,7 @@ import {
   storeTriggers,
 } from './machine.js';
 import { LOCAL_LANDING_ENGINE } from './land-engine.js';
+import { REVIEW_SKIP_ENGINE } from './review-skip-engine.js';
 import { Refused } from './refused.js';
 import { refuseMaskedExit } from './check-mask.js';
 import {
@@ -2312,7 +2313,9 @@ export function nextFor(board, { agentId, lane, verify = false, policy = 'any', 
   if (verify) {
     const family = board.db.prepare('SELECT agent_family FROM agent WHERE agent_id = ?').get(agentId)?.agent_family ?? null;
     const hasDifferentFamily = (entry) => Boolean(family && entry.item_builder_family && family !== entry.item_builder_family);
-    const unrelated = items.filter((entry) => entry.item_status === 'submitted' && entry.item_built_by !== agentId && !skipIds.includes(entry.item_id));
+    // An older engine ignores skipIds, so a recorded move replays as it was first applied (#973).
+    const skipped = (board.executionEngineVersion ?? ENGINE_VERSION) >= REVIEW_SKIP_ENGINE ? skipIds : [];
+    const unrelated = items.filter((entry) => entry.item_status === 'submitted' && entry.item_built_by !== agentId && !skipped.includes(entry.item_id));
     const standingRefusal = unrelated.map((entry) => standingProblem(board, agentId, entry.item_built_by, entry.item_id)).find(Boolean);
     let reviewable = unrelated.filter((entry) => !standingProblem(board, agentId, entry.item_built_by, entry.item_id));
     if (policy === COORDINATOR && agentId !== COORDINATOR) reviewable = reviewable.filter((entry) => entry.item_lane === COORDINATOR);

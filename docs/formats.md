@@ -113,7 +113,7 @@ The board file is in the repository's Git common directory at `.git/pullboard/bo
 | `row grammar` | `1` | `SPEC_GRAMMAR_VERSION` in `src/spec.js`; optional `<!-- pullboard-grammar N -->` line in either file (absence means the current grammar) | Both files share the version. A declared version must match; an incompatible grammar change requires a coordinated version bump and compatible files. No automatic conversion occurs. |
 | `board schema` | `2` | `SCHEMA_VERSION` in `src/board.js`, persisted as `PRAGMA user_version` | Create missing tables and indexes, add missing columns in place with declared defaults, restore missing or changed triggers, and remove stale machine triggers without replacing rows. |
 | `event log` | `1` | `EVENT_LOG_VERSION` in `src/board.js`, persisted in `board_meta` as `event_log_version` | Older event-log versions upgrade in place; newer versions are refused with `EVENT_LOG_VERSION`. Preserve event rows when the board schema changes. |
-| `move engine` | `65` | `ENGINE_VERSION` in `src/machine.js`, carried as `engine` in every sealed executable move | Bump when a move's meaning changes, independently of the event log and sealed envelope. A newer engine is refused with `ENGINE_VERSION`, naming both versions and asking you to upgrade Pullboard. |
+| `move engine` | `69` | `ENGINE_VERSION` in `src/machine.js`, carried as `engine` in every sealed executable move | Bump when a move's meaning changes, independently of the event log and sealed envelope. A newer engine is refused with `ENGINE_VERSION`, naming both versions and asking you to upgrade Pullboard. |
 <!-- format-versions:end -->
 
 Relay transport capability `apiVersion: 2` is independent of these versions and
@@ -183,6 +183,8 @@ Engine 63 (`RECURRING_JOB_ENGINE`) records recurring jobs. `declareJob` is the c
 Engine 64 (`LOCAL_LANDING_ENGINE`) lets a landing batch reach the state `trunk`: merged onto the local trunk after its quick guards (the static checks and submit invariants), with each item's merged receipt recorded before anything is pushed. Only a board whose `pullboard.json` sets `landing: { "publish": "separate" }` lands this way; `pullboard publish` then runs the whole suite on the exact trunk head and pushes only a green head. A batch recorded at an older engine still needs `pushed` before its receipts.
 
 Engine 65 (`CI_FLAKE_ENGINE`) records flake observations imported from CI with `pullboard flakes import <folder>`. Such an observation has kind `ci`, a `ci` record (provider, run id, the failed attempt and its rerun attempt, job, runner and Node version) and a `load` of null, because a hosted runner reports no host load. A failed attempt whose rerun at the same commit passes the test is a flake; one whose TAP names no test by file stays unclassified. Observations of the other kinds replay as at engine 61.
+
+Engine 69 (`REVIEW_SKIP_ENGINE`) lets `reserveNextReview` carry `skipIds`: the submitted items the reviewer's own agent session built, which `pullboard next --verify` never offers it. A move with a non-empty `skipIds` needs engine 69, so an older reader refuses it instead of reserving a different item; moves without `skipIds`, and every move recorded before engine 69, replay as before.
 
 The CLI declares its engine in every relay request's `X-Pullboard-Engine` header.
 A linked board requires at least engine 48 after issuing any agent token or machine credential, including

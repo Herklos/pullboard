@@ -511,3 +511,23 @@ test('next --verify skips an item whose builder seat shares the reviewer\'s sess
   try { assert.equal(store.getItem(after, own).item_review_by, null, 'the session\'s own item is never reserved'); }
   finally { store.closeBoard(after); }
 });
+
+test('a reserve-next move with skipIds needs engine 69 and older engines replay it as before [N2,B13]', () => {
+  /** Apply one reserve-next move, stamped with `engine`, to a board holding two submissions; report the outcome. */
+  const replay = (engine, withSkip) => {
+    const { board, builder, reviewer } = boardFixture();
+    const own = submitted(board, builder, 'own session item', 'strong', 1);
+    const other = submitted(board, builder, 'other session item', 'strong', 2);
+    const request = { agentId: reviewer, lane: 'review', leaseMs: HOUR, policy: 'any', ...(withSkip ? { skipIds: [own] } : {}) };
+    const move = prepareEngineMove(board, 'reserveNextReview', [request]);
+    const outcome = applyEngineMove(board, engine === undefined ? move : { ...move, engine }, { sequence: 1, at: '2026-10-21T01:00:00Z' });
+    store.closeBoard(board);
+    return { move, outcome, own, other };
+  };
+  const current = replay(undefined, true);
+  assert.ok(current.move.engine >= 69, 'a skipIds move is stamped with at least engine 69');
+  assert.equal(current.outcome.result.item.item_id, current.other, 'engine 69 honours skipIds');
+  assert.throws(() => replay(68, true), { code: 'RELAY_MOVE' }, 'a skipIds move below engine 69 is refused, not replayed differently');
+  const plain = replay(68, false);
+  assert.equal(plain.outcome.result.item.item_id, plain.own, 'a move without skipIds replays at engine 68 as it always did');
+});
