@@ -217,6 +217,8 @@ export const NEXT_STEPS = Object.freeze({
   CHECK_ACCEPT_STALE: 'read the current check with pullboard show <id>, then the person accepts it again: pullboard check accept <id>',
   CHECK_CANNOT_FAIL: 'write a check that exits nonzero on the problem, then add the item again',
   CHECK_CONFIRM: 'read the check command, then run pullboard check <id> --yes',
+  GUARD_CANNOT_FAIL: 'reject: the check does not test the guard; ask for one that fails with the guard reverted: pullboard verify <id> reject --reason TEST_FAILURE --note "<what the check missed>"',
+  GUARD_NOT_FOUND: 'reject: the named guard is not in the submitted commit; fix the guard line in the criterion with the coordinator: pullboard shout coordinator --decision "<id> guard does not match the commit"',
   CHECK_RED: 'reject with what failed: pullboard verify <id> reject --reason TEST_FAILURE --note "<what failed>"',
   CHECK_UNVERIFIED: 'restore the install or check environment, then run pullboard verify <id> again',
   CHILDREN_OPEN: 'finish the child items (pullboard list --all), or ask the coordinator to withdraw them',

@@ -242,7 +242,7 @@ ${pageScriptPart2(pageScope)}function syncBoardMode(root) {
   document.body.classList.toggle('requests', requests);
 }
 
-${pageScriptPart3(pageScope)}async function refresh(fresh = null) {
+${pageScriptPart3(pageScope)}async function refresh(fresh = null, attempt = 1) {
   const generation = ++refreshStarted;
   const root = view.root;
   const mark = root ? view.seen['pb.seen.' + root] ?? keep('pb.seen.' + root) : null;
@@ -258,6 +258,13 @@ ${pageScriptPart3(pageScope)}async function refresh(fresh = null) {
   // Only a read of every board can say the shown project is gone and choose another. A catch-up that could not read
   // the shown board, as while the view restarts, failed; it keeps the board and the page says it is offline.
   if (fresh && !next.project && !next.group) throw new Error('the board did not answer; is pullboard view still running?');
+  // The shown board is listed but its read failed, as one dropped under load: read it again rather than hand the page
+  // to another board; only a board gone from the list does that (#889).
+  const failed = !next.project && !next.group && next.projects.find((p) => p.root === root && !p.ok);
+  if (failed) {
+    if (attempt < 3) { await new Promise((later) => { setTimeout(later, 300 * attempt); }); return refresh(fresh, attempt + 1); }
+    throw new Error(failed.error);
+  }
   refreshDrawn = { generation, full: !fresh };
   if (!next.project && !next.group && next.projects.some((p) => p.ok)) {
     view.root = next.projects.find((p) => p.ok).root;
