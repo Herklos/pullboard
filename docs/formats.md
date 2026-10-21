@@ -176,6 +176,8 @@ Engine 61 (`NATIVE_FLAKE_ENGINE`) adds `recordFlakeObservation` and typed diagno
 
 Engine 62 (`HEALTH_CAP_ENGINE`; engine 61 is #887's) caps what one recorded health run shouts. A run sends at most ten notices one by one, resolved first; when it has more, one more notice to the coordinator says how many it held back, and every finding still records its own health event. An idle seat alone hears that it is idle. A recorded run at an older engine replays with its original notices.
 
+Engine 63 (`RECURRING_JOB_ENGINE`) records recurring jobs. `declareJob` is the coordinator's or the person's: it stores a job's name, its cadence (`10m`, `2h`, `1d`, `hourly` or `daily`) and its owner, and a later declaration replaces the cadence and owner but keeps the run history. `recordJobRun` is any joined seat's and stores the job's name. Both events carry `engine: 63`. `pullboard health` reports a job with no run within one and a half cadences as `JOB_MISSED`, once per episode. An older engine refuses both moves with `ENGINE_VERSION`, and a replay at an older engine ignores their events.
+
 Engine 65 (`CI_FLAKE_ENGINE`) records flake observations imported from CI with `pullboard flakes import <folder>`. Such an observation has kind `ci`, a `ci` record (provider, run id, the failed attempt and its rerun attempt, job, runner and Node version) and a `load` of null, because a hosted runner reports no host load. A failed attempt whose rerun at the same commit passes the test is a flake; one whose TAP names no test by file stays unclassified. Observations of the other kinds replay as at engine 61.
 
 The CLI declares its engine in every relay request's `X-Pullboard-Engine` header.
