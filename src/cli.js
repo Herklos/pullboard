@@ -2762,7 +2762,7 @@ async function submitHere(ctx, id, infra) {
   withBoard(ctx, (board) => submitPreflight(board, id, { agentId: me.id, commit, tree: headTree(root) ?? '' }));
   const trunk = requireTrunkMerge(root, commit);
   withBoard(ctx, (board) => refuseUnverifiedStack(root, board, held, commit, trunk));
-  const infraRecord = infraNotes.infraNote({ root, claimHead, files: filesSince(root, id, claimHead, commit), gates: [ctx.config.gate, acceptedMain.config.gate], infra });
+  const infraRecord = infraNotes.infraNote({ root, claimHead, files: filesSince(root, id, claimHead, commit), gates: [ctx.config.gate, acceptedMain.config.gate], infra, requireInfraNote: acceptedMain.config.submit.requireInfraNote });
   // Doctrine counts only fall: accepted main's rules, at this exact commit (D1). No rule, no change.
   const doctrine = hasSubmitRules(root, acceptedMain.commit, acceptedMain.config.practice)
     ? await withGateSlot(root, () => holdDoctrine(root, { mainCommit: acceptedMain.commit, commit, practice: acceptedMain.config.practice, timeoutMs: acceptedMain.config.check?.timeoutMs }),

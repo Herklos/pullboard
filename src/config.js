@@ -44,6 +44,7 @@ export function defaults() {
     spec: 'SPEC.md',
     practice: DOCTRINE_FILE,
     gate: '',
+    submit: { requireInfraNote: false },
     submitInvariants: [],
     staticChecks: '',
     lease: '2h',
@@ -110,6 +111,10 @@ function merge(base, raw) {
       : raw.check && typeof raw.check === 'object' && !Array.isArray(raw.check)
         ? { ...base.check, ...raw.check }
         : raw.check,
+    submit: raw.submit === undefined ? base.submit
+      : raw.submit && typeof raw.submit === 'object' && !Array.isArray(raw.submit)
+        ? { ...base.submit, ...raw.submit }
+        : raw.submit,
   };
 }
 
@@ -196,6 +201,10 @@ export function configProblems(config) {
   }
   if (typeof config.check !== 'object' || config.check === null || Array.isArray(config.check)) {
     problems.push('"check" is an object with optional "install" and "timeout" fields');
+  }
+  if (!config.submit || typeof config.submit !== 'object' || Array.isArray(config.submit)
+      || Object.keys(config.submit).some(key => key !== 'requireInfraNote') || typeof config.submit.requireInfraNote !== 'boolean') {
+    problems.push('"submit" is an object with a boolean "requireInfraNote" setting');
   }
   // Absent, a check already green on main is only a warning, as on boards made before the setting.
   if (config.checks !== undefined && (typeof config.checks !== 'object' || config.checks === null || Array.isArray(config.checks)
