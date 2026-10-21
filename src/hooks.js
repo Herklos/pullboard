@@ -3,7 +3,11 @@
  * its folders, no secret or env file is committed, and a push sends exactly what the gate checked.
  * Each check returns its problems; an empty list lets git go on.
  */
-import { spawnSync } from 'node:child_process';
+import {
+  execFileSync,
+  spawnSync,
+} from 'node:child_process';
+import { hostname } from 'node:os';
 import {
   chmodSync,
   existsSync,
@@ -142,6 +146,64 @@ export function commitMsgProblems(raw, { rules, spec, doctrine = null }) {
   if (rules.noEmoji && EMOJI_RE.test(all)) problems.push('remove the emoji');
   if (rules.noCoAuthor && /^\s*co-authored-by\s*:/im.test(all)) problems.push('remove the Co-Authored-By trailer');
   return problems;
+}
+
+/**
+ * This machine's computer name as macOS shows it, or null when the platform has no such name or the
+ * lookup fails. The lookup has a short timeout, so a stuck scutil cannot stall a submit (C1).
+ *
+ * @returns {string | null}
+ */
+export function computerName() {
+  if (process.platform !== 'darwin') return null;
+  try {
+    return execFileSync('/usr/sbin/scutil', ['--get', 'ComputerName'], { encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] }).trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * This machine's names as a commit message would show them: the host name, its first label and the
+ * computer name, matched case-insensitively. Names under three characters are ignored, so a short word
+ * cannot refuse an honest message (C1). The sources are a parameter so a test can stand in for them.
+ *
+ * @param {{ host?: string, computer?: string | null }} [sources] - Defaults to this machine.
+ * @returns {string[]} Lower-case names.
+ */
+export function machineNames(sources = { host: hostname(), computer: computerName() }) {
+  const host = String(sources.host ?? '').trim().toLowerCase();
+  const computer = String(sources.computer ?? '').trim().toLowerCase();
+  return [...new Set([host, host.split('.')[0], computer])].filter((name) => name.length >= 3);
+}
+
+/**
+ * Check the commits a submit adds for this machine's names in their messages (C1). With `refuse`, the
+ * first named commit stops the submit and the next step says how to reword it; without, each named
+ * commit is reported through `say` and the submit goes on. The names are never echoed, so the refusal
+ * cannot leak them into a shout or a board thread.
+ *
+ * @param {string} root - The worktree the commits are in.
+ * @param {string} range - The commits a submit adds, as `<trunk>..<head>`.
+ * @param {{ refuse: boolean, say: (line: string) => void, names?: string[] }} options
+ * @returns {void}
+ */
+export function machineNameProblems(root, range, { refuse, say, names = machineNames() }) {
+  if (!names.length) return;
+  // The SHAs come from rev-list and each message is read on its own, so no character in a message can
+  // change where another message starts or ends.
+  const shas = git(root, ['rev-list', range]).split('\n').filter(Boolean);
+  for (const sha of shas) {
+    const message = git(root, ['log', '-1', '--format=%B', sha]);
+    const lower = message.toLowerCase();
+    if (!names.some((name) => lower.includes(name))) continue;
+    const short = sha.slice(0, 12);
+    if (refuse) {
+      throw new Refused('HOST_NAME', `commit ${short} names this machine in its message; a submit may not publish that name`,
+        `reword that commit's message without the machine's name, then run pullboard submit again`);
+    }
+    say(`warning: commit ${short} names this machine in its message; reword it before the branch is merged`);
+  }
 }
 
 /**
