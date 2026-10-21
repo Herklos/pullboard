@@ -213,7 +213,7 @@ test('the activity tab draws the lifecycle from the declaration, as the README d
     // The moves that keep a state are written in its box, not drawn as loops.
     const keeping = MACHINE.states.filter((state) => MACHINE.moves.some((move) => move.to === state.id && move.from.includes(state.id))).map((state) => state.id);
     assert.deepEqual(Object.fromEntries(boxes.filter((entry) => entry.keeps).map((entry) => [entry.state, entry.keeps])), {
-      open: '↻ escalate · refreeze (none yet)',
+      open: '↻ release · escalate · refreeze (none yet)',
       claimed: '↻ claim 1',
       submitted: '↻ reserve (none yet)',
       verified: '↻ accept (none yet)',
