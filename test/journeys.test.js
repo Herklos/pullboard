@@ -773,7 +773,7 @@ async function journeyRelaySite(box, localOrigin) {
  * @param {import('node:test').TestContext} t - The running test.
  * @param {{armed: boolean, ms: number}|null} [slow] - The CI stand-in, armed just before B's last visit.
  */
-async function everyBoardJourney(t, slow = null) {
+async function everyBoardJourney(t, slow = null, { restart = false } = {}) {
   const executable = findChromeExecutable();
   if (!executable) return t.skip('Install Chrome or set PULLBOARD_CHROME to run the two-home hosted journey.');
 
@@ -844,9 +844,11 @@ async function everyBoardJourney(t, slow = null) {
     authTrace = journeyAuthTrace(chromeB);
     stopRoutes = await routeJourneyOrigins(chromeB, site, viewB, slow, cookiePauses);
     const person = await machineA.phoneSession();
+    // Persistent, as the relay's own pb_session is (Max-Age), so the fixture's sign-in matches what a person has (#902).
     assert.equal((await chromeB.send('Network.setCookie', {
-      name: 'pb_session', value: person.token, url: JOURNEY_HOSTED, httpOnly: true, sameSite: 'Lax',
+      name: 'pb_session', value: person.token, url: JOURNEY_HOSTED, httpOnly: true, sameSite: 'Lax', expires: Math.floor(Date.now() / 1000) + 86_400,
     })).success, true, 'the same fixture person signs in on B without exposing session data to the page');
+    stopRoutes.plant('pb_session=' + person.token);
     for (const permissions of [['loopbackNetwork', 'localNetwork', 'localNetworkAccess'], ['localNetworkAccess']]) {
       try { await chromeB.send('Browser.grantPermissions', { origin: JOURNEY_HOSTED, permissions }); break; }
       catch { /* Chrome versions expose different local-network permission names. */ }
@@ -871,6 +873,14 @@ async function everyBoardJourney(t, slow = null) {
     cookiePauses.length = 0;
     // The CI condition: a slow first discovery answer, and from here Chrome's paused requests arrive without cookies (#835).
     if (slow) Object.assign(slow, { armed: true, cookieless: true });
+    // The macOS CI signature (#902): Chrome's network service restarts and its cookie jar starts empty. Killing it here
+    // makes that happen on every run; Chrome starts a new one before the next request.
+    if (restart) {
+      const before = networkServicePids(profileB) ?? [];
+      assert.ok(before.length > 0, 'the profile has a network service to restart');
+      for (const pid of before) process.kill(pid, 'SIGKILL');
+      await waitFor(() => (networkServicePids(profileB) ?? []).some((pid) => !before.includes(pid)), 'Chrome starts a new network service', 15_000); // budget: hang ceiling for Chrome relaunching its network service.
+    }
     await stopRoutes.navigate(JOURNEY_HOSTED + '/');
     const rowPredicate = `(${journeySidebarReady.toString()})([...document.querySelectorAll('#proj-list .proj.repo .pname')].map(node => node.textContent.trim()), ${JSON.stringify(JOURNEY_BOARD_NAMES)})`;
     const rowObservation = await observeJourneyRows(
@@ -902,6 +912,10 @@ async function everyBoardJourney(t, slow = null) {
       assert.ok(cookiePauses.some(({ pathKind, cookie }) => pathKind === '/api/v1/devices/session' && cookie === 'restored'),
         'the CI condition sent the session read without its paused cookie, and the stand-in restored it from the jar');
       assert.deepEqual(cookiePauses.filter(({ cookie }) => cookie === 'none'), [], 'no hosted API request left without pb_session');
+    }
+    if (restart) {
+      assert.ok(cookiePauses.some(({ cookie }) => cookie === 'replanted'), 'the restart emptied the jar and the journey forwarded its planted session');
+      assert.deepEqual(cookiePauses.filter(({ cookie }) => cookie === 'none'), [], 'no hosted API request left without pb_session after the restart');
     }
     const pageAnswers = await journeyTrace.snapshot();
     try {
@@ -1010,15 +1024,18 @@ async function everyBoardJourney(t, slow = null) {
 
 test('pullboard.dev shows every board, linked and local [N40]', {
   timeout: relayWorkBudgetMs() * 5 + 180_000,
-  skip: (!findChromeExecutable() && 'Chrome is not installed')
-    || (process.env.CI && !process.env.PULLBOARD_HOSTED_JOURNEYS && '#902: skipped on CI until the hosted page starts its relay transport on every runner; #902 un-skips it; repeat.yml runs it with PULLBOARD_HOSTED_JOURNEYS=1'),
+  skip: (!findChromeExecutable() && 'Chrome is not installed'),
 }, (t) => everyBoardJourney(t));
 
 test('pullboard.dev shows every board under the CI condition [N40,N26]', {
   timeout: relayWorkBudgetMs() * 5 + 180_000,
-  skip: (!findChromeExecutable() && 'Chrome is not installed')
-    || (process.env.CI && !process.env.PULLBOARD_HOSTED_JOURNEYS && '#902: skipped on CI until the hosted page starts its relay transport on every runner; #902 un-skips it; repeat.yml runs it with PULLBOARD_HOSTED_JOURNEYS=1'),
+  skip: (!findChromeExecutable() && 'Chrome is not installed'),
 }, (t) => everyBoardJourney(t, { armed: false, ms: 3_500 }));
+
+test('pullboard.dev shows every board after Chrome\'s network service restarts [N40,N26]', {
+  timeout: relayWorkBudgetMs() * 5 + 180_000,
+  skip: (!findChromeExecutable() && 'Chrome is not installed'),
+}, (t) => everyBoardJourney(t, null, { restart: true }));
 
 // ---------------------------------------------------------------------------------------------------------------
 // The view's main journeys as Gherkin-style scenarios [N26]. Each step is a Given, When or Then; every When is real
