@@ -213,7 +213,10 @@ import {
   standings,
   unmetRows,
 } from './spec.js';
-import { captureSpecApprovalBaseline, refuseAgentApprovedRows } from './spec-approval.js';
+import {
+  captureSpecApprovalBaseline,
+  refuseAgentApprovedRows,
+} from './spec-approval.js';
 import {
   answerQuestion,
   landBlueprint,
