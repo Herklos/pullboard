@@ -270,16 +270,22 @@ export function judge(cell, seen, ineffective = []) {
  * Open one cell's page, wait for its screen and read it.
  *
  * @param {{ newPage: Function }} context - the identity's browser context
- * @param {object} options - route, phone, bootstrap
+ * @param {object} options - route, phone, bootstrap, and the owned local view's document route when this cell has one
  * @param {boolean} wantsBoard - wait for the board rather than a settled blocker
  */
-export async function visit(context, { route, phone, bootstrap }, wantsBoard) {
+export async function visit(context, { route, phone, bootstrap, localView = null }, wantsBoard) {
   const page = await context.newPage({ route, phone, bootstrap });
   try {
     const started = Date.now();
     await page.navigate(HOSTED + '/');
     if (wantsBoard) {
-      const shown = await page.poll(`(${READ_SCREEN}).board`, BOARD_MS + 2_000);
+      let shown = await page.poll(`(${READ_SCREEN}).board || ${localView ? `((document.querySelector('#local-note')?.dataset.state === 'local-open' || document.querySelector('[data-part="local-command"]')?.hidden === false) && (${READ_SCREEN}).commands.includes('pullboard view'))` : 'false'}`, BOARD_MS + 2_000);
+      if (shown && localView && !(await page.evaluate(READ_SCREEN)).board) {
+        // The person follows the displayed pullboard view step. This fixture already owns that running view and its
+        // printed address: open its authenticated document route, never inject a key or relax the board assertion.
+        await page.navigate(localView);
+        shown = await page.poll(`(${READ_SCREEN}).board`, BOARD_MS + 2_000);
+      }
       const seen = await page.evaluate(READ_SCREEN);
       return { ...seen, ms: shown ? Date.now() - started : null, exceptions: page.exceptions.length };
     }
