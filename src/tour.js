@@ -26,7 +26,11 @@ import {
   AGENT_SESSION_IDS,
   AGENT_SHELL_MARKERS,
 } from './person.js';
-import { registerProjectAndLink } from './projects.js';
+import {
+  forgetProject,
+  listProjects,
+  registerProject,
+} from './projects.js';
 
 /**
  * The caller's agent-session identity and checkout lease. A scripted seat must never inherit them: a seat that did
@@ -212,7 +216,8 @@ export async function tour(io) {
     pb('app-1', ['claim', '1'], { show: /^claimed/ });
     write('app-1', { 'src/greet.mjs': FIXED, 'src/greet.test.mjs': EDGE_TEST });
     run('app-1', 'git', ['commit', '-q', '-am', 'fix(app): a blank name greets the world [G1]']);
-    const second = pb('app-1', ['submit', '1'], { show: /^submitted/ }).match(/at ([0-9a-f]{12})/)[1];
+    // The fix edits a test that existed at the claim, so the submit says why (#814).
+    const second = pb('app-1', ['submit', '1', '--infra', 'pins the blank-name edge the verifier found'], { show: /^submitted/ }).match(/at ([0-9a-f]{12})/)[1];
 
     step(7, 'The verifier breaks the fix on purpose, to prove the new test can fail, then restores it and accepts.');
     run('review-1', 'git', ['switch', '-q', '--detach', second]);
@@ -234,7 +239,10 @@ export async function tour(io) {
     io.err(slowestSteps(timings));
     return 1;
   }
-  await registerProjectAndLink(repo, new Date(), loadConfig(repo), io);
+  // One demo stays in the list: each run replaces the last tour demo, and listProjects drops any whose folder is gone.
+  // The demo is registered locally only, never linked to the relay, even when relay on --all is set (#951).
+  for (const entry of listProjects()) if (entry.project === CONFIG.project && entry.root !== repo) forgetProject(entry.root);
+  registerProject(repo, new Date(), loadConfig(repo));
   io.say('\nNothing shipped until a second agent verified it.');
   io.say(`Look around: cd ${repo} && pullboard log`);
   io.say('see it: pullboard view');

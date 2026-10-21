@@ -40,7 +40,7 @@ function commit(root, env, subject = 'chore: fixture state') {
 function shellWord(value) { return "'" + String(value).replaceAll("'", "'\\''") + "'"; }
 
 /** Create a private real-Git board with a selected native Node test command. */
-function fixture(t, { spec, source, affectedTests = 'node test/runner.js', reporter }) {
+function fixture(t, { spec, source, affectedTests = 'node test/runner.js', reporter, requireInfraNote = false }) {
   const directory = realpathSync(mkdtempSync(join(tmpdir(), 'pullboard-main-red-')));
   roots.push(directory);
   t.after(() => rmSync(directory, { recursive: true, force: true }));
@@ -65,6 +65,7 @@ function fixture(t, { spec, source, affectedTests = 'node test/runner.js', repor
   assert.equal(cli(root, env, 'init').code, 0);
   put(root, 'pullboard.json', JSON.stringify({
     gate: 'node test/runner.js',
+    ...(requireInfraNote ? { submit: { requireInfraNote: true } } : {}),
     ...(affectedTests ? { affectedTests } : {}),
     lanes: { core: { owns: ['test/'], specs: ['G'] } },
   }, null, 2) + '\n');
@@ -265,7 +266,7 @@ test("a red submit's comparisons keep FIFO and release between files [V4,C7]", a
 });
 
 test('an inherited red reads native spec reporter failure locations [V1]', t => {
-  const box = fixture(t, { spec: RED_SPEC, source: FAILING_TEST, reporter: 'spec' });
+  const box = fixture(t, { spec: RED_SPEC, source: FAILING_TEST, reporter: 'spec', requireInfraNote: true });
   delete box.env.NO_COLOR;
   box.env.FORCE_COLOR = '1';
   const [rework, submitItem] = addItems(box, [
@@ -276,8 +277,12 @@ test('an inherited red reads native spec reporter failure locations [V1]', t => 
   assert.equal(submitter.run('claim', String(submitItem)).code, 0);
   put(submitter.root, 'test/inherited.test.js', `${FAILING_TEST}// candidate-only comment\n`);
   commit(submitter.root, box.env, 'test(core): select spec-reported red [G2]');
-  const red = submitter.run('submit', String(submitItem));
+  const unexplained = submitter.run('submit', String(submitItem));
+  assert.match(unexplained.err, /\[INFRA_NOTE_REQUIRED\]/u, 'test edits need an explanation before any inherited-red comparison');
+  const red = submitter.run('submit', String(submitItem), '--infra', 'append a candidate-only test marker to exercise native spec failure reporting');
   inheritedMessage(red, { row: 'G1', item: rework });
+  const refusedItem = JSON.parse(submitter.run('show', String(submitItem), '--json').out);
+  assert.equal(refusedItem.thread.some(entry => entry.kind === 'submit'), false, 'a red gate records no successful submit or infra note');
   assert.equal(readFileSync(box.env.MAIN_RED_RUNS, 'utf8').trim().split('\n').length, 2,
     'the unchanged spec reporter command runs once on the candidate and once on exact main');
 });
@@ -300,7 +305,7 @@ test('a red with unreadable failure files says why main was not checked [V1]', t
   assert.equal(submitter.run('claim', String(submitItem)).code, 0);
   put(submitter.root, 'test/inherited.test.js', `${FAILING_TEST}// candidate-only comment\n`);
   commit(submitter.root, box.env, 'test(core): select unreadable runner red [G2]');
-  const red = submitter.run('submit', String(submitItem));
+  const red = submitter.run('submit', String(submitItem), '--infra', 'append a candidate-only test marker to exercise unreadable runner failure reporting');
   assert.equal(red.code, 1, red.out || red.err);
   assert.match(red.err, /\[GATE_RED\]/u);
   assert.match(red.err, /main not checked: could not read which tests failed/u);
@@ -320,7 +325,7 @@ test('an inherited red names the rework that owns it [V1]', async (t) => {
     assert.equal(submitter.run('claim', String(submitItem)).code, 0);
     put(submitter.root, 'test/inherited.test.js', `${FAILING_TEST}// candidate-only comment\n`);
     commit(submitter.root, box.env, 'test(core): capture inherited red [G1]');
-    inheritedMessage(submitter.run('submit', String(submitItem)), { row: 'G1', item: rework });
+    inheritedMessage(submitter.run('submit', String(submitItem), '--infra', 'append a candidate-only test marker to exercise prioritized inherited rework'), { row: 'G1', item: rework });
     const next = builder(box).run('next', '--json');
     assert.equal(next.code, 0, next.err);
     assert.equal(JSON.parse(next.out).item.item_id, rework);
@@ -353,7 +358,7 @@ test('an inherited red names the rework that owns it [V1]', async (t) => {
     assert.equal(submitter.run('claim', String(submitItem)).code, 0);
     put(submitter.root, 'test/inherited.test.js', `${FAILING_TEST}// candidate-only comment\n`);
     commit(submitter.root, box.env, 'test(core): select inherited red [G1]');
-    let red = submitter.run('submit', String(submitItem));
+    let red = submitter.run('submit', String(submitItem), '--infra', 'append a candidate-only test marker to exercise exact-main comparison caching');
     inheritedMessage(red, { row: 'G1', item: rework });
     const main = runFixtureGit(['rev-parse', 'main'], { cwd: box.root, env: box.env }).trim();
     const common = runFixtureGit(['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd: submitter.root, env: box.env }).trim();
@@ -367,7 +372,7 @@ test('an inherited red names the rework that owns it [V1]', async (t) => {
 
     put(submitter.root, 'test/inherited.test.js', `${FAILING_TEST}// second candidate-only comment\n`);
     commit(submitter.root, box.env, 'test(core): retry inherited red [G1]');
-    red = submitter.run('submit', String(submitItem));
+    red = submitter.run('submit', String(submitItem), '--infra', 'append a second candidate-only test marker to check exact-main cache reuse');
     inheritedMessage(red, { row: 'G1', item: rework });
     const secondCount = readFileSync(box.env.MAIN_RED_RUNS, 'utf8').trim().split('\n').length;
     assert.equal(secondCount, firstCount + 1, 'the second submit reuses the current-main file result');
@@ -411,7 +416,7 @@ test('an inherited red names the rework that owns it [V1]', async (t) => {
     assert.equal(submitter.run('claim', String(submitItem)).code, 0);
     put(submitter.root, 'test/inherited.test.js', `${FAILING_TEST}// candidate-only comment\n`);
     commit(submitter.root, box.env, 'test(core): select ambiguous inherited red [G3]');
-    const red = submitter.run('submit', String(submitItem));
+    const red = submitter.run('submit', String(submitItem), '--infra', 'append a candidate-only test marker to check ambiguous inherited row ownership');
     inheritedMessage(red);
     assert.doesNotMatch(red.err, new RegExp(`#${first}|#${second}`, 'u'));
     assert.equal(cli(box.root, box.env, 'milestone', 'add', 'Early', '--items', String(earlier)).code, 0);
@@ -441,7 +446,7 @@ test('an inherited red names the rework that owns it [V1]', async (t) => {
     assert.equal(submitter.run('claim', String(submitItem)).code, 0);
     put(submitter.root, 'test/inherited.test.js', `${FAILING_TEST}// candidate-only comment\n`);
     commit(submitter.root, box.env, 'test(core): select multiply-owned inherited red [G2]');
-    const red = submitter.run('submit', String(submitItem));
+    const red = submitter.run('submit', String(submitItem), '--infra', 'append a candidate-only test marker to check multiple inherited rework owners');
     inheritedMessage(red);
     assert.doesNotMatch(red.err, new RegExp(`#${first}|#${second}`, 'u'));
     const next = builder(box).run('next', '--json');
@@ -460,7 +465,7 @@ test('an inherited red names the rework that owns it [V1]', async (t) => {
     assert.equal(submitter.run('claim', String(submitItem)).code, 0);
     put(submitter.root, 'test/inherited.test.js', "import assert from 'node:assert/strict';\nassert.equal(1, 2);\n");
     commit(submitter.root, box.env, 'test(core): introduce candidate-only red [G2]');
-    const red = submitter.run('submit', String(submitItem));
+    const red = submitter.run('submit', String(submitItem), '--infra', 'introduce a candidate-only failing assertion to distinguish it from inherited failure');
     assert.equal(red.code, 1, red.out || red.err);
     assert.match(red.err, /\[GATE_RED\]/u);
     assert.doesNotMatch(red.err, /also red on main|inherited main red|main not checked/u);
@@ -476,7 +481,7 @@ test('an inherited red names the rework that owns it [V1]', async (t) => {
     assert.equal(submitter.run('claim', String(submitItem)).code, 0);
     put(submitter.root, 'test/inherited.test.js', `${FAILING_TEST}// candidate-only comment\n`);
     commit(submitter.root, box.env, 'test(core): select red without focused runner [G2]');
-    const red = submitter.run('submit', String(submitItem));
+    const red = submitter.run('submit', String(submitItem), '--infra', 'append a candidate-only test marker to exercise missing focused-runner guidance');
     assert.equal(red.code, 1, red.out || red.err);
     assert.match(red.err, /\[GATE_RED\]/u);
     assert.match(red.err, /main not checked: no focused test runner configured \(affectedTests\)/u);
