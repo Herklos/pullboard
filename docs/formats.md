@@ -184,6 +184,8 @@ Engine 64 (`LOCAL_LANDING_ENGINE`) lets a landing batch reach the state `trunk`:
 
 Engine 65 (`CI_FLAKE_ENGINE`) records flake observations imported from CI with `pullboard flakes import <folder>`. Such an observation has kind `ci`, a `ci` record (provider, run id, the failed attempt and its rerun attempt, job, runner and Node version) and a `load` of null, because a hosted runner reports no host load. A failed attempt whose rerun at the same commit passes the test is a flake; one whose TAP names no test by file stays unclassified. Observations of the other kinds replay as at engine 61.
 
+Engine 66 (`REOPEN_FIRST_REFUSAL_ENGINE`) holds a reopened item for its builder. With `claim.reopenFirstRefusalMinutes` above zero, a reject, a landing failure or a trunk conflict records when the item came back, and for that many minutes only its builder may claim it; another seat's claim is refused with `REOPEN_HELD_FOR_BUILDER`. Older engines replay those moves without the window.
+
 Engine 69 (`REVIEW_SKIP_ENGINE`) lets `reserveNextReview` carry `skipIds`: the submitted items the reviewer's own agent session built, which `pullboard next --verify` never offers it. A move with a non-empty `skipIds` needs engine 69, so an older reader refuses it instead of reserving a different item; moves without `skipIds`, and every move recorded before engine 69, replay as before.
 
 The CLI declares its engine in every relay request's `X-Pullboard-Engine` header.
