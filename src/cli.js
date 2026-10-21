@@ -43,6 +43,7 @@ import * as gateReceipt from './gate-receipt.js';
 import * as itemSessions from './item-sessions.js';
 import * as seatCheckout from './seat-checkout.js';
 import { submitPreflight } from './submit-preflight.js';
+import { publishTrunk } from './publish.js';
 import * as store from './board.js';
 import * as nativeFlakes from './native-flake-cli.js';
 import {
@@ -3206,11 +3207,11 @@ async function nextOnce(ctx, values) {
     if (values.verify) return nextReview(ctx, board, me, values, { ordered: (operation, args) => ordered(ctx, board, operation, args), idArg, trunkMerge });
     const warm = warmFiles(ctx, board, me);
     const seats = nextSessionSeats(ctx, board);
-    const owners = new Set(seats?.map((seat) => seat.agent_id));
-    const heldItems = seats ? store.listItems(board).filter((item) => item.item_status === 'claimed'
-      && item.item_parent_id === null && owners.has(item.item_owner)
-      && store.ROUTES.indexOf(item.item_route) <= store.ROUTES.indexOf(me.route)) : [];
-    const heldItem = heldItems.find((item) => item.item_owner === me.id) ?? heldItems[0];
+    // A claim belongs to the seat that made it: seats of one session share its environment, so a sibling's claim is
+    // never this seat's to resume or be pointed at (#958).
+    const heldItem = seats ? store.listItems(board).find((item) => item.item_status === 'claimed'
+      && item.item_parent_id === null && item.item_owner === me.id
+      && store.ROUTES.indexOf(item.item_route) <= store.ROUTES.indexOf(me.route)) : undefined;
     const { item, reasons, shared } = heldItem ? { item: heldItem, reasons: [], shared: [] }
       : store.nextFor(board, { agentId: me.id, lane: me.lane, runnable: values.runnable, routes: values.routes, warm,
         ...(seats ? { lanes: laneNames(ctx.config).filter((lane) => lane !== COORDINATOR) } : {}),
@@ -3703,6 +3704,13 @@ function workCommands(io, args) {
       for (const blocked of result.blocked ?? []) if (blocked.code === 'STALE_VERDICT') io.say(staleVerdictRefusal({ item_id: blocked.id }, blocked).message);
       if (!result.batch) io.say(result.items ? `would land: ${result.items.map((id) => `#${id}`).join(', ') || 'none'}` : 'no verified items ready to land');
       return 0;
+    }),
+    publish: () => act(async (ctx, board, me) => {
+      if (me.id !== COORDINATOR || !ctx.info.isMain) throw new Refused('COORDINATOR_ONLY', 'only the coordinator publishes the trunk; ask your coordinator to run pullboard publish');
+      if (first || second || rest.length) throw new Refused('USAGE', 'pullboard publish');
+      const result = await publishTrunk({ root: ctx.info.root, board, config: mainPolicy(ctx.info.root).config, say: io.say, onWait: gateWaitReporter(io) });
+      io.result?.(result);
+      return result.published || result.waiting ? 0 : 1;
     }),
     merged: () => act(async (ctx, board, me) => {
       const recovered = await relayCommandReceipt(ctx.info.root, io.relayCommand);
