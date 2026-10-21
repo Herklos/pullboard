@@ -133,6 +133,8 @@ export const NEXT_STEPS = Object.freeze({
   BAD_SEQUENCE: 'refresh the relay head and retry the saved operation at its declared coverage sequence; keep the durable pending record',
   FLAKE_EVIDENCE: 'retain the original gate log, timing profile and pinned source; ask the coordinator to repair the failure-evidence recorder before recording again',
   FLAKE_OBSERVATION_CHANGED: 'keep the original observation unchanged; record a new gate failure with a new observation identity instead of replacing historical evidence',
+  CI_RESULT: 'save each CI attempt as a ci-result.json manifest beside its TAP file (provider, run, attempt, job, runner, node, commit, root, conclusion, at, tap), then run pullboard flakes import <folder> again',
+  CI_COMMIT_UNKNOWN: 'fetch the CI commit into this checkout with git fetch origin <commit>, then run pullboard flakes import <folder> again',
   HEALTH_FINDINGS: 'run pullboard health to read the current findings, then run pullboard resume to capture a fresh observation',
   HEALTH_SCAN_STALE: 'run pullboard resume again to scan the current board before posting sentinel notices',
   A5_GRAMMAR_VERSION: 'upgrade Pullboard: npm install -g pullboard@latest',
