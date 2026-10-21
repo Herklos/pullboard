@@ -134,8 +134,13 @@ function childResult(root, env, argv, observedSnapshotUploads, initialSnapshotUp
 
 export { childResult as relayFixtureChild };
 
-/** Start an isolated board and authorized loopback relay; a null coordinatorModel keeps its initial identity unknown. */
-export async function relayClientFixture(t, { cliChildren, coordinatorModel, accountStorageBytes } = {}) {
+/**
+ * Start an isolated board and authorized loopback relay; a null coordinatorModel keeps its initial identity unknown.
+ * The relay polls each live stream at its production 200 ms. Each poll opens the board journals, and at the 10 ms this
+ * fixture once used, a loaded machine kept the test process busy enough that browser replies queued past their
+ * deadlines (#955, #979). A case that needs a faster poll passes pollMs by name and says why.
+ */
+export async function relayClientFixture(t, { cliChildren, coordinatorModel, accountStorageBytes, pollMs = 200 } = {}) {
   const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'pullboard-relay-cleanup-')));
   const root = join(scratch, 'repo');
   const home = join(scratch, 'home');
@@ -481,7 +486,7 @@ globalThis.fetch = function tracedFetch(input, init) {
   const origin = 'http://127.0.0.1:' + relayPort;
   auth = createRelayAuth({ database: authDatabase, github: createGitHubClient({ ...provider.config, callbackURL: origin + '/auth/github/callback' }) });
   signIn = createAuthHandler({ auth, publicOrigin: origin });
-  api = createRelayHandler({ directory: join(scratch, 'relay'), auth, publicOrigin: origin, pollMs: 10, maintenanceMs: 0, accountStorageBytes, now: () => Date.now() + timeOffsetMs });
+  api = createRelayHandler({ directory: join(scratch, 'relay'), auth, publicOrigin: origin, pollMs, maintenanceMs: 0, accountStorageBytes, now: () => Date.now() + timeOffsetMs });
   /** Sign a separate phone in over actual OAuth HTTP; its person session stays only in fixture RAM. */
   async function phoneSession() {
     if (phone) return phone;
@@ -766,7 +771,7 @@ globalThis.fetch = function tracedFetch(input, init) {
     setStorageQuota(bytes) {
       assert.ok(Number.isSafeInteger(bytes) && bytes > 0);
       api.close();
-      api = createRelayHandler({ directory: join(scratch, 'relay'), auth, publicOrigin: origin, pollMs: 10,
+      api = createRelayHandler({ directory: join(scratch, 'relay'), auth, publicOrigin: origin, pollMs,
         maintenanceMs: 0, accountStorageBytes: bytes, now: () => Date.now() + timeOffsetMs });
     },
     /** Return a chosen HTTP refusal for snapshot writes, without inspecting the sealed body. */
