@@ -975,6 +975,7 @@ async function everyBoardJourney(t, slow = null, { restart = false } = {}) {
     const updateAt = await chromeB.stable('window.__journeyUpdateAt');
     const moveStart = await chromeA.stable('window.__journeyMoveStarted');
     const elapsedMs = updateAt - moveStart;
+    t.diagnostic(`B rendered A's move ${Math.round(elapsedMs)} ms after A's trusted pointerdown`);
     assert.ok(/* budget: declared frozen #676 requires delivery within 2,000 ms from trusted pointerdown; this assertion preserves that bar. */ Number.isFinite(elapsedMs) && elapsedMs >= 0 && elapsedMs <= 2_000,
       `B renders A's move within 2,000 ms of A's trusted pointerdown (${Math.round(elapsedMs)} ms)`);
     assert.ok(machineA.calls.some((call) => call.method === 'GET' && call.path.startsWith('/api/v1/boards/' + boardAId + '/events')),
