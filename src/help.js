@@ -199,6 +199,10 @@ Receipts
   pullboard rigor                       failure causes that repeated: on 2 items, or 1 item at 2 commits;
                                         each with its items and whether it reads as work, product or both
   pullboard rigor --draft-splits        coordinator on main: draft review-gated split proposals for files colliding on 2 items in 14 days; only the person approves
+  pullboard rigor quality [--base <commit>] [--head <commit>] [--rule <key>] [--budget <lines>]
+                                        the person's quality rules broken by this change since main, as path:line: rule: what broke
+                                        rules: fix-test, fails-closed, silent-catch, guard-mutation, size-budget, root-cause-control
+  pullboard rigor --draft-quality       coordinator on main: draft each quality rule as a Doctrine row with its check; only the person approves
   pullboard rigor draft <key> "<rule>" --check "<command>" --red <commit> --green <commit> [--section <letter>]
                                         --red is a noticed failure commit; prove its check red, then green at --green
                                         draft Doctrine (work), spec (product) or both; only the person approves
@@ -276,7 +280,7 @@ const HELP_EXAMPLES = {
   status: 'pullboard status', view: 'pullboard view', digest: 'pullboard digest --out briefing.md', mcp: 'pullboard mcp', stats: 'pullboard stats --since 2026-10-08', log: 'pullboard log 12', ledger: 'pullboard ledger',
   relay: 'pullboard relay on --all', 'relay recover': 'pullboard relay recover --skip 12',
   'lane add': 'pullboard lane add web --owns apps/web/', lane: 'pullboard lane add web --owns apps/web/',
-  queue: 'pullboard queue', roadmap: 'pullboard roadmap', rigor: 'pullboard rigor', 'rigor draft': 'pullboard rigor draft "refusal:MERGE_LOST" "Merges keep every hunk" --check "node bin/checks/merges.js" --red 0123456 --green 89abcde', milestone: 'pullboard milestone add "0.7.0" --items 12,13',
+  queue: 'pullboard queue', roadmap: 'pullboard roadmap', rigor: 'pullboard rigor', 'rigor quality': 'pullboard rigor quality --rule silent-catch', 'rigor draft': 'pullboard rigor draft "refusal:MERGE_LOST" "Merges keep every hunk" --check "node bin/checks/merges.js" --red 0123456 --green 89abcde', milestone: 'pullboard milestone add "0.7.0" --items 12,13',
   'milestone order': 'pullboard milestone order "0.7.0" 13,12',
   runner: 'pullboard runner add studio --slots 2 --browser 1', 'runner add': 'pullboard runner add studio --slots 2 --browser 1',
   edit: 'pullboard edit 12 --brief "Add the upload page"', release: 'pullboard release 12',
