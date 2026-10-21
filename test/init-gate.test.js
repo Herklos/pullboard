@@ -5,9 +5,14 @@ import { delimiter, join } from 'node:path';
 import { after, test } from 'node:test';
 import { createE2eHelpers } from './e2e-helpers.js';
 import { runFixtureChild } from './fixture-child.js';
+import { assertShortInit } from './init-short-fixture.js';
 
 const e2e = createE2eHelpers();
 after(e2e.cleanup);
+
+test('init prints a short summary and one next step and never suggests killing a process [I1,I2,H5,N26]', async (t) => {
+  await assertShortInit(t, e2e.sandbox);
+});
 
 /** Create a fresh git repository whose detected gate is pytest. */
 function pythonRepo(box, name) {
