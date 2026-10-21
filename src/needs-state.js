@@ -24,7 +24,8 @@ import {
 /** Borrow an existing connection or open a read-only one; retain exact row-decision matching. */
 export function personNeedsState(root, { board: providedBoard = null, includeRigorUndrafted = false } = {}) {
   const info = repoInfo(root);
-  const board = providedBoard ?? { db: store.openBoardReadOnly(join(info.commonDir, 'pullboard', 'board.sqlite')) };
+  // A held item is judged against the board's clock (#974), so the read-only board carries the CLI's clock.
+  const board = providedBoard ?? { db: store.openBoardReadOnly(join(info.commonDir, 'pullboard', 'board.sqlite')), clock: store.systemClock };
   try {
     const decisions = store.rowDecisions(board);
     const state = projectFit(pendingFit(info.commonDir), projectRowDecisions(decisions, projectState(root, { board })));
