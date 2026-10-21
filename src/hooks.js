@@ -190,9 +190,11 @@ export function machineNames(sources = { host: hostname(), computer: computerNam
  */
 export function machineNameProblems(root, range, { refuse, say, names = machineNames() }) {
   if (!names.length) return;
-  const records = git(root, ['log', '--format=%H%x1f%B%x1e', range]).split('\x1e').filter(Boolean);
-  for (const record of records) {
-    const [sha, message = ''] = record.trim().split('\x1f');
+  // The SHAs come from rev-list and each message is read on its own, so no character in a message can
+  // change where another message starts or ends.
+  const shas = git(root, ['rev-list', range]).split('\n').filter(Boolean);
+  for (const sha of shas) {
+    const message = git(root, ['log', '-1', '--format=%B', sha]);
     const lower = message.toLowerCase();
     if (!names.some((name) => lower.includes(name))) continue;
     const short = sha.slice(0, 12);

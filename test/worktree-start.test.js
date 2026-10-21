@@ -288,6 +288,17 @@ test('a submit naming a stand-in host refuses at HOST_NAME, and only warns when 
     (error) => error.code === 'HOST_NAME' && /names this machine/u.test(error.message), 'a stand-in computer name is refused');
 });
 
+test('a stand-in host after a field separator in a commit body is still refused [C1]', () => {
+  const box = sandbox();
+  const { repo } = project('true', box);
+  const base = box.git(repo, 'rev-parse', 'HEAD');
+  const message = join(box.dir, 'separator-message.txt');
+  writeFileSync(message, 'chore: note a separator\n\nbefore \u001f and \u001e then fixture-host-892 after\n');
+  box.git(repo, 'commit', '-q', '--allow-empty', '-F', message);
+  assert.throws(() => machineNameProblems(repo, `${base}..HEAD`, { refuse: true, say: () => {}, names: ['fixture-host-892'] }),
+    (error) => error.code === 'HOST_NAME', 'a name after U+001F and U+001E in the body is found');
+});
+
 /**
  * Build a claimed web item whose only commit names this machine in its message, then submit it. The
  * setting is written to the main checkout first, since submit reads the accepted main's policy [C1].

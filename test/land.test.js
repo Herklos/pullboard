@@ -495,6 +495,19 @@ test('land pushes one exact batch in verdict order and records each first-contai
   assert.equal(JSON.parse(lane.out).error?.code, 'COORDINATOR_ONLY');
 });
 
+test('a train merge body is only the item trailer even when the local Git config logs merges [B3,R3]', () => {
+  const box = landProject();
+  verifiedFour(box, { order: [0, 1, 2, 3] });
+  const base = box.git(box.repo, 'rev-parse', 'main');
+  box.git(box.repo, 'config', 'merge.log', 'true');
+  const result = json(box, box.repo, 'land', '--max', '4');
+  assert.equal(result.landed.length, 4);
+  const merges = box.git(box.repo, 'rev-list', '--reverse', '--first-parent', `${base}..${result.batch.tip}`).split('\n');
+  for (const [index, id] of result.landed.entries()) {
+    assert.equal(box.git(box.repo, 'log', '-1', '--format=%b', merges[index]).trim(), `Pullboard-Item: #${id}`, 'merge.log=true appends no shortlog to the body');
+  }
+});
+
 test('land bisects a real red, blocks stale proof and refuses an unverified stack [B3,R3,E8]', () => {
   const box = landProject();
   box.env.LAND_SUPPRESS_RED = '1';
