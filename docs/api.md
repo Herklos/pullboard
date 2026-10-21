@@ -374,6 +374,7 @@ The server checks any Origin against its own address and grants no CORS permissi
 
 | Method and path | Result |
 | --- | --- |
+| `GET /api/v1/settings?board=id` | Local-only read-only inventory: machine settings plus all authorized boards, or the selected board. Each row has `key`, `scope`, `value`, `default`, `source`, and `origin`; repo/board rows also identify `board` and `root`. Credential rows carry `secret: true` and only `set` or `not set`. Runtime events, queues and cached relay payloads are excluded. |
 | `GET /api/v1/boards` | Registered boards with their project details and ids |
 | `GET /api/v1/boards/:board/state?seen=N` | The board state, listing item summaries, including open coordinator requests and the unseen shout count since N |
 | `GET /api/v1/boards/:board/state?detail=full` | The same state with every item in full, which static view exports read |

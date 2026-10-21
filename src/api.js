@@ -69,6 +69,7 @@ import {
 } from './serve.js';
 import { relayPresentationShout } from './relay-presentation.js';
 import { createApiHandler } from './api-http.js';
+import { settingsInventory } from './settings-inventory.js';
 import { moveArgs } from './api-moves.js';
 import { personRequestStatuses } from './relay-requests.js';
 export { moveArgs } from './api-moves.js';
@@ -1025,6 +1026,7 @@ export function createLocalApiHandler({ secret, getPort, runCommand, projects = 
       if (req.headers.origin && req.headers.origin !== 'http://' + req.headers.host && !permittedOrigins.has(req.headers.origin)) throw new Refused('API_ORIGIN', 'use the API from its own origin');
       return { local: true };
     },
+    settings: (selected) => settingsInventory(apiProjects(), selected),
     boards: () => withGitReadFacts(() => apiBoardListing(apiProjects, codeIsMain)),
     board: (id) => withGitReadFacts(() => findBoard(id, apiProjects, codeIsMain)),
     state: (board, who, seen, options) => withGitReadFacts(() => localState(board, seen, options).state),
