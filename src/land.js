@@ -35,6 +35,10 @@ import {
   runStaticChecks,
   withGateSlot,
 } from './gate.js';
+import {
+  readGateReceipt,
+  receiptStore,
+} from './gate-run-receipt.js';
 import { laneOf } from './lanes.js';
 import { Refused } from './refused.js';
 import { landingFileTimes } from './submit-invariants.js';
@@ -250,6 +254,14 @@ function coveredFailures(state, gate) {
   return gate.failures.length > 0 && gate.failures.every((failure) => failure.file && store.landingWaiverFor(state.board, failure));
 }
 
+/** Record the receipt the landing gate wrote for its run, in the lane that owns its first failing test [C7,D1]. */
+async function recordLandingRun(state, receiptId) {
+  const receipt = readGateReceipt(receiptStore(state.batch.root), receiptId);
+  if (!receipt) return;
+  const owner = receipt.failures.map(failure => laneOf(state.config, failure.file)).find(lane => lane !== 'coordinator');
+  await state.write('recordGateRun', [{ agentId: 'coordinator', receipt, lane: owner ?? store.getItem(state.board, state.batch.items[0].id).item_lane }]);
+}
+
 /** Run one full landing gate and retain its complete output under this batch's immutable phase path. */
 async function gateGroup(state, label) {
   const tree = headTree(state.batch.root);
@@ -267,7 +279,7 @@ async function gateGroup(state, label) {
         const owner = observation.file ? laneOf(state.config, observation.file) : 'coordinator';
         const lane = owner === 'coordinator' ? store.getItem(state.board, state.batch.items[0].id).item_lane : owner;
         return state.write('recordFlakeObservation', [{ agentId: 'coordinator', observation, lane }]);
-      } }), { main: pin.main }),
+      } }), { main: pin.main, recordRun: receiptId => recordLandingRun(state, receiptId) }),
   });
   copyFileSync(gate.log, logPath);
   if (gate.profilePath) copyFileSync(gate.profilePath, `${logPath}.profile.json`);
@@ -439,6 +451,7 @@ export function liveWaiverProjection(board) {
 /** Name one waived failure with the person's waiver, its reason and its expiry [B3]. */
 export function waiverLine(failure) {
   const { waiver } = failure;
+  if (waiver.quarantine) return `quarantined: ${failure.name} (${failure.file}) is a proven flake, reported but not blocking until repair #${waiver.quarantine.item} is verified`;
   return `waived: ${failure.name} (${failure.file}) by person waiver ${waiver.id} for ${waiver.kind ?? store.landingWaiverKind(waiver.test)} ${waiver.test}: ${waiver.reason}; expires ${waiver.until}`;
 }
 
@@ -633,6 +646,8 @@ async function finishTrunk(state) {
 
 /** Build, gate, diagnose and durably land one coordinator batch; all external actions stay in its worktree. */
 export async function land({ root, board, config, write, say, owner, maximum = Infinity, dryRun = false, adopt = false, onWait }) {
+  // Quarantine is read from the accepted main policy this landing runs under, never from a branch.
+  board.quarantineEnabled = () => config.flakes?.quarantine === true;
   let trunk = mainCheckout(root);
   const recorded = store.landingBatches(board).findLast((batch) => batch.state === 'landed' && batch.base === trunk?.commit);
   if (!dryRun && recorded && isClean(root) && !untracked(root).length) {
