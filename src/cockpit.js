@@ -38,6 +38,7 @@ import { pageScriptPart1 } from './view/page-script-1.js';
 import { pageScriptPart2 } from './view/page-script-2.js';
 import { pageScriptPart3 } from './view/page-script-3.js';
 import { pageScriptPart4 } from './view/page-script-4.js';
+import { historyLoadingScript } from './view/history-loading.js';
 
 /** The CLI's default phrases, ordered by depth for the existing prose inventory guard. */
 export const PULLBOARD_COMMANDS = Object.freeze(commandPhrases().sort((left, right) => right.split(' ').length - left.split(' ').length));
@@ -1286,7 +1287,8 @@ function render() {
   // Opened from the status bar's unread, the feed is exactly those shouts, the ones after the mark the person had.
   const unread = view.unread?.root === view.root ? view.unread : null;
   const addressed = addressedShouts.get(JSON.stringify([view.root, view.shout]));
-  const feedShouts = addressed?.shout && !p.shouts.some((entry) => entry.shout_id === view.shout) ? [...p.shouts, addressed.shout] : p.shouts;
+  const shownShouts = addressed?.shout && !p.shouts.some((entry) => entry.shout_id === view.shout) ? [...p.shouts, addressed.shout] : p.shouts;
+  const feedShouts = [...shownShouts, ...olderShoutsOf(view.root, shownShouts)];
   const heard = unread ? feedShouts.filter((x) => x.shout_id > unread.after) : view.agent ? feedShouts.filter((x) => x.shout_from === view.agent || x.shout_to === view.agent) : feedShouts;
   const bar = !unread && !view.agent ? '' : '<div class="feed-bar">' + (unread ? '<span><b>' + heard.length + '</b> unread <button class="link" data-unread type="button">show all</button></span>'
     : '<span>Shouts with <b>' + esc(agentName(view.agent)) + '</b> <button class="link" data-agent="" type="button">show all</button></span>') + '</div>';
@@ -1438,6 +1440,7 @@ function render() {
   showTab();
   revealPlace();
   updateRoadmapPanel();
+  drawHistoryNotes();
 }
 
 /**
@@ -1445,7 +1448,7 @@ function render() {
  * it, so it stays closed across reloads, and across restarts of the view, which serves from the
  * same address again, until they open it. While hidden it is not drawn.
  */
-${pageScriptPart4(pageScope)}</script>
+${pageScriptPart4(pageScope)}${historyLoadingScript()}</script>
 </body>
 </html>`;
 }
