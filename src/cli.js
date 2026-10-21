@@ -213,7 +213,7 @@ import {
   standings,
   unmetRows,
 } from './spec.js';
-import { refuseAgentApprovedRows } from './spec-approval.js';
+import { captureSpecApprovalBaseline, refuseAgentApprovedRows } from './spec-approval.js';
 import {
   answerQuestion,
   landBlueprint,
@@ -866,6 +866,8 @@ export async function reserveRow(ctx, row, written) {
 async function withItemSession(info, operation, args, move) { const noted = operation === 'claim' || operation === 'submit'; if (noted) itemSessions.requireLedger(info); const result = await move(); if (noted) itemSessions.recordItemSession(info, args[0], operation); return result; }
 
 export async function ordered(ctx, board, operation, args) {
+  const baselineRoot = ctx.info.isMain && operation !== 'recordSpecApprovalBaseline' && !store.specApprovalBaselineExists(board) ? primaryCheckoutRoot(ctx.info) : null;
+  const initialBaseline = baselineRoot ? captureSpecApprovalBaseline(baselineRoot, loadConfig(baselineRoot)) : null;
   if (['verify', 'reopen'].includes(operation)) args = firstRefusalArgs(operation, args, configFromSource(coordinatorFile(ctx.info.root, CONFIG_FILE).stdout));
   // Every engine-27 registration records the seat that made it: the coordinator from the main
   // checkout, the joined agent from its worktree, or `machine` for a join no seat made (#579).
@@ -875,8 +877,23 @@ export async function ordered(ctx, board, operation, args) {
   }
   const command = ['add', 'edit', 'merged'].includes(ctx.io.relayCommand?.cliOperation) ? ctx.io.relayCommand : undefined;
   /** Dispatch while this session holds the checkout, including long-running next/run loops. */
-  const execute = () => withItemSession(ctx.info, operation, args, () => relayLinked(ctx.info.root) || relayRecovered(ctx.info.root)
-    ? relayOperation(ctx.info.root, operation, args, ctx.io, command, () => store[operation](board, ...args)) : store[operation](board, ...args));
+  const execute = async () => {
+    /** Keep bootstrap in the same authenticated seat, without borrowing a person's action receipt. */
+    const recordBaseline = async (agentId) => {
+      const values = [{ agentId, baseline: initialBaseline }];
+      const baselineIo = ctx.io.personRequest || ctx.io.personRequestMoveId
+        ? { ...ctx.io, personRequest: undefined, personRequestMoveId: undefined } : ctx.io;
+      return relayLinked(ctx.info.root) || relayRecovered(ctx.info.root)
+        ? relayOperation(ctx.info.root, 'recordSpecApprovalBaseline', values, baselineIo, undefined,
+          () => store.recordSpecApprovalBaseline(board, ...values))
+        : store.recordSpecApprovalBaseline(board, ...values);
+    };
+    const actor = ctx.info.isMain ? COORDINATOR : store.agentAt(board, ctx.info.root)?.agent_id;
+    if (initialBaseline && actor) await recordBaseline(actor);
+    const result = await withItemSession(ctx.info, operation, args, () => relayLinked(ctx.info.root) || relayRecovered(ctx.info.root)
+      ? relayOperation(ctx.info.root, operation, args, ctx.io, command, () => store[operation](board, ...args)) : store[operation](board, ...args));
+    return result;
+  };
   const digest = agentSessionDigest();
   const boardOnly = CHECKOUT_BOARD_ONLY.get(ctx.io);
   const boardOnlyOperation = (boardOnly === 'shout' && operation === 'shout') || (boardOnly === 'fact' && operation === 'appendFact');

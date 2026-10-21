@@ -26,6 +26,7 @@ import {
 import {
   initRepo,
 } from '../init.js';
+import { captureSpecApprovalBaseline } from '../spec-approval.js';
 import {
   agentSessionDigest,
 } from '../person.js';
@@ -77,6 +78,9 @@ export async function run(io, { values }) {
       if (!linked) {
         const existing = board.db.prepare('SELECT 1 FROM agent WHERE agent_id=?').get(COORDINATOR);
         const registered = store.register(board, options);
+        if (!store.specApprovalBaselineExists(board)) store.recordSpecApprovalBaseline(board, {
+          agentId: COORDINATOR, baseline: captureSpecApprovalBaseline(info.root, loadConfig(info.root)),
+        });
         if (!existing) recordSetupState({ info }, setupIdentity(board), 'started');
         return registered;
       }

@@ -50,15 +50,35 @@ function confirmedDecision(root, decision, evidenceErrors) {
   }
 }
 
+/** Capture the current approved source before setup commits or a legacy board's first ordered move. */
+export function captureSpecApprovalBaseline(root, config) {
+  const spec = loadSpec(root, config);
+  const source = spec.exists === false ? [] : readFileSync(join(root, config.spec), 'utf8').split(/\r?\n/u);
+  const head = tryGit(root, ['rev-parse', '--verify', 'HEAD']);
+  return { version: 1, file: config.spec, anchor: head.status === 0 ? head.stdout.trim() : null,
+    rows: spec.rows.filter(row => row.status === 'approved').map(row => ({ id: row.id, text: row.text, source: source[row.line - 1] })) };
+}
+
 /** Load one provenance view for a command; no observation here manufactures an approval event. */
 export function specApprovalState(root, { board, config, spec = loadSpec(root, config) }) {
-  if (spec.exists === false) return { mode: config.specAgentApproval ?? 'flag', rows: [] };
+  const mode = config.specAgentApproval ?? 'flag';
+  let baseline;
+  let baselineInvalid = false;
+  const evidenceErrors = [];
+  try { baseline = store.specApprovalBaseline(board); }
+  catch (error) {
+    if (!(error instanceof Refused)) throw error;
+    evidenceErrors.push({ code: error.code, message: error.message });
+    baselineInvalid = true;
+  }
+  if (!baseline && !baselineInvalid) return { mode, baselinePending: true, evidenceErrors, rows: [] };
+  if (spec.exists === false) return { mode, baselinePending: false, baselineInvalid, evidenceErrors, rows: [] };
   const source = readFileSync(join(root, config.spec), 'utf8').split(/\r?\n/u);
   const decisions = store.rowDecisions(board).filter(record => record.kind === 'spec' && record.file === config.spec);
-  const evidenceErrors = [];
   const signed = approvalEvidence(root, evidenceErrors);
   const unconfirmed = spec.rows.filter(row => row.status === 'approved').filter(row => {
     const current = { row, file: config.spec, source: source[row.line - 1] };
+    if (baseline?.file === current.file && baseline.rows.some(old => old.id === row.id && old.text === row.text && old.source === current.source)) return false;
     const decision = decisions.findLast(record => record.id === row.id);
     if (decision) {
       if (!matchesApproval(decision, current)) return true;
@@ -67,7 +87,7 @@ export function specApprovalState(root, { board, config, spec = loadSpec(root, c
     return !matchesApproval(signed.findLast(record => record.kind === 'spec' && record.file === config.spec && record.id === row.id), current);
   });
   const origins = unconfirmed.length ? rowOrigins(root, config.spec) : new Map();
-  return { mode: config.specAgentApproval ?? 'flag', evidenceErrors, rows: unconfirmed.map(row => ({ id: row.id, text: row.text, gate: row.gate,
+  return { mode, baselinePending: false, baselineInvalid, evidenceErrors, rows: unconfirmed.map(row => ({ id: row.id, text: row.text, gate: row.gate,
     status: 'agent-approved', ...(origins.get(row.line) ?? { commit: null, agent: 'unknown', attribution: 'Git author, seat unknown' }) })) };
 }
 
@@ -85,7 +105,7 @@ export function agentApprovalLine(rows) {
 /** Project current confirmation beside immutable items and their historical receipts. */
 export function projectSpecApprovals(state, approval) {
   const byId = new Map(approval.rows.map(row => [row.id, row]));
-  const projected = { ...state, specApprovalEvidenceErrors: approval.evidenceErrors ?? [], spec: state.spec.map(row => ({ ...row, agentApproval: byId.has(row.id) ? { ...byId.get(row.id), mode: approval.mode } : null })),
+  const projected = { ...state, specApprovalBaseline: { pending: approval.baselinePending === true, invalid: approval.baselineInvalid === true }, specApprovalEvidenceErrors: approval.evidenceErrors ?? [], spec: state.spec.map(row => ({ ...row, agentApproval: byId.has(row.id) ? { ...byId.get(row.id), mode: approval.mode } : null })),
     items: state.items?.map(item => ({ ...item, agentApproved: itemAgentApprovals(item, approval), approvalQualification: agentApprovalLine(itemAgentApprovals(item, approval)) })) };
   return { ...projected, needs: personNeeds(projected) };
 }
