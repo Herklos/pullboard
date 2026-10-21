@@ -36,16 +36,18 @@ export function assertStarterChecks({ emptyRepo, freshBoard, json }) {
     }
     assert.equal(items.length, readBlueprint(name).items.length, `${name} files every starter`);
   }
-  const chosen = freshBoard({ lanes: { service: { owns: ['services/my api/'], specs: [] } } });
-  const folder = join(chosen.repo, 'services', 'my api');
-  mkdirSync(folder, { recursive: true });
-  const placed = json(chosen, 'blueprint', 'add', 'web-app');
-  const first = json(chosen, 'show', String(placed.items[0].id));
-  assert.equal(first.item_lane, 'service');
-  const ran = runFixtureChild('/bin/sh', ['-c', `trap 'printf "\\n__starter_cwd__%s\\n" "$(pwd -P)"' EXIT; ${first.item_check}`],
-    { cwd: chosen.repo, env: chosen.env, encoding: 'utf8' });
-  try { assert.equal(/__starter_cwd__([^\n]+)/u.exec(ran.stdout)?.[1], realpathSync(folder), 'the actual chosen lane folder, including spaces, is used'); }
-  catch (error) { failures.push(error); }
+  for (const owned of ['services/my api/', "-app's/"]) {
+    const chosen = freshBoard({ lanes: { service: { owns: [owned], specs: [] } } });
+    const folder = join(chosen.repo, owned);
+    mkdirSync(folder, { recursive: true });
+    const placed = json(chosen, 'blueprint', 'add', 'web-app');
+    const first = json(chosen, 'show', String(placed.items[0].id));
+    assert.equal(first.item_lane, 'service');
+    const ran = runFixtureChild('/bin/sh', ['-c', `trap 'printf "\\n__starter_cwd__%s\\n" "$(pwd -P)"' EXIT; ${first.item_check}`],
+      { cwd: chosen.repo, env: chosen.env, encoding: 'utf8' });
+    try { assert.equal(/__starter_cwd__([^\n]+)/u.exec(ran.stdout)?.[1], realpathSync(folder), `the actual chosen lane folder ${owned} is used without shell option or quote interpretation`); }
+    catch (error) { failures.push(error); }
+  }
   const ambiguous = freshBoard({ lanes: { app: { owns: ['src/', 'test/'], specs: [] } } });
   const rootItems = json(ambiguous, 'blueprint', 'add', 'web-app').items;
   assert.equal(json(ambiguous, 'show', String(rootItems[0].id)).item_check, 'npm test',

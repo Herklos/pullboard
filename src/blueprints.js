@@ -84,7 +84,7 @@ export function starterCheck(blueprint, command, placement, config) {
   if (!BUNDLED.has(blueprint) || owns.length !== 1 || !owns[0].endsWith('/')) return command;
   const folder = owns[0].replace(/\/+$/u, '');
   if (!folder || /[*?{}\[\]]/u.test(folder)) return command;
-  const quoted = `'${folder.replaceAll("'", "'\\''")}'`;
+  const quoted = `'./${folder.replaceAll("'", "'\\''")}'`;
   return `cd ${quoted} && (${command})`;
 }
 

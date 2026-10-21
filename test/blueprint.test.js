@@ -247,7 +247,7 @@ test('every bundled starter item carries a criterion and a check [S1,I1]', () =>
     const items = readBlueprint(name, process.cwd()).items;
     assert.equal(added.items.length, items.length, `${name} files every starter`);
     assert.deepEqual(added.checksNotRun, added.items.map((item) => item.id), `${name}: every check is stored, none run`);
-    board.expected.push(...items.map((item) => [item.title, item.criterion, `cd 'app' && (${item.check})`]));
+    board.expected.push(...items.map((item) => [item.title, item.criterion, `cd './app' && (${item.check})`]));
   }
   for (const { box, expected } of boards) {
     const filed = json(box, 'list', '--all').items.sort((a, b) => a.item_id - b.item_id);
@@ -261,7 +261,7 @@ test('every bundled starter item carries a criterion and a check [S1,I1]', () =>
   const started = fresh.run('init', '--blueprint', 'web-app');
   assert.equal(started.status, 0, started.stdout + started.stderr);
   const startedItems = (JSON.parse(fresh.run('list', '--json').stdout).items ?? []).sort((a, b) => a.item_id - b.item_id);
-  assert.deepEqual(startedItems.map((item) => [item.item_title, item.item_criterion, item.item_check]), web.items.map((item) => [item.title, item.criterion, `cd 'app' && (${item.check})`]));
+  assert.deepEqual(startedItems.map((item) => [item.item_title, item.item_criterion, item.item_check]), web.items.map((item) => [item.title, item.criterion, `cd './app' && (${item.check})`]));
   assert.match(started.stdout, new RegExp(`checks stored, not run: ${startedItems.map((item) => `#${item.item_id}`).join(', ')}; no check baseline ran`, 'u'));
 });
 
