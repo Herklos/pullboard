@@ -868,7 +868,8 @@ export async function reserveRow(ctx, row, written) {
 async function withItemSession(info, operation, args, move) { const noted = operation === 'claim' || operation === 'submit'; if (noted) itemSessions.requireLedger(info); const result = await move(); if (noted) itemSessions.recordItemSession(info, args[0], operation); return result; }
 
 export async function ordered(ctx, board, operation, args) {
-  if (['verify', 'reopen'].includes(operation)) args = firstRefusalArgs(operation, args, configFromSource(coordinatorFile(ctx.info.root, CONFIG_FILE).stdout));
+  // Only a reject or a reopen can open a builder's first-refusal window (#954), so an accept never reads the coordinator's policy.
+  if (operation === 'reopen' || operation === 'verify' && args[1]?.decision === 'REJECT') args = firstRefusalArgs(operation, args, configFromSource(coordinatorFile(ctx.info.root, CONFIG_FILE).stdout));
   // Every engine-27 registration records the seat that made it: the coordinator from the main
   // checkout, the joined agent from its worktree, or `machine` for a join no seat made (#579).
   if (operation === 'register' && args[0] && args[0].createdBy === undefined) {
