@@ -2,7 +2,15 @@
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -23,7 +31,7 @@ function snapshot(root) {
 
 /** Exercise the real authenticated local endpoint without accessing the person's storage. */
 export async function proveSettingsApi() {
-  const root = mkdtempSync(join(tmpdir(), 'pullboard-settings-api-'));
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'pullboard-settings-api-')));
   const home = join(root, 'home');
   const repo = join(root, 'repo');
   const previous = Object.fromEntries(['PULLBOARD_HOME', 'PULLBOARD_MACHINE_HOME', 'PULLBOARD_RELAY_KEY', 'PULLBOARD_RELAY_TOKEN', 'PULLBOARD_VIEW_PORT'].map(key => [key, process.env[key]]));
