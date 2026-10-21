@@ -372,11 +372,11 @@ async function openOnPhone(t, { box, link, heldPage, currentMarker }, { holdStat
   // Budget: the owner's explicit first-readable-board bar is three seconds, independent of historical streaming.
   // The product bar is the page's own firstBoardPaint < 3000 ms; this wait only has to outlast a loaded runner (#953).
   try {
-    await chrome.waitFor('Number.isFinite(window.__phoneTiming?.firstBoardPaint) && typeof transport !== "undefined" && !!transport?.historyProgress', 30_000, 'bounded current board paints before all history'); // budget: hang ceiling for observing the paint under suite load; the frozen #903 3000ms first-readable-board bar is asserted on the page-measured firstBoardPaint.
+    await chrome.waitFor('Number.isFinite(window.__phoneTiming?.firstBoardPaint) && typeof transport !== "undefined" && !!transport?.historyProgress', 120_000, 'bounded current board paints before all history'); // budget: generous hang ceiling for a starved harness to observe the paint under gate load (a 30 s wait expired with the page painted at 646 ms); the frozen #903 3000ms bar is asserted on the page-measured firstBoardPaint.
   } catch (error) {
     // Record what the page itself reached, so a miss reads as a page measurement rather than a runner timeout (#953).
     const page = await chrome.evaluate(`({ ...window.__phoneTiming, sinceNavigationMs: performance.now(), readyState: document.readyState,
-      transport: typeof transport, chain: Boolean(document.querySelector('#chain')), loading: document.body?.classList.contains('loading') })`).catch(() => null);
+      transport: typeof transport, historyProgress: typeof transport?.historyProgress, chain: Boolean(document.querySelector('#chain')), loading: document.body?.classList.contains('loading') })`).catch(() => null);
     t.diagnostic(JSON.stringify({ phonePageAtTimeout: page }));
     error.message += '; the page reached ' + JSON.stringify(page);
     throw error;
