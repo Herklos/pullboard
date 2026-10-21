@@ -3,6 +3,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { remapMove } from '../src/relay-outbox.js';
 import { runFixtureGit } from './fixture-child.js';
 import { relayClientFixture } from './relay-client-fixture.js';
 
@@ -23,14 +24,20 @@ function shoutTexts(exported) {
   return exported.tables.shout.map((row) => row.shout_text);
 }
 
-test('a move on an accepted relay link waits in the ordered outbox while the relay is down, and replays in order [B26,H16,H17]', async (t) => {
+/** Two machines on one accepted relay board with the outbox on, and an item added before the outage. */
+async function twoMachines(t, title) {
   const box = await relayClientFixture(t);
   enableOutbox(box);
   await box.link();
-  const contested = (await box.cli('add', box.lane, 'Contested while the relay is down')).document.item.item_id;
+  const contested = (await box.cli('add', box.lane, title)).document.item.item_id;
   const printed = await box.cli('relay', 'pair');
   const other = await box.otherDeviceJoin(printed.document.code);
   assert.equal(JSON.parse(readFileSync(box.linkFile, 'utf8')).baselineAccepted, true, 'the relay accepted this board before the outage');
+  return { box, other, contested };
+}
+
+test('a move on an accepted relay link waits in the ordered outbox while the relay is down, and replays in order [B26,H16,H17]', async (t) => {
+  const { box, other, contested } = await twoMachines(t, 'Contested while the relay is down');
 
   await box.stopRelay();
   const first = await box.cli('shout', 'all', 'queued first while the relay is down');
@@ -68,4 +75,47 @@ test('a move on an accepted relay link waits in the ordered outbox while the rel
   const item = (exported) => exported.tables.item.find((row) => row.item_id === contested);
   assert.deepEqual(item(here.document), item(there.document), 'both machines agree on the contested item');
   assert.equal(item(there.document).item_status, 'withdrawn');
+});
+
+test('an item added while the relay is down keeps its queued moves when another machine adds one first [B26,H16,H17]', async (t) => {
+  const { box, other } = await twoMachines(t, 'Added before the outage');
+  await box.stopRelay();
+  const added = await box.cli('add', box.lane, 'Added here while the relay is down');
+  assert.equal(added.code, 0, JSON.stringify(added.document));
+  const local = added.document.item.item_id;
+  const second = await box.cli('add', box.lane, 'Also added here while the relay is down');
+  assert.equal(second.document.item.item_id, local + 1, 'the second offline add takes the next local number');
+  const withdrawn = await box.cli('withdraw', String(local), 'withdrawn here while the relay is down');
+  assert.equal(withdrawn.code, 0, withdrawn.failure);
+
+  await box.restartRelay();
+  const first = await other.cli('add', box.lane, 'Added there first');
+  assert.equal(first.code, 0, first.failure);
+  assert.equal(first.document.item.item_id, local, 'the other machine takes the number this machine used offline');
+
+  const replayed = await box.cli('status');
+  assert.equal(replayed.code, 0, replayed.failure);
+  assert.equal(replayed.document.relay.outbox, undefined, 'the outbox is empty once it replays');
+  assert.equal(replayed.document.relay.outboxRefusals, undefined, 'nothing is refused: the queued withdraw follows its own item');
+  assert.deepEqual(replayed.document.relay.outboxRenumbered, [{ was: local, is: local + 1 }, { was: local + 1, is: local + 2 }],
+    'status says each offline item got the next number');
+  for (const machine of [box, other]) {
+    const items = new Map((await machine.cli('export')).document.tables.item.map((row) => [row.item_id, row]));
+    assert.deepEqual([items.get(local).item_title, items.get(local).item_status], ['Added there first', 'open'], 'the other machine\'s item is untouched');
+    assert.deepEqual([items.get(local + 1).item_title, items.get(local + 1).item_status], ['Added here while the relay is down', 'withdrawn'], 'the queued withdraw acts on the item it was made for');
+    assert.deepEqual([items.get(local + 2).item_title, items.get(local + 2).item_status], ['Also added here while the relay is down', 'open'],
+      'a later renumbering never moves a target that was already mapped');
+  }
+});
+
+test('a queued move maps each item it names once, from the number it was made with [B26,H16]', () => {
+  const remap = { 2: 3, 3: 4 };
+  const withdraw = { id: 'w', operation: 'withdraw', args: [2, { agentId: 'coordinator', reason: 'r' }] };
+  assert.equal(remapMove(withdraw, remap, []).move.args[0], 3, 'local #2 is #3 on the board, not #4');
+  assert.equal(withdraw.args[0], 2, 'the move as it was made is kept, so a retry maps it again from #2');
+  const child = { id: 'c', operation: 'addItem', args: [{ by: 'coordinator', lane: 'app', title: 't', parentId: 3, after: [2, 9] }] };
+  assert.deepEqual(remapMove(child, remap, []).move.args[0], { by: 'coordinator', lane: 'app', title: 't', parentId: 4, after: [3, 9] });
+  const answer = { id: 'a', operation: 'answerDecision', args: [2, { agentId: 'coordinator', answer: 'yes' }] };
+  assert.equal(remapMove(answer, remap, []).move.args[0], 2, 'a decision number is a shout, never an item');
+  assert.deepEqual(remapMove(withdraw, {}, [2]).lost, [2], 'a move on an item whose add was refused is named');
 });

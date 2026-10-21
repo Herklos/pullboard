@@ -24,6 +24,7 @@ export function outboxLines(state) {
     for (const move of state.outbox) lines.push(`  ${describeMove({ operation: move.operation, args: [move.item], actor: move.actor })} (made ${move.queuedAt}): pending`);
   }
   for (const refused of state.outboxRefusals ?? []) lines.push(refusalLine(refused));
+  for (const { was, is } of state.outboxRenumbered ?? []) lines.push(`relay outbox: the item added here as #${was} while the relay was down is #${is} on the board`);
   return lines;
 }
 
