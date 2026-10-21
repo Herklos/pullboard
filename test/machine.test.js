@@ -175,13 +175,17 @@ function codeWalk(read) {
     if (!files.has(file)) {
       const source = read(file);
       const named = new Map();
-      for (const [, names, from] of source.matchAll(/import\s*\{([^}]*)\}\s*from\s*'\.\/([\w-]+\.js)'/g)) {
+      /** Resolve a relative import to its path under src/, from a file in src/ or src/commands/. */
+      const under = (dots, name) => (file.startsWith('commands/') ? (dots === '..' ? name : `commands/${name}`) : (dots === '.' ? name : null));
+      for (const [, names, dots, name] of source.matchAll(/import\s*\{([^}]*)\}\s*from\s*'(\.\.?)\/([\w-]+\.js)'/g)) {
+        const from = under(dots, name);
+        if (!from) continue;
         for (const part of names.split(',').map((text) => text.trim()).filter(Boolean)) {
           const [original, local = original] = part.split(/\s+as\s+/);
           named.set(local, `${from}#${original}`);
         }
       }
-      const spaces = new Map([...source.matchAll(/import \* as (\w+) from '\.\/([\w-]+\.js)'/g)].map(([, space, from]) => [space, from]));
+      const spaces = new Map([...source.matchAll(/import \* as (\w+) from '(\.\.?)\/([\w-]+\.js)'/g)].map(([, space, dots, name]) => [space, under(dots, name)]).filter(([, from]) => from));
       files.set(file, { bodies: functionsIn(source), named, spaces });
     }
     return files.get(file);
@@ -248,7 +252,8 @@ function codeProblems(machine, read = fromDisk) {
       }
     }
   }
-  const raised = new Set(['board.js', 'cli.js', 'spec.js'].flatMap((file) => walk.functions(file).flatMap((name) => [...walk.refusalsOf(`${file}#${name}`)])));
+  const commandFiles = readdirSync(new URL('../src/commands/', import.meta.url)).filter((name) => name.endsWith('.js') && name !== 'index.js').map((name) => `commands/${name}`);
+  const raised = new Set(['board.js', 'cli.js', 'spec.js', ...commandFiles].flatMap((file) => walk.functions(file).flatMap((name) => [...walk.refusalsOf(`${file}#${name}`)])));
   for (const code of declaredCodes(machine)) if (!raised.has(code)) problems.add(`${code} is declared but the board, CLI and spec parser never raise it`);
   return [...problems];
 }
@@ -1369,7 +1374,7 @@ test('a helper added to the board that changes a status outside moveItem is refu
 
 
 test('transport boundaries keep a new item refusal in ordered dispatch visible [M1,M4,H16]', () => {
-  const inDispatch = editedSource('cli.js', /^async function ordered\(ctx, board, operation, args\) \{$/m,
+  const inDispatch = editedSource('cli.js', /^(?:export )?async function ordered\(ctx, board, operation, args\) \{$/m,
     "$&\n  if (args[0] === 999) throw new Refused('MOON_PHASE', 'wait for the full moon');");
   assert.deepEqual(codeProblems(MACHINE, inDispatch).sort(), [
     'MOON_PHASE is raised by accept and reject but not declared there',

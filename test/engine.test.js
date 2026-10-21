@@ -9,7 +9,7 @@ import { test } from 'node:test';
 import * as store from '../src/board.js';
 import { exportBoard, importBoard, restoreRelaySnapshot } from '../src/exchange.js';
 import { applyEngineMove, applyRelayMove, prepareEngineMove, appliedSequence, engineReceipt, refuseRelayMove, startRelayEpoch, checkpointSequence, ENGINE_OPERATIONS } from '../src/engine.js';
-import { ENGINE_VERSION } from '../src/machine.js';
+import { ENGINE_REGISTRY, ENGINE_VERSION } from '../src/machine.js';
 import { Refused } from '../src/refused.js';
 import { unpackRelease } from './release-archive.js';
 
@@ -622,4 +622,14 @@ test('a failed durable receipt rolls back an otherwise successful move and its c
   assert.throws(() => applyEngineMove(board, claimMove(board, item, 'web-1'), { sequence: 1, at: CLAIM_AT }), /receipt rollback probe/);
   assert.deepEqual(exportBoard(board), before, 'receipt failure cannot leave a committed claim without its replay position');
   assert.equal(replayCursor(board), 0);
+});
+
+test('the engine version is the highest feature engine [C7,V4]', () => {
+  assert.equal(typeof ENGINE_REGISTRY, 'object', 'src/machine.js declares a registry of feature engines');
+  const entries = Object.entries(ENGINE_REGISTRY);
+  assert.ok(entries.length > 0, 'the registry names at least one feature engine');
+  for (const [name, engine] of entries) assert.ok(Number.isSafeInteger(engine) && engine > 0, `feature ${name} declares a positive whole engine number`);
+  assert.equal(ENGINE_VERSION, Math.max(...entries.map(([, engine]) => engine)), 'the engine version is the highest number any feature declares');
+  const keys = entries.map(([name]) => name);
+  assert.deepEqual(keys, [...keys].sort(), 'features are listed in name order, so two items adding different features add lines in different places');
 });

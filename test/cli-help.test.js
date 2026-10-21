@@ -177,9 +177,12 @@ test('help names come from the command declarations [C7,N37]', async (t) => {
   assert.equal(generated.all, HELP.all, 'a new declaration preserves the full-help bytes');
 
   const original = readFileSync(join(directory, 'cli.js'), 'utf8');
-  const declaration = /function readCommands\(io, \{ first, second, rest, values \}\) \{\s*return \{/u;
-  assert.match(original, declaration);
-  const extended = original.replace(declaration, (text) => text + "\n/** A private new command proves help follows actual dispatch declarations. */\n'future-command': () => 0,")
+  const registry = readFileSync(join(directory, 'commands/index.js'), 'utf8');
+  const declaration = /export const COMMANDS = \{/u;
+  assert.match(registry, declaration);
+  const extendedRegistry = registry.replace(declaration, (text) => text + "\n/** A private new command proves help follows actual dispatch declarations. */\n'future-command': () => ({ run: () => 0 }),");
+  const registryUrl = 'data:text/javascript;base64,' + Buffer.from(extendedRegistry).toString('base64');
+  const extended = original.replace(/\bfrom (['"])\.\/commands\/index\.js\1/u, 'from ' + JSON.stringify(registryUrl))
     .replace(/\bfrom (['"])(\.[^'"]+)\1/gu, (_match, _quote, path) => 'from ' + JSON.stringify(pathToFileURL(resolve(directory, path)).href));
   const privateCli = await import('data:text/javascript;base64,' + Buffer.from(extended).toString('base64'));
   assert.ok(privateCli.resultCommands().includes('future-command'));
@@ -260,5 +263,31 @@ test('the settings forms the CLI dispatches have help and reach their own refusa
     const refused = runFixtureChild(process.execPath, [BIN, 'settings', form, 'abc'], { cwd: folder, encoding: 'utf8' });
     assert.equal(refused.status, 1, `settings ${form} abc is refused: ${refused.stdout}`);
     assert.ok(refused.stderr.includes(code), `settings ${form} reaches its own check ${code}: ${refused.stderr}`);
+  }
+});
+
+test('every command comes from its own module [C7,V4]', async () => {
+  const source = resolve(import.meta.dirname, '../src');
+  const registry = await import(pathToFileURL(join(source, 'commands/index.js')).href).catch(() => null);
+  assert.ok(registry?.COMMANDS, 'src/commands/index.js registers the commands');
+  const names = Object.keys(registry.COMMANDS);
+  assert.deepEqual(names, [...names].sort(), 'the registry lists commands in name order, one line each, so two new commands add lines in different places');
+  const listing = readFileSync(join(source, 'commands/index.js'), 'utf8');
+  for (const name of names) {
+    assert.match(listing, new RegExp(`^  ${name}: \\(\\) => import\\('\\./${name}\\.js'\\),$`, 'mu'), `${name} is registered by exactly one line`);
+    const module = await registry.COMMANDS[name]();
+    assert.equal(typeof module.run, 'function', `src/commands/${name}.js exports run`);
+  }
+  const files = readdirSync(join(source, 'commands')).filter((file) => file.endsWith('.js') && file !== 'index.js').map((file) => file.slice(0, -3)).sort();
+  assert.deepEqual(files, [...names].sort(), 'every module under src/commands/ is registered, and every registered command has its module');
+  for (const name of [...resultCommands(), 'mcp']) assert.ok(names.includes(name), `${name} comes from its own module`);
+  const cli = readFileSync(join(source, 'cli.js'), 'utf8');
+  assert.doesNotMatch(cli, /function (?:setup|read|work)Commands\(/u, 'src/cli.js holds no command table');
+  const dispatch = cli.slice(cli.indexOf('async function runCommand('), cli.indexOf('\n}\n', cli.indexOf('async function runCommand(')));
+  assert.ok(dispatch.includes('COMMANDS[command]'), 'runCommand looks the command up in the registry');
+  assert.doesNotMatch(dispatch, /if \(command === '[a-z-]+'(?: && [^)]*)?\) /u, 'runCommand holds no command of its own');
+  for (const file of files) {
+    const text = readFileSync(join(source, 'commands', `${file}.js`), 'utf8');
+    assert.equal((text.match(/^export (?:async )?function run\(/gmu) ?? []).length, 1, `${file}.js declares one run function`);
   }
 });

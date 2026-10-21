@@ -32,18 +32,25 @@ export const STRONG_REJECTION_NOTICE_ENGINE = 54;
  */
 export const SUBMITTED_CONFLICT_ENGINE = 60;
 
-export const ENGINE_VERSION = Math.max(
-  HEALTH_CAP_ENGINE,
-  SUBMITTED_CONFLICT_ENGINE,
-  NATIVE_FLAKE_ENGINE,
-  ROW_DRAFT_ENGINE,
-  AUTO_ESCALATE_ENGINE,
-  RIGOR_NOTICE_ENGINE,
-  WITHDRAW_MILESTONE_ENGINE,
-  STRONG_REJECTION_NOTICE_ENGINE,
-  52,
-  56,
-);
+/**
+ * Every feature engine, one line each, in name order. A feature that raises the engine adds its own line here;
+ * two items adding different features touch different lines and merge cleanly [C7,V4].
+ */
+export const ENGINE_REGISTRY = {
+  'auto-escalate': AUTO_ESCALATE_ENGINE,
+  'engine-52': 52,
+  'engine-56': 56,
+  'health-cap': HEALTH_CAP_ENGINE,
+  'native-flake': NATIVE_FLAKE_ENGINE,
+  'rigor-notice': RIGOR_NOTICE_ENGINE,
+  'row-draft': ROW_DRAFT_ENGINE,
+  'strong-rejection-notice': STRONG_REJECTION_NOTICE_ENGINE,
+  'submitted-conflict': SUBMITTED_CONFLICT_ENGINE,
+  'withdraw-milestone': WITHDRAW_MILESTONE_ENGINE,
+};
+
+/** The highest engine number any registered feature declares. */
+export const ENGINE_VERSION = Math.max(...Object.values(ENGINE_REGISTRY));
 
 /**
  * The engine whose relay moves carry seat provenance and verifier standing (#579). It is its own
