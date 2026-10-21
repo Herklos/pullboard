@@ -15,7 +15,6 @@ import {
   lstatSync,
   mkdirSync,
   readFileSync,
-  readdirSync,
   renameSync,
   rmSync,
   writeFileSync,
@@ -84,6 +83,16 @@ import {
   unseal,
 } from './seal.js';
 import { terminalQr } from './qr.js';
+import { locked } from './relay-lock.js';
+import {
+  decideUncertainBaseline,
+  remoteBoardMissing,
+  uncertainUploadFailure,
+} from './relay-baseline-settle.js';
+import {
+  baselineNotAccepted,
+  transientRelayFailure,
+} from './relay-move-fallback.js';
 import { Refused } from './refused.js';
 import { refusalFromReceipt } from './recorded-refusal.js';
 import { relaySenderProblem } from './relay-sender.js';
@@ -120,6 +129,7 @@ export { relayStorageLine };
 export const DEFAULT_RELAY = 'https://app.pullboard.dev';
 const LINK_FILES = new WeakMap();
 const STATE_FILES = new WeakMap();
+const MOVE_FALLBACK_NOTICES = new WeakSet();
 const KEY_WARNED_COMMANDS = new WeakSet();
 const BASELINE_ATTEMPTS = new WeakMap();
 const BASELINE_NOTICES = new WeakSet();
@@ -311,37 +321,6 @@ export function saveLink(file, state) {
   } finally { rmSync(temporary, { force: true }); }
 }
 
-/** Wait briefly for another worktree's upload, recovering a lock only when its owner is gone. */
-async function locked(file, work) {
-  const lock = file + '.lock';
-  mkdirSync(dirname(file), { recursive: true });
-  const deadline = Date.now() + 15000;
-  while (true) {
-    try { mkdirSync(lock, { mode: 0o700 }); writeFileSync(join(lock, 'pid'), String(process.pid)); break; }
-    catch (error) {
-      if (error.code !== 'EEXIST') throw error;
-      try {
-        const pid = Number(readFileSync(join(lock, 'pid'), 'utf8'));
-        if (Number.isInteger(pid) && pid > 0) {
-          try { process.kill(pid, 0); } catch (dead) { if (dead.code === 'ESRCH') { rmSync(lock, { recursive: true, force: true }); continue; } }
-        }
-      } catch {
-        try { if (Date.now() - lstatSync(lock).mtimeMs > 30000) { rmSync(lock, { recursive: true, force: true }); continue; } }
-        catch (gone) { if (gone.code === 'ENOENT') continue; throw gone; }
-      }
-      if (Date.now() >= deadline) throw new Refused('RELAY_BUSY', 'another worktree is sending this board; the local move is safe and the next command retries');
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
-  }
-  try {
-    // Only the current lock holder can have a live link write; remove crashed legacy bearer fragments.
-    for (const name of readdirSync(dirname(file))) {
-      if (/^relay\.json\.[0-9a-f-]+\.tmp$/u.test(name)) rmSync(join(dirname(file), name), { force: true });
-    }
-    return await work();
-  } finally { rmSync(lock, { recursive: true, force: true }); }
-}
-
 /**
  * Name how a relay request failed before any response, from the error's own fields only.
  * Why: a bare "did not answer" hid whether a request timed out, was refused or lost its socket,
@@ -377,7 +356,7 @@ async function rawRequest(state, path, { method = 'GET', body, allowMissing = fa
   let requestSignal;
   for (let attempt = 0; ; attempt += 1) {
     try {
-      requestSignal ??= signal ? AbortSignal.any([signal, AbortSignal.timeout(10000)]) : AbortSignal.timeout(10000); // budget: original per-request transport ceiling, shared by a replacement GET.
+      requestSignal ??= signal ? AbortSignal.any([signal, AbortSignal.timeout(io?.relayTimeoutMs ?? 10000)]) : AbortSignal.timeout(io?.relayTimeoutMs ?? 10000); // budget: original per-request transport ceiling, shared by a replacement GET.
       response = await fetch(origin + path, {
         method, redirect: 'error', signal: requestSignal,
         headers: { 'x-pullboard-engine': String(ENGINE_VERSION), ...(token ? { authorization: 'Bearer ' + token } : {}), ...(body === undefined ? {} : { 'content-type': 'application/json' }), ...(initialBaseline ? { 'if-none-match': '*' } : {}) },
@@ -622,7 +601,7 @@ function rememberBaselineFailure(io, file, error) {
 async function remoteBaselineAbsent(state, io) {
   try { await request(state, '/api/v1/boards/' + state.board + '/state', {}, io); }
   catch (error) {
-    if (error.httpStatus === 404 && error.relayVersion === 1 && ['NO_BOARD', 'NO_SNAPSHOT'].includes(error.code)) return true;
+    if (remoteBoardMissing(error)) return true;
     throw error;
   }
   return false;
@@ -644,6 +623,7 @@ function fenceBaseline(file, state) {
   state.baselineAccepted = true;
   state.baselineConflict = true;
   delete state.baselinePause;
+  delete state.baselineUncertain;
   saveLink(file, state);
   requireUnconflictedBaseline(state);
 }
@@ -655,27 +635,48 @@ async function requireAbsentBaseline(file, state, io) {
   }
 }
 
+/** Record that the relay holds the pending sequence-zero snapshot, from its ACK or an authenticated read of it. */
+function acceptBaseline(root, file, state) {
+  state.baselineAccepted = true;
+  state.cursor = Number.isSafeInteger(state.baselineCursor) ? state.baselineCursor : localRecords(root, (board) => board.db.prepare('SELECT COALESCE(MAX(event_id), 0) AS id FROM event').get().id);
+  delete state.baselineCursor;
+  const resumed = Boolean(state.baselinePause);
+  delete state.baselinePause;
+  delete state.baselineStale;
+  delete state.baselineUncertain;
+  delete state.snapshot;
+  state.presentationDigest = state.snapshotPresentationDigest ?? state.presentationDigest;
+  delete state.snapshotPresentationDigest;
+  state.needsPresentation = false;
+  saveLink(file, state);
+  if (resumed) clearUploadPauseNotices(state);
+}
+
+/** Decide a first upload whose reply was lost, through this link's transport and saved state (#919). */
+function decideBaseline(root, file, state, io) {
+  return decideUncertainBaseline(state, io, { read: () => request(state, '/api/v1/boards/' + state.board + '/state', {}, io),
+    accept: () => acceptBaseline(root, file, state), fence: () => fenceBaseline(file, state),
+    save: () => saveLink(file, state), remember: (error) => rememberBaselineFailure(io, file, error) });
+}
+
 /** Send the sequence-zero board image; only its first permanent HTTP refusal pauses relay sends. */
 async function uploadInitialBaseline(root, file, state, io) {
   attemptedBaselineThisCommand(io, file);
+  let sent = false;
   try {
     await requireAbsentBaseline(file, state, io);
     const pending = state.snapshot;
+    // Written ahead: from here until a definite answer, the relay may hold this snapshot (#919).
+    state.baselineUncertain = sent = true;
+    saveLink(file, state);
     const reply = await request(state, '/api/v1/boards/' + state.board + '/state', { method: 'PUT', body: pending, initialBaseline: true }, io);
     if (reply.state?.sequence !== pending.sequence || reply.state.sealed !== pending.sealed) throw new Refused('RELAY_RESPONSE', 'the relay did not acknowledge the initial snapshot; retry the configured relay');
-    state.baselineAccepted = true;
-    state.cursor = Number.isSafeInteger(state.baselineCursor) ? state.baselineCursor : localRecords(root, (board) => board.db.prepare('SELECT COALESCE(MAX(event_id), 0) AS id FROM event').get().id);
-    delete state.baselineCursor;
-    const resumed = Boolean(state.baselinePause);
-    delete state.baselinePause;
-    delete state.snapshot;
-    state.presentationDigest = state.snapshotPresentationDigest ?? state.presentationDigest;
-    delete state.snapshotPresentationDigest;
-    state.needsPresentation = false;
-    saveLink(file, state);
-    if (resumed) clearUploadPauseNotices(state);
+    acceptBaseline(root, file, state);
     return true;
   } catch (error) {
+    if (sent && state.baselineUncertain && uncertainUploadFailure(error)) {
+      if (await decideBaseline(root, file, state, io)) return true;
+    } else if (sent && state.baselineUncertain) { delete state.baselineUncertain; saveLink(file, state); }
     if (error.relayVersion === 1 && error.code === 'BASELINE_EXISTS') fenceBaseline(file, state);
     if (!permanentUploadRefusal(error) || state.baselineAccepted) {
       rememberBaselineFailure(io, file, error);
@@ -703,7 +704,7 @@ async function uploadInitialBaseline(root, file, state, io) {
 
 /** Probe blocked limits first; only a recovered relay receives a fresh baseline containing all paused local moves. */
 async function retryPausedBaseline(root, file, state, io) {
-  if (!state.baselinePause || attemptedBaselineThisCommand(io, file)) return !state.baselinePause;
+  if (!(state.baselinePause || state.baselineStale) || attemptedBaselineThisCommand(io, file)) return !(state.baselinePause || state.baselineStale);
   try {
     if (!await uploadRetryReady(state, state.baselinePause, path => request(state, path, {}, io))) {
       saveLink(file, state); reportBaselinePause(state, io); return false;
@@ -911,7 +912,9 @@ async function ensureOrdered(root, file, state, io) {
     if (state.baselineAccepted === undefined) {
       state.baselineAccepted = !(state.snapshot?.sequence === 0);
     }
-    if (state.baselinePause) {
+    // An earlier command lost the reply to its first upload: decide it before re-sealing or sending anything.
+    if (state.baselineUncertain && !state.baselineAccepted) await decideBaseline(root, file, state, io);
+    if (state.baselinePause || state.baselineStale) {
       if (!await retryPausedBaseline(root, file, state, io)) return false;
     }
     if (state.linkPending) {
@@ -1145,6 +1148,18 @@ function recoveredMove(root, state, operation, args, command) {
   return recovered.move;
 }
 
+/**
+ * Record that a local move happened while the baseline upload was uncertain, and say so once.
+ * Why: the saved snapshot predates the move, so the next command seals a fresh baseline that holds it (#919).
+ */
+function keepMoveForLaterBaseline(file, state, error, io) {
+  state.baselineStale = true;
+  saveLink(file, state);
+  if (MOVE_FALLBACK_NOTICES.has(io)) return;
+  MOVE_FALLBACK_NOTICES.add(io);
+  io.err(`pullboard: [${safePauseCode(error)}] the move is saved on this machine; ${error.transportFailure ? `the relay did not answer (${error.transportFailure})` : safePauseMessage(error)}; it goes up inside the board baseline on a later command once the relay answers`);
+}
+
 /** Send one board operation before executing it locally, and report its canonical engine result. */
 export async function relayOperation(root, operation, args, io, command, applyLocally) {
   const file = linkFile(root);
@@ -1165,8 +1180,16 @@ export async function relayOperation(root, operation, args, io, command, applyLo
     if (moves.has(state.board)) CHECKPOINT_NOTICES.get(io)?.delete(state.board);
     moves.add(state.board);
     try {
-      if (!await ensureOrdered(root, file, state, io)) {
-        reportBaselinePause(state, io);
+      let ordered;
+      try { ordered = await ensureOrdered(root, file, state, io); }
+      catch (error) {
+        // #341: a baseline the relay has not accepted never blocks a move; the move rides in the later baseline.
+        if (!baselineNotAccepted(state) || !transientRelayFailure(error)) throw error;
+        keepMoveForLaterBaseline(file, state, error, io);
+        ordered = false;
+      }
+      if (!ordered) {
+        if (state.baselinePause) reportBaselinePause(state, io);
         return applyPausedMoveLocally();
       }
       await catchUp(root, file, state, io);
@@ -1232,7 +1255,7 @@ export async function relayOperation(root, operation, args, io, command, applyLo
       if (error instanceof Refused && error.code === 'AUTH_REQUIRED') throw expiredSignInMoveRefusal(state, error);
       throw error;
     }
-  });
+  }, io);
 }
 
 /** Catch up an opted-in replica before/after a CLI command; offline reads retain local evidence. */
@@ -1271,12 +1294,12 @@ export async function syncRelay(root, io) {
         }
       } else if (error.code === 'AUTH_REQUIRED') {
         if (!orderedMoveCommand(io)) reportExpiredSignIn(state, io);
-      } else io.err(`pullboard: ${error.message}; run pullboard status to see pending uploads`);
+      } else if (!(orderedMoveCommand(io) && baselineNotAccepted(state) && transientRelayFailure(error))) io.err(`pullboard: ${error.message}; run pullboard status to see pending uploads`);
       return { linked: true, board: state.board, url: state.url, sequence: state.sequence,
         behind: (state.mode === 'ordered' ? Number(Boolean(state.pending)) : behind(root, state)) + Number(Boolean(state.snapshot || state.checkpoint)),
         recovery: recoverySummary(state) };
     }
-  });
+  }, io);
 }
 
 /** Return token-management context without opening a board-key pairing link or exposing any credential. */
