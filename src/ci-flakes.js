@@ -69,11 +69,12 @@ function ciTests(output, root) {
 }
 
 /**
- * Match a rerun to one actual failed test. A located row identifies its own file first. A locationless row can
- * stand for a test only when its title occurs once in each report; a skip or another same-title file proves no pass.
+ * Match a rerun to one actual failed test. Its original file and title must identify one occurrence. A located row
+ * identifies its own file first. A locationless row can stand for a test only when its title occurs once in each
+ * report; a skip or another same-title file proves no pass.
  */
 function rerunTest(target, before, after) {
-  if (target.file === null) return undefined;
+  if (target.file === null || before.filter(row => row.name === target.name && row.file === target.file).length !== 1) return undefined;
   const exact = after.filter(row => row.name === target.name && row.file === target.file);
   if (exact.length) return exact.length === 1 && !exact[0].skip ? exact[0] : undefined;
   const sameTitle = after.filter(row => row.name === target.name);

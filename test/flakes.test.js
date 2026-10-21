@@ -623,3 +623,19 @@ test('a same-title skipped original does not lend its identity to an anonymous C
   assert.equal(listed.flakes.length, 0, 'the anonymous pass could be the other original test');
   assert.deepEqual(listed.unclassified.map(entry => entry.file), ['test/a.test.mjs'], 'the skipped original is not itself recorded as a failure');
 });
+
+test('a duplicate original CI file and title cannot share one located passing occurrence [C7,H16]', t => {
+  const box = flakyProject(t);
+  const commit = box.git('rev-parse', 'HEAD');
+  const ci = join(box.scratch, 'ci-results');
+  const job = { job: 'duplicate original identity', runner: 'private-tap-fixture', node: process.version, commit, run: '888', at: '2026-10-20T12:00:00.000Z' };
+  const row = (status, number) => `${status} ${number} - shared title [C7]\n  ---\n  location: '/home/runner/work/repo/repo/test/shared.test.mjs:3:1'\n  ...\n`;
+  ciAttempt(ci, 'red', { ...job, attempt: 1, conclusion: 'failure' }, `TAP version 13\n${row('not ok', 1)}${row('not ok', 2)}1..2\n`);
+  ciAttempt(ci, 'rerun', { ...job, attempt: 2, conclusion: 'success' }, `TAP version 13\n${row('ok', 1)}1..1\n`);
+  const imported = box.cli('flakes', 'import', ci);
+  assert.equal(imported.code, 0, JSON.stringify(imported.document));
+  const listed = box.cli('flakes').document;
+  assert.equal(listed.flakes.length, 0, 'a located pass cannot identify which duplicate original occurrence passed');
+  assert.deepEqual(listed.unclassified.map(entry => entry.file), ['test/shared.test.mjs']);
+  assertReceipts(box, listed.unclassified[0].observations[0]);
+});
