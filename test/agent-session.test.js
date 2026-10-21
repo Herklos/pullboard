@@ -396,3 +396,49 @@ test('a session whose claims cannot be recorded is refused before it moves, neve
   assert.equal(box.run(box.web, ['claim', '1', '--json'], { session: 'codex-thread-secret-unrecorded-921', sessionKey: 'CODEX_THREAD_ID' }).status, 0, 'a writable ledger lets it through');
   assert.match(readFileSync(ledger, 'utf8'), /"move":"claim"/u);
 });
+
+/** Open a helper seat from the web seat inside an agent session, returning the CLI result and the helper's Git directory. */
+function openHelper(box, session, { agent = true } = {}) {
+  const made = box.run(box.web, ['worktree', 'web', '--model', 'Helper Model', '--json'], { session, sessionKey: 'CODEX_THREAD_ID', agent });
+  assert.equal(made.status, 0, `${made.stdout}${made.stderr}`);
+  const result = JSON.parse(made.stdout);
+  const gitDir = resolve(result.path, box.git(result.path, 'rev-parse', '--git-dir'));
+  return { result, gitDir, file: join(gitDir, 'pullboard-parent-session.json') };
+}
+
+test('a helper seat records the agent that opened it [N2,B13]', () => {
+  const box = project();
+  const parent = JSON.parse(box.run(box.web, ['whoami', '--json'], { agent: false }).stdout).id;
+  const session = 'codex-thread-secret-parent-800';
+  const helper = openHelper(box, session);
+  assert.equal(existsSync(helper.file), true, 'opening the seat inside an agent session records its parent with no flag');
+  const record = JSON.parse(readFileSync(helper.file, 'utf8'));
+  assert.equal(record.parent, parent, 'the record names the agent that opened the seat');
+  assert.equal(record.digest, createHash('sha256').update(JSON.stringify(['CODEX_THREAD_ID', session])).digest('hex'));
+  assert.equal(readFileSync(helper.file, 'utf8').includes(session), false, 'the record keeps only the session digest');
+  const lone = openHelper(box, undefined, { agent: false });
+  assert.equal(existsSync(lone.file), false, 'a seat a person opens has no parent');
+  // The link never borrows a claim: the helper claims as itself, and the parent holds nothing.
+  const claimed = box.run(helper.result.path, ['claim', '1', '--json'], { session: 'codex-thread-secret-helper-800', sessionKey: 'CODEX_THREAD_ID' });
+  assert.equal(claimed.status, 0, `${claimed.stdout}${claimed.stderr}`);
+  assert.equal(JSON.parse(box.run(box.web, ['show', '1', '--json'], { agent: false }).stdout).item_owner, helper.result.agent);
+});
+
+test('agents lists each agent with its helpers [N2,B13]', () => {
+  const box = project();
+  const parent = JSON.parse(box.run(box.web, ['whoami', '--json'], { agent: false }).stdout).id;
+  const helper = openHelper(box, 'codex-thread-secret-parent-800');
+  assert.equal(box.run(helper.result.path, ['claim', '1', '--json'], { session: 'codex-thread-secret-helper-800', sessionKey: 'CODEX_THREAD_ID' }).status, 0);
+  const listed = box.run(box.web, ['agents', '--json'], { agent: false });
+  assert.equal(listed.status, 0, `${listed.stdout}${listed.stderr}`);
+  const agents = JSON.parse(listed.stdout).agents;
+  const top = agents.find((agent) => agent.id === parent);
+  assert.ok(top, 'the opening agent is listed');
+  assert.deepEqual(top.helpers.map((agent) => agent.id), [helper.result.agent], 'its helper is listed under it');
+  assert.deepEqual(top.helpers[0].holds.map((hold) => hold.item), [1], 'the helper shows what it holds');
+  assert.deepEqual(top.holds, [], 'the parent holds nothing the helper claimed');
+  assert.equal(agents.some((agent) => agent.id === helper.result.agent), false, 'a helper is listed only under its parent');
+  const text = box.run(box.web, ['agents'], { agent: false });
+  assert.equal(text.status, 0);
+  assert.match(text.stdout, new RegExp(`${helper.result.agent}[^\\n]*#1`, 'u'), 'the text view shows the helper and its item');
+});

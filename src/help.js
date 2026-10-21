@@ -18,6 +18,7 @@ Set up
   pullboard join coordinator --model <name>                                 declare the main checkout's coordinator model
                                         pullboard.json agents.names: suffix (default) or prefix
   pullboard whoami | lanes | status     who you are, the lanes, the board at a glance
+  pullboard agents                      each agent with its seats and helpers, and what each holds
   pullboard lane add <name> --owns <path>[,<path>]   add a lane that owns those folders to pullboard.json
                                         refuses a lane name or a path that is already owned, naming the owner
   pullboard takeover                   rebind this checkout when the same agent starts a new session
@@ -296,6 +297,7 @@ const HELP_ALIASES = {
   version: { usage: 'pullboard version', source: null },
   whoami: { usage: 'pullboard whoami', source: 'whoami' },
   lanes: { usage: 'pullboard lanes', source: 'whoami' },
+  agents: { usage: 'pullboard agents', source: 'whoami' },
   lane: { usage: 'pullboard lane add <name> --owns <path>[,<path>]', source: 'lane add' },
   status: { usage: 'pullboard status', source: 'whoami' },
   done: { usage: 'pullboard done <id>', source: 'submit <id>' },

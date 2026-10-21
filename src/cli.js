@@ -88,6 +88,8 @@ import {
   HOOK_CHECKOUT_WAIT_MS,
   localSessionMatches,
   localSessionSeats,
+  recordParentSession,
+  seatLinks,
 } from './agent-session.js';
 import {
   decisionAnswer,
@@ -2183,9 +2185,10 @@ function setupCommands(io, { first, second, rest = [], values }) {
  * @param {string} route
  * @param {string | null} family
  * @param {string | undefined} model
+ * @param {boolean} helper - true when the seat is for another agent, so it records the session that opened it as its parent [N2,B13]; `next` opens the caller's own seat and passes false
  * @returns {Promise<number>}
  */
-async function worktreeFor(io, lane, route, family = null, model) {
+async function worktreeFor(io, lane, route, family = null, model, helper = true) {
   const ctx = context(io);
   if (!lane || lane === COORDINATOR || !isLane(ctx.config, lane)) {
     throw new Refused('NO_LANE', `no lane "${lane ?? ''}"; lanes: ${laneNames(ctx.config).slice(1).join(', ') || 'none yet, declare them in pullboard.json'}`);
@@ -2221,6 +2224,14 @@ async function worktreeFor(io, lane, route, family = null, model) {
     else io.err(`pullboard: registration failed; the changed worktree was preserved at ${root}`);
     throw error;
   }
+  const digest = helper ? agentSessionDigest() : null;
+  if (digest) {
+    // A local note beside the new checkout; a failure to write it never undoes the seat that was made.
+    const parent = ctx.info.isMain ? COORDINATOR : withBoard(ctx, (board) => store.agentAt(board, ctx.info.root)?.agent_id);
+    if (parent) {
+      try { recordParentSession(repoInfo(root), { parent, digest }); } catch { /* The seat still works without its parent note. */ }
+    }
+  }
   const displayName = displayAgentName({ agent_id: id, agent_model: model }, ctx.config.agents.names);
   const modelWord = shellWord(model);
   const prompt = `You are ${displayName}, in the ${lane} lane. Work only in ${shellWord(root)}, and start every command with ${cdTo(root)}\nModel: ${modelWord}. This worktree joined with --model ${modelWord}. For another worktree using the same model, pass --model ${modelWord} or set PULLBOARD_MODEL=${modelWord}; for a different agent, use that agent's actual model label.\nRead ${shellWord(join(root, 'AGENTS.md'))} first. Its rules govern this work, over any other repo's instructions you were given.`;
@@ -2237,6 +2248,35 @@ async function worktreeFor(io, lane, route, family = null, model) {
   io.say(`  Model: ${model}. When joining or making another agent worktree, pass that agent's exact model with --model or set PULLBOARD_MODEL.`);
   io.say(`  Read ${shellWord(join(root, 'AGENTS.md'))} first. Its rules govern this work, over any other repo's instructions you were given.`);
   return 0;
+}
+
+/**
+ * Every joined agent with its seats, its helpers and what each holds, helpers nested under the agent that opened them
+ * [N2,B13]. The parent links are read from this machine's checkouts; a helper whose parent is gone is listed on its own.
+ *
+ * @param {any} ctx
+ * @param {any} board
+ * @returns {any[]}
+ */
+function agentTree(ctx, board) {
+  const agents = store.listAgents(board).filter((agent) => agent.agent_lane !== COORDINATOR);
+  const { parents, digests } = seatLinks(ctx.info, agents);
+  const held = new Map();
+  for (const item of store.listItems(board)) {
+    if (!item.item_owner || !['claimed', 'submitted'].includes(item.item_status)) continue;
+    held.set(item.item_owner, [...(held.get(item.item_owner) ?? []), { item: item.item_id, status: item.item_status }]);
+  }
+  const known = new Set(agents.map((agent) => agent.agent_id));
+  const row = (agent, seen) => ({
+    id: agent.agent_id, displayName: displayAgentName(agent, ctx.config.agents.names), lane: agent.agent_lane, path: agent.agent_path,
+    seats: agents.filter((seat) => seat.agent_id === agent.agent_id || (digests.has(agent.agent_id) && digests.get(seat.agent_id) === digests.get(agent.agent_id)))
+      .map((seat) => ({ id: seat.agent_id, path: seat.agent_path })),
+    holds: held.get(agent.agent_id) ?? [],
+    helpers: agents.filter((helper) => parents.get(helper.agent_id) === agent.agent_id && !seen.has(helper.agent_id))
+      .map((helper) => row(helper, new Set([...seen, helper.agent_id]))),
+  });
+  const parentId = (agent) => parents.get(agent.agent_id);
+  return agents.filter((agent) => !known.has(parentId(agent))).map((agent) => row(agent, new Set([agent.agent_id])));
 }
 
 /** Describe the active configured location for new agent worktrees. */
@@ -2415,6 +2455,19 @@ function readCommands(io, { first, second, rest, values }) {
       const me = withBoard(ctx, (board) => whoAmI(ctx, board));
       io.result?.({ ...me, path: ctx.info.root });
       io.say(`${me.displayName} (${me.lane} lane${me.route === 'light' ? ', light route' : ''}) at ${ctx.info.root}`);
+      return 0;
+    },
+    agents: () => {
+      const ctx = context(io);
+      const listed = withBoard(ctx, (board) => agentTree(ctx, board));
+      io.result?.({ agents: listed });
+      if (!listed.length) io.say('no agents have joined');
+      const show = (agent, indent) => {
+        const held = agent.holds.map((hold) => `#${hold.item} (${hold.status})`).join(', ');
+        io.say(`${indent}${agent.displayName} (${agent.lane} lane) at ${agent.path}${held ? `: ${held}` : ''}`);
+        for (const helper of agent.helpers) show(helper, indent + '  ');
+      };
+      for (const agent of listed) show(agent, '');
       return 0;
     },
     lanes: () => {
@@ -3179,7 +3232,7 @@ async function nextSeatContext(ctx, board, me, item, seats) {
   let created = false;
   if (!agent) {
     let opened;
-    await worktreeFor({ ...ctx.io, say: () => {}, result: (value) => { opened = value; } }, item.item_lane, me.route, me.family, me.model);
+    await worktreeFor({ ...ctx.io, say: () => {}, result: (value) => { opened = value; } }, item.item_lane, me.route, me.family, me.model, false);
     agent = store.agentAt(board, opened.path);
     created = true;
   }
