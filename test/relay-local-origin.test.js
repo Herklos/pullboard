@@ -5,7 +5,7 @@ import { createRelayBrowserHandler } from '../relay/browser-page.js';
 import { Refused } from '../src/refused.js';
 import { machine, project, startView } from './cockpit/fixture.js';
 import { findWebkitExecutable, startWebkit } from './webkit-fixture.js';
-import { BOARD_ITEM, visit } from './hosted-shapes-fixture.js';
+import { BOARD_ITEM, BOARD_MS, visit } from './hosted-shapes-fixture.js';
 
 const HOSTED = 'https://app.pullboard.dev';
 
@@ -61,7 +61,8 @@ test('the hosted page finds this computer\'s view in WebKit without an http requ
   // A genuine top-level round trip learns this fixture's arbitrary port and tab secret, without injecting a key.
   await page.navigate(view.base + '/local/connect');
   try {
-    await page.waitFor(`location.origin === ${JSON.stringify(HOSTED)} && document.readyState === 'complete'
+    await page.waitFor( // budget: hang ceiling for one hosted navigation to settle, not a speed assertion.
+      `location.origin === ${JSON.stringify(HOSTED)} && document.readyState === 'complete'
       && document.querySelector('#local-note')?.dataset.state !== 'looking' && !document.body.classList.contains('loading')`, 5000);
   } catch (error) {
     console.log(JSON.stringify({ failures, exceptions: page.exceptions,
@@ -98,6 +99,6 @@ test('the hosted page finds this computer\'s view in WebKit without an http requ
   } }, { phone: false, localView: view.base + '/local/view' }, true);
   page = null; // visit owns and closes this page.
   assert.equal(journey.board, true, 'the hosted matrix follows the shown local-opening step and still requires the real private board');
-  assert.ok(journey.ms <= 3000, `the matrix local-opening journey took ${journey.ms}ms`);
+  assert.ok(journey.ms <= BOARD_MS, `the matrix local-opening journey took ${journey.ms}ms`);
   assert.deepEqual(failures, [], 'the production hosted assets were served without forwarding local traffic');
 });
