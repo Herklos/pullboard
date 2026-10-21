@@ -292,6 +292,7 @@ import { serveApi } from './api.js';
 import { serveMcp } from './mcp.js';
 import { scanHealthSentinel } from './health-sentinel.js';
 import { SENTINEL_OPTIONS } from './sentinel-command.js';
+import { QUALITY_OPTIONS } from './rigor-quality-draft.js';
 import { resumeSentinels } from './sentinel-command.js';
 import {
   staleFrozenItems,
@@ -525,6 +526,7 @@ const OPTIONS = {
   as: { type: 'string' },
   check: { type: 'string' },
   ...SENTINEL_OPTIONS,
+  ...QUALITY_OPTIONS,
   yes: { type: 'boolean' },
   landing: { type: 'boolean' },
   adopt: { type: 'boolean' },
