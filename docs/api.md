@@ -175,6 +175,9 @@ For example: `flow: review wait average 61 min (1 measured; > 60 min); bottlenec
 | `sentinel approve` | `version:number`, `sentinel:object` |
 | `sentinel decline` | `version:number`, `sentinel:object` |
 | `sentinels` | `version:number`, `sentinels:array` |
+| `loop` | `version:number`, `jobs:array` |
+| `loop declare` | `version:number`, `job:object` |
+| `loop ran` | `version:number`, `job:object` |
 <!-- api-command-shapes:end -->
 
 `spec draft "<rule>" --doctrine --source "chat, 2026-10-16"` proposes a sourced doctrine row and returns a qualified `id`, such as `doctrine:DR1`, for the existing person approval commands. Resume adds `doctrineNotes`, an array of newly seen approved rules with `id`, `text` and `gate`; each checkout consumes its own notices. Drafts and pending applications are excluded. The shared approved doctrine also supplies frozen citations and stale-item comparisons in older checkouts.

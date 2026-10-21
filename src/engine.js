@@ -21,6 +21,7 @@ import {
 import { CHECK_ACCEPT_ENGINE } from './check-accept.js';
 import { HEALTH_SENTINEL_ENGINE } from './health-receipts.js';
 import { BOARD_SENTINEL_ENGINE } from './sentinels.js';
+import { RECURRING_JOB_ENGINE } from './job-engine.js';
 import {
   REOPEN_FIRST_REFUSAL_ENGINE,
   CAUSE_ENGINE,
@@ -66,7 +67,7 @@ export const ENGINE_OPERATIONS = Object.freeze([
   'recordRowDecisions', 'applyRowDecisions', 'draftSpecRow', 'appendFact',
   'recordLandingBatch', 'recordLandingWaiver', 'recordLandingFlake', 'finishLandingBatch', 'acceptCheck',
   'recordHealthFindings', 'proposeSentinel', 'decideSentinel', 'beginSentinelRun', 'finishSentinelRun',
-  'recordFlakeObservation',
+  'recordFlakeObservation', 'declareJob', 'recordJobRun',
 ]);
 
 /** Engine version at which each ordered operation first has stable replay semantics. */
@@ -80,6 +81,7 @@ function minimumOperationEngine(operation, args, board, at) {
   if (operation === 'recordFlakeObservation') return NATIVE_FLAKE_ENGINE;
   if (operation === 'recordLandingBatch' && carriesFlakeDiagnostics(args[0]?.batch)) return NATIVE_FLAKE_ENGINE;
   if (['proposeSentinel', 'decideSentinel', 'beginSentinelRun', 'finishSentinelRun'].includes(operation) || typeof args[1]?.cause === 'string' && args[1].cause.startsWith('sentinel:')) return BOARD_SENTINEL_ENGINE;
+  if (['declareJob', 'recordJobRun'].includes(operation)) return RECURRING_JOB_ENGINE;
   if (operation === 'recordHealthFindings') return HEALTH_SENTINEL_ENGINE;
   const options = args[1];
   if (carriesConflict(operation, args)) return board && store.itemById(board, args[0])?.item_status === 'submitted' ? SUBMITTED_CONFLICT_ENGINE : CONFLICT_ENGINE;

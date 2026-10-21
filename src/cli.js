@@ -367,6 +367,7 @@ import { watchCommand } from './watch.js';
 import { serveMcp } from './mcp.js';
 import { scanHealthSentinel } from './health-sentinel.js';
 import { SENTINEL_OPTIONS } from './sentinel-command.js';
+import { loopCommand } from './loop-command.js';
 import { resumeSentinels } from './sentinel-command.js';
 import { sentinelCommand } from './sentinel-command.js';
 import { sentinelListCommand } from './sentinel-command.js';
@@ -3204,11 +3205,11 @@ async function nextOnce(ctx, values) {
     if (values.verify) return nextReview(ctx, board, me, values, { ordered: (operation, args) => ordered(ctx, board, operation, args), idArg, trunkMerge });
     const warm = warmFiles(ctx, board, me);
     const seats = nextSessionSeats(ctx, board);
-    const owners = new Set(seats?.map((seat) => seat.agent_id));
-    const heldItems = seats ? store.listItems(board).filter((item) => item.item_status === 'claimed'
-      && item.item_parent_id === null && owners.has(item.item_owner)
-      && store.ROUTES.indexOf(item.item_route) <= store.ROUTES.indexOf(me.route)) : [];
-    const heldItem = heldItems.find((item) => item.item_owner === me.id) ?? heldItems[0];
+    // A claim belongs to the seat that made it: seats of one session share its environment, so a sibling's claim is
+    // never this seat's to resume or be pointed at (#958).
+    const heldItem = seats ? store.listItems(board).find((item) => item.item_status === 'claimed'
+      && item.item_parent_id === null && item.item_owner === me.id
+      && store.ROUTES.indexOf(item.item_route) <= store.ROUTES.indexOf(me.route)) : undefined;
     const { item, reasons, shared } = heldItem ? { item: heldItem, reasons: [], shared: [] }
       : store.nextFor(board, { agentId: me.id, lane: me.lane, runnable: values.runnable, routes: values.routes, warm,
         ...(seats ? { lanes: laneNames(ctx.config).filter((lane) => lane !== COORDINATOR) } : {}),
@@ -4355,6 +4356,7 @@ async function runCommand(argv, io) {
       throw new Refused('USAGE', '--as person works only with pullboard answer, decisions, or fact --never-again');
     }
     if (command === 'sentinel') return await sentinelCommand({ ctx: context(io), words: [first, second, ...rest].filter(value => value !== undefined), values, withBoard, whoAmI, ordered });
+    if (command === 'loop') return await loopCommand({ ctx: context(io), words: [first, second, ...rest].filter(value => value !== undefined), values, withBoard, whoAmI, ordered });
     if (command === 'sentinels') return sentinelListCommand(first, () => context(io), withBoard);
     if (command === 'tour') return tour(io);
     if (command === 'lifecycle') {
@@ -4670,7 +4672,7 @@ export function resultCommands() {
     ...Object.keys(setupCommands({}, args)),
     ...Object.keys(readCommands({}, args)),
     ...Object.keys(workCommands({}, args)),
-    'help', 'version', 'tour', 'lifecycle', 'view', 'serve', 'watch', 'forget', 'spec', 'prompt', 'hook', 'gate', 'settings', 'runner', 'relay', 'sentinel', 'sentinels',
+    'help', 'version', 'tour', 'lifecycle', 'view', 'serve', 'watch', 'forget', 'spec', 'prompt', 'hook', 'gate', 'settings', 'runner', 'relay', 'sentinel', 'sentinels', 'loop',
   ])].sort();
 }
 
