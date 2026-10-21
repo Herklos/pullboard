@@ -62,3 +62,23 @@ export async function settleUncertainBaseline(state, io, read) {
   }
   throw new Refused('RELAY_BASELINE_UNCERTAIN', `the relay may already hold this board's first upload but did not say so within ${seconds(Date.now() - startedAt)} s (${cause}); the move was not saved, so run the command again when the relay answers`);
 }
+
+/**
+ * Decide, under the link lock, whether the relay kept a first upload whose reply was lost: true when it holds
+ * that exact snapshot, false when it holds no board; another board fences, and no answer refuses once.
+ * Why: a client that only saw no reply cannot know the relay has no ordered history, so no move may commit
+ * locally until this says so (#919). The link's own read, accept, fence, save and remember steps are passed in.
+ */
+export async function decideUncertainBaseline(state, io, link) {
+  try {
+    const verdict = await settleUncertainBaseline(state, io, link.read);
+    if (verdict === 'other') link.fence();
+    if (verdict === 'accepted') { link.accept(); return true; }
+    delete state.baselineUncertain;
+    link.save();
+    return false;
+  } catch (error) {
+    link.remember(error);
+    throw error;
+  }
+}
