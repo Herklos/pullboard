@@ -448,6 +448,7 @@ export const NEXT_STEPS = Object.freeze({
   RELAY_ACTOR: 'send the move with the token of the agent that makes it',
   RELAY_ANSWER: 'use pullboard answer <id> "<answer>" or pullboard pass <id> --note "<reason>"',
   RELAY_BASELINE_EXISTS: 'save the board with pullboard export > board.json, then pullboard relay off',
+  RELAY_BASELINE_UNCERTAIN: 'run the command again when the relay answers; it first checks whether the relay kept the board upload',
   RELAY_BOARD_DELETED: 'keep working locally, or run pullboard relay on to link the board again',
   RELAY_BUSY: 'run the command again after the other worktree finishes sending',
   RELAY_CURSOR: 'fetch a consistent snapshot: pullboard relay',
