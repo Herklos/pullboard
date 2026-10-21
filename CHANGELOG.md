@@ -4,6 +4,10 @@ Notable changes to Pullboard, for people using it. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+### Fixed
+
+- A slow or lost relay reply no longer fails a move on a board the relay has not taken yet. When the first upload's reply is lost, Pullboard checks with the relay for up to two minutes and shows progress; if the relay never answers, the move is refused once, with the command to run again.
+
 ## [0.9.1] - 2026-10-19
 
 ### pullboard.dev opens your board, and pairing just works
