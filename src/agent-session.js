@@ -149,6 +149,11 @@ export function recordParentSession(info, { parent, digest }) {
   renameSync(pending, file);
 }
 
+/** Record the parent of a just-made helper seat; a note that cannot be written never undoes the seat. */
+export function noteHelperParent(info, link) {
+  try { recordParentSession(info, link); } catch { /* The seat still works without its parent note. */ }
+}
+
 /** Walk the board's linked checkouts and hand each registered agent's Git directory to visit. */
 function eachSeatGitDir(info, agents, visit) {
   const directory = join(info.commonDir, 'worktrees');
