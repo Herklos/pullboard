@@ -3,6 +3,7 @@
   "gate": "npm run gate",
   "affectedTests": "node bin/run-tests.js",
   "submitGate": "landing",
+  "submit": { "requireInfraNote": true },
   "submitInvariants": [
     "test/refusal-next-steps.test.js"
   ],
