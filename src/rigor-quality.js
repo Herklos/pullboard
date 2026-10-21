@@ -197,19 +197,38 @@ function firstChange(diff) {
   return { path, line: file.added[0]?.line ?? 1 };
 }
 
-/** The catch clauses and .catch handlers in a source, each with its offset and body. */
+/** The catch clauses and .catch handlers in a source, each with its offset, closing offset and body. */
 function catches(source) {
   const { code } = lex(source);
   const found = [];
   for (const match of code.matchAll(/(?<![\w$.])catch\s*(?:\([^()]*\)\s*)?\{/gu)) {
     const open = match.index + match[0].length - 1;
-    found.push({ at: match.index, kind: 'clause', body: code.slice(open + 1, closing(code, open, '{', '}')) });
+    const end = closing(code, open, '{', '}');
+    found.push({ at: match.index, end, kind: 'clause', header: match[0], body: code.slice(open + 1, end) });
   }
   for (const match of code.matchAll(/\.\s*catch\s*\(/gu)) {
     const open = match.index + match[0].length - 1;
-    found.push({ at: match.index + match[0].indexOf('catch'), kind: 'handler', body: code.slice(open + 1, closing(code, open, '(', ')')) });
+    const end = closing(code, open, '(', ')');
+    found.push({ at: match.index + match[0].indexOf('catch'), end, kind: 'handler', header: '.catch(', body: code.slice(open + 1, end) });
+  }
+  // The nth catch with the same header text is the same catch on both sides of an edit that keeps its header.
+  const seen = new Map();
+  for (const entry of found.sort((a, b) => a.at - b.at)) {
+    const header = `${entry.kind}:${entry.header.replace(/\s+/gu, ' ')}`;
+    seen.set(header, (seen.get(header) ?? 0) + 1);
+    entry.identity = `${header}#${seen.get(header)}`;
   }
   return found;
+}
+
+/** Whether a catch body neither throws nor writes a line. */
+function silent(found) {
+  return !/\bthrow\b/u.test(found.body) && !LOGS.test(found.body);
+}
+
+/** A catch body with its whitespace collapsed, so a reindented old catch still matches itself. */
+function bodyKey(found) {
+  return found.body.replace(/\s+/gu, ' ').trim();
 }
 
 /** The offset of the bracket that closes the one at `open`, or the end of the code. */
@@ -237,13 +256,23 @@ const CHECKS = {
       .filter(([path]) => !tests.some((text) => text.includes(path.split('/').pop().replace(/\.[cm]?js$/u, ''))))
       .map(([path]) => ({ path, line: 1, text: 'is a new gate or check, and no test in this change runs it with no data to show it fails closed' }));
   },
-  /** A catch the change adds that neither throws nor writes a line. */
+  /**
+   * A catch the change adds, or edits, that neither throws nor writes a line. Why edits count: rewriting an existing
+   * catch's body into a silent fallback introduces the silence even though its header line is unchanged (#806 review).
+   * A catch matched to its earlier self (same header, same place among those headers) that was already silent with
+   * the same body stays old debt.
+   */
   'silent-catch': (root, range, { diff }) => [...diff].filter(([path, file]) => SCRIPT.test(path) && !TEST_FILE.test(path) && file.added.length)
     .flatMap(([path, file]) => {
       const source = textAt(root, range.head, path) ?? '';
-      const added = new Set(file.added.map((entry) => entry.line));
-      return catches(source).map((found) => ({ ...found, line: lineAt(source, found.at) }))
-        .filter((found) => added.has(found.line) && !/\bthrow\b/u.test(found.body) && !LOGS.test(found.body))
+      const added = file.added.map((entry) => entry.line);
+      const before = new Map(catches(textAt(root, range.base, path) ?? '').map((found) => [found.identity, found]));
+      return catches(source).map((found) => ({ ...found, line: lineAt(source, found.at), last: lineAt(source, found.end) }))
+        .filter((found) => silent(found) && added.some((line) => line >= found.line && line <= found.last))
+        .filter((found) => {
+          const earlier = before.get(found.identity);
+          return added.includes(found.line) || !earlier || !silent(earlier) || bodyKey(earlier) !== bodyKey(found);
+        })
         .map((found) => ({ path, line: found.line, text: `${found.kind === 'clause' ? 'catch' : '.catch handler'} is silent: it neither throws nor logs a line that names its subject` }));
     }),
   /** A throw the change adds that its tests still pass without. */

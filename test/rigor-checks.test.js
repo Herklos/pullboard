@@ -558,3 +558,33 @@ test('rigor reports a silent catch [D1,D3]', () => {
     'src/load.js:13: silent-catch: .catch handler is silent: it neither throws nor logs a line that names its subject',
   ], 'only the added silent catches are named: the old one, the logged one, the rethrow, a string and a test file are not');
 });
+
+test('rigor reports a catch the change made silent [D1,D3]', () => {
+  const start = [
+    'export function settings(read) {',
+    '  try {',
+    '    return read();',
+    '  } catch (error) {',
+    '    console.warn(`settings unreadable: ${error.message}`);',
+    '    return null;',
+    '  }',
+    '}',
+    'export function cached(read) {',
+    '  try {',
+    '    return read();',
+    '  } catch {',
+    '    return {};',
+    '  }',
+    '}',
+    '',
+  ];
+  const repo = qualityRepo('quality-catch-edited', { 'src/settings.js': start.join('\n') });
+  const edited = [...start];
+  edited.splice(4, 2, '    return {};');
+  edited[edited.indexOf('    return {};', 8)] = '      return {};';
+  repo.commit('fix(settings): fall back to defaults', { 'src/settings.js': edited.join('\n') });
+  const breaches = qualityBreaches(repo.root, changeRange(repo.root), { rules: ['silent-catch'] });
+  assert.deepEqual(breaches.map((breach) => breachLine(breach)), [
+    'src/settings.js:4: silent-catch: catch is silent: it neither throws nor logs a line that names its subject',
+  ], 'the catch whose logged body became a silent fallback is named at its header; the old silent catch, only reindented, is not');
+});
