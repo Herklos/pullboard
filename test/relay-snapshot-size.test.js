@@ -464,14 +464,14 @@ function assertFirstPaint(t, first, label) {
 
 /**
  * Hold busy processes on half the cores, as a loaded suite shares the CPU with the runner and Chrome; stop each by its
- * own pid. A machine whose 1-minute load is already at its core count is loaded enough, so no stand-in is added and one
- * line says so: stacking more on it starves the harness rather than measuring the page (#953).
+ * own pid. A machine whose 1-minute load is already at half its core count is loaded enough, so no stand-in is added
+ * and one line says so: stacking more on a busy gate machine starves the harness rather than measuring the page (#953).
  */
 function cpuStandIn(t) {
   const [load] = loadavg();
   const cores = availableParallelism();
-  if (load >= cores) {
-    t.diagnostic(`no CPU stand-in added: the 1-minute load ${load.toFixed(1)} is already at or above ${cores} cores`);
+  if (load >= cores / 2) {
+    t.diagnostic(`no CPU stand-in added: the 1-minute load ${load.toFixed(1)} is already at or above half of ${cores} cores`);
     return { stop() {}, count: 0, load };
   }
   const busy = Array.from({ length: Math.max(1, Math.floor(cores / 2)) },
