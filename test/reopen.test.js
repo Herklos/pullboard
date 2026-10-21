@@ -674,6 +674,7 @@ test('a reopened bar takes the same commit again [V2,V6,H16]', async (t) => {
 
 test('retained main controls builder first refusal during detached review [B13,B5,H16]', t => {
   const box = project();
+  const { commit } = submitFixture(box);
   const configPath = join(box.repo, 'pullboard.json');
   const config = JSON.parse(readFileSync(configPath, 'utf8'));
   config.claim = { reopenFirstRefusalMinutes: 30 };
@@ -681,7 +682,6 @@ test('retained main controls builder first refusal during detached review [B13,B
   box.git(box.repo, 'add', 'pullboard.json');
   box.git(box.repo, 'commit', '-q', '-m', 'chore: enable the private builder window');
   const main = box.git(box.repo, 'rev-parse', 'HEAD');
-  const { commit } = submitFixture(box);
   assert.equal(JSON.parse(box.git(box.web, 'show', 'HEAD:pullboard.json')).claim, undefined,
     'the candidate does not carry the enabled setting');
   box.git(box.repo, 'switch', '-q', '--detach', commit);
