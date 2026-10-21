@@ -1,13 +1,17 @@
 /** Capture one board's release priority before joining the machine resource transaction [C7,V4]. */
 import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { isAbsolute, join } from 'node:path';
+import { isAbsolute } from 'node:path';
+import { join } from 'node:path';
 import {
   boardId,
   openBoardReadOnly,
   roadmap,
 } from './board.js';
-import { cleanGitEnvironment, repoInfo } from './git.js';
+import {
+  cleanGitEnvironment,
+  repoInfo,
+} from './git.js';
 
 /**
  * Capture the item's roadmap rank once, without opening or migrating a board for writing.
