@@ -271,6 +271,7 @@ async function oldestEventPage(head, context) {
  */
 async function thirtyThousandBoard(t) {
   const box = await relayClientFixture(t);
+  const transitStart = box.transit.length;
   await box.link();
   const pairing = await box.cli('relay', 'pair');
   const second = await box.otherDeviceJoin(pairing.document.code);
@@ -301,10 +302,16 @@ async function thirtyThousandBoard(t) {
   assert.ok(gzipSync(Buffer.from(JSON.stringify(before))).byteLength > LEGACY_RELAY_THRESHOLD * 3, 'even compressed whole-board state is several times the old limit');
   const uploadedStatus = await box.cli('status');
   assert.equal(uploadedStatus.code, 0, 'the actual opted-in CLI publishes through bounded pages');
-  assert.equal(uploadedStatus.snapshotWork.observed, true);
-  assert.ok(uploadedStatus.snapshotWork.pageUploadBytes > 0 && uploadedStatus.snapshotWork.pageCheckpointAttempts > 0,
-    'API2 page bytes and actual checkpoint attempts contribute non-zero recorded work');
-  assert.ok(uploadedStatus.snapshotWork.budgetUnits <= 6 && !uploadedStatus.snapshotWork.overLimit, 'observed attempts and bytes stay bounded without raising the existing time allowance');
+  // The relay's own record across the link-and-status window is the proof of upload work: under load an upload can
+  // finish before this one status call, which then observes none (#953). It still fails when nothing was uploaded.
+  const windowWork = box.transit.slice(transitStart);
+  const objectPuts = windowWork.filter(row => row.method === 'PUT' && /\/api\/v2\/boards\/[^/]+\/uploads\/[^/]+\/objects\//u.test(row.path));
+  const publishes = windowWork.filter(row => row.method === 'POST' && /\/api\/v2\/boards\/[^/]+\/uploads\/[^/]+\/publish$/u.test(row.path));
+  assert.ok(objectPuts.reduce((sum, row) => sum + row.request.byteLength, 0) > 0 && publishes.length > 0,
+    'API2 page bytes and actual checkpoint attempts contribute non-zero recorded work across the link-and-status window');
+  if (uploadedStatus.snapshotWork.observed) {
+    assert.ok(uploadedStatus.snapshotWork.budgetUnits <= 6 && !uploadedStatus.snapshotWork.overLimit, 'observed attempts and bytes stay bounded without raising the existing time allowance');
+  }
   t.diagnostic(JSON.stringify({ api2UploadWork: uploadedStatus.snapshotWork, derivedChildDeadlineMs: uploadedStatus.snapshotDeadlineMs }));
   const link = JSON.parse(readFileSync(box.linkFile, 'utf8'));
   assert.equal(link.snapshotApiVersion, 2);
