@@ -364,7 +364,7 @@ import { installStep } from './worktree.js';
 import * as infraNotes from './infra-note.js';
 
 export { gateWaitReporter };
-const CHECKOUT_LEASES = new WeakMap();
+export const CHECKOUT_LEASES = new WeakMap();
 const CHECKOUT_BOARD_ONLY = new WeakMap();
 let startupMainTraced = false;
 
@@ -376,7 +376,7 @@ let startupMainTraced = false;
  * @param {string} [revision]
  * @returns {{ status: number, stdout: string, baseline?: string }}
  */
-function coordinatorFile(root, path, revision) {
+export function coordinatorFile(root, path, revision) {
   const commonDir = git(root, ['rev-parse', '--path-format=absolute', '--git-common-dir']);
   const coordinatorRoot = dirname(commonDir);
   const env = { ...gitChildEnv(root), GIT_NO_REPLACE_OBJECTS: '1' };
@@ -677,7 +677,7 @@ export const shellWord = (text) => (/^[\w@%+=:,./-]+$/.test(text) ? text : `'${t
  * @param {string} root
  * @returns {string}
  */
-const cdTo = (root) => `cd ${shellWord(root)} &&`;
+export const cdTo = (root) => `cd ${shellWord(root)} &&`;
 
 /**
  * Verifying from the main checkout files the verdict as the coordinator's (V9). An agent whose
@@ -688,7 +688,7 @@ const cdTo = (root) => `cd ${shellWord(root)} &&`;
  * @param {any} board
  * @param {any} values
  */
-function checkMainVerifier(ctx, board, values) {
+export function checkMainVerifier(ctx, board, values) {
   if (values.as !== undefined && values.as !== COORDINATOR) throw new Refused('USAGE', '--as takes one value: coordinator');
   if (!ctx.info.isMain) {
     if (values.as) throw new Refused('USAGE', '--as coordinator works only in the main checkout; here you are the agent this worktree joined as');
@@ -1222,7 +1222,7 @@ function displayedRefusal(io, error) {
 }
 
 /** Label the holder at the start of a generated wait reason without rewriting its quoted reason. */
-function displayedWait(reason, agents, config) {
+export function displayedWait(reason, agents, config) {
   return reason.replace(/^(\S+)( holds the )/, (_, id, rest) => `${agentDisplayName(agents, config, id)}${rest}`)
     .replace(/^(#\d+ is held by )(\S+)(: )/, (_, before, id, after) => `${before}${agentDisplayName(agents, config, id)}${after}`);
 }
@@ -1252,7 +1252,7 @@ function warmFiles(ctx, board, me) {
  * @param {string} root
  * @returns {string[]}
  */
-function dirtyFiles(root) {
+export function dirtyFiles(root) {
   return tryGit(root, ['status', '--porcelain', '--untracked-files=all']).stdout.split('\n').filter(Boolean).map((line) => line.slice(3));
 }
 
@@ -1267,7 +1267,7 @@ function dirtyFiles(root) {
  * @param {string} to
  * @returns {string[]}
  */
-function filesSince(root, id, from, to) {
+export function filesSince(root, id, from, to) {
   if (!from) return [];
   const others = [`--exclude=refs/pullboard/items/${id}/*`, '--glob=refs/pullboard/items/*'];
   const result = tryGit(root, ['log', '--first-parent', '--no-merges', '--no-renames', '--format=', '--name-only', to, '--not', from, ...others]);
@@ -1286,7 +1286,7 @@ function filesSince(root, id, from, to) {
  * @param {{ ref: string, commit: string } | null} trunk
  * @returns {void}
  */
-function refuseUnverifiedStack(root, board, item, commit, trunk) {
+export function refuseUnverifiedStack(root, board, item, commit, trunk) {
   const trunkRange = trunk?.commit
     ? tryGit(root, ['rev-list', `${trunk.commit}..${commit}`])
     : { status: 1, stdout: '' };
@@ -1305,7 +1305,7 @@ function refuseUnverifiedStack(root, board, item, commit, trunk) {
 }
 
 /** Return the durable outcome only when a recovered move exactly matches its original receipt. */
-function recordedRecovery(board, move) {
+export function recordedRecovery(board, move) {
   const receipt = engineReceipt(board, move.id);
   return receipt?.move === JSON.stringify(move) ? receipt : null;
 }
@@ -1336,10 +1336,10 @@ export const firstLine = (text) => {
 };
 
 /** The next step for an agent holding a claim: build it and submit. */
-const buildNext = (card) => `build #${card.holding[0].item_id}, commit, then pullboard submit ${card.holding[0].item_id}`;
+export const buildNext = (card) => `build #${card.holding[0].item_id}, commit, then pullboard submit ${card.holding[0].item_id}`;
 
 /** The next step for an agent whose work came back: rework it. */
-const reworkNext = (card) => `pullboard claim ${card.sentBack[0].item.item_id}, fix what the verifier found, and submit again`;
+export const reworkNext = (card) => `pullboard claim ${card.sentBack[0].item.item_id}, fix what the verifier found, and submit again`;
 
 /**
  * The coordinator's next step, from the board and the spec (N32): the spec with the person first,
@@ -1350,7 +1350,7 @@ const reworkNext = (card) => `pullboard claim ${card.sentBack[0].item.item_id}, 
  * @param {{ id: string, status: string }[]} rows
  * @returns {string}
  */
-function coordinatorNext(card, rows) {
+export function coordinatorNext(card, rows) {
   if (card.requests.length) return `answer request #${card.requests[0].shout_id}: pullboard answer ${card.requests[0].shout_id} done, or declined <reason>`;
   const live = rows.filter((row) => !['wont', 'retired'].includes(row.status));
   if (!live.length && (rows.length || !card.all.length)) return "turn what the person wants into spec rows with them: the pullboard-decompose skill (pullboard prompt decompose)";
@@ -1399,7 +1399,7 @@ function integrationClaims(root, item, shouts, now) {
 }
 
 /** Check verified, unmerged heads against the trunk without changing a worktree or trusting prose. */
-function verifiedMergeGroups(root, items, shouts, now) {
+export function verifiedMergeGroups(root, items, shouts, now) {
   const groups = { clean: [], conflicts: [], integrating: [] };
   const staleIntegrations = [];
   for (const item of [...items].sort((a, b) => a.item_id - b.item_id)) {
@@ -1425,7 +1425,7 @@ function verifiedMergeGroups(root, items, shouts, now) {
 }
 
 /** Capture coordinator-only decision sections with stable ages and answers from the board. */
-function coordinatorDecisionSections(board, ctx) {
+export function coordinatorDecisionSections(board, ctx) {
   const shouts = store.allShouts(board);
   const openDecisions = store.openDecisions(board, COORDINATOR).map((ask) => ({
     id: ask.shout_id, asker: ask.shout_from, question: ask.shout_text, at: ask.shout_at, age: span(ctx, ask.shout_at),
@@ -1445,7 +1445,7 @@ function coordinatorDecisionSections(board, ctx) {
 }
 
 /** Read and update this checkout's last-run version, returning only newly released headlines. */
-function resumeReleaseNotes(info) {
+export function resumeReleaseNotes(info) {
   const record = join(info.gitDir, 'pullboard-checkout', 'resume-version');
   let previous = '';
   try { previous = readFileSync(record, 'utf8').trim(); } catch { /* First resume in this checkout. */ }
@@ -1480,7 +1480,7 @@ function viewBindComplete(ctx, board) {
 }
 
 /** A separately typed, authenticated reuse also proves that this board's view was opened. */
-function viewSetupComplete(ctx, board) {
+export function viewSetupComplete(ctx, board) {
   if (viewBindComplete(ctx, board)) return true;
   let receipt;
   try { receipt = JSON.parse(readFileSync(join(ctx.info.commonDir, 'pullboard', 'view-reuse.json'), 'utf8')); }
@@ -1493,7 +1493,7 @@ function viewSetupComplete(ctx, board) {
 }
 
 /** Atomically record a successful real view bind, scoped to this board's current setup. */
-function recordViewBind(ctx, board, boundAt) {
+export function recordViewBind(ctx, board, boundAt) {
   const file = join(ctx.info.commonDir, 'pullboard', 'view-bind.json');
   const temporary = file + '.' + randomUUID() + '.tmp';
   const receipt = { type: 'pullboard.view.bound', version: 1, ...setupIdentity(board), boundAt };
@@ -1503,7 +1503,7 @@ function recordViewBind(ctx, board, boundAt) {
 }
 
 /** Record this board's authenticated reuse without claiming that its existing listener bound again. */
-function recordViewReuse(ctx, board, view) {
+export function recordViewReuse(ctx, board, view) {
   const file = join(ctx.info.commonDir, 'pullboard', 'view-reuse.json');
   const temporary = file + '.' + randomUUID() + '.tmp';
   const receipt = { type: 'pullboard.view.reused', version: 1, ...setupIdentity(board),
@@ -1532,7 +1532,7 @@ export function recordSetupState(ctx, identity, state) {
 }
 
 /** Derive the next setup question from the real requirements, config, items and view receipt. */
-function boardSetup(ctx, card, identity) {
+export function boardSetup(ctx, card, identity) {
   const rows = loadSpec(ctx.info.root, ctx.config).rows;
   const approved = rows.filter(row => row.status === 'approved');
   const decisions = withBoard(ctx, (board) => store.rowDecisions(board));
@@ -1592,423 +1592,11 @@ function boardSetup(ctx, card, identity) {
   return current ? { step: current.number, total: 5, ...current, steps } : null;
 }
 
-/**
- * `pullboard resume` (N19): one short card that puts an agent back to work after a fresh start,
- * a restart or a compaction, from the board rather than from a summary.
- *
- * @param {any} io
- * @param {Awaited<ReturnType<typeof keepViewRunning>>} view what keeping the background view running did
- * @returns {number}
- */
-export async function resumeHere(io, view) {
-  const ctx = context(io);
-  await withBoard(ctx, async board => {
-    const me = whoAmI(ctx, board);
-    const observation = scanHealthSentinel(ctx.file, { root: ctx.info.root, config: ctx.config, now: ctx.clock.now() });
-    if (observation) {
-      try { await ordered(ctx, board, 'recordHealthFindings', [{ agentId: me.id, ...observation }]); }
-      catch (error) { if (!(error instanceof Refused) || error.code !== 'HEALTH_SCAN_STALE') throw error; }
-    }
-  });
-  await resumeSentinels({ ctx, withBoard, whoAmI, ordered });
-  const { root, isMain } = ctx.info;
-  const mainRoot = primaryCheckoutRoot(ctx.info);
-  const worktreeConfig = mainRoot ? (isMain ? ctx.config : loadConfig(mainRoot)) : null;
-  let setupScope;
-  let doctrine;
-  const card = withBoard(ctx, (board) => {
-    setupScope = setupIdentity(board);
-    doctrine = agentDoctrine(ctx, board);
-    const me = whoAmI(ctx, board);
-    const projector = verdictProjector(root, board);
-    const all = store.listItems(board, { all: true }).map(projector.project);
-    const pendingMerges = all.filter((item) => item.item_status === 'verified' && !item.item_merged_commit)
-      .map(item => ({ ...item, item_checked_commit: store.checkedLandingCommit(board, item) }));
-    const toMerge = pendingMerges.filter(item => !item.item_verdict_state);
-    const staleVerdicts = pendingMerges.filter(item => item.item_verdict_state);
-    const decisionSections = isMain ? coordinatorDecisionSections(board, ctx) : null;
-    const { shouts = [], ...decisions } = decisionSections ?? {};
-    const needsState = personNeedsState(root, { board, includeRigorUndrafted: me.id === COORDINATOR });
-    return {
-      me,
-      all,
-      needsYou: personNeeds(needsState),
-      ...(me.id === COORDINATOR ? { rigor: { undrafted: needsState.rigorUndrafted } } : {}),
-      ...(decisionSections ? { ...decisions, ...verifiedMergeGroups(root, pendingMerges, shouts, ctx.clock.now().getTime()),
-        flow: proofStats(board, { now: ctx.clock.now().getTime() }).flow } : {}),
-      requests: me.id === COORDINATOR ? store.openRequests(board) : [],
-      holding: all.filter((item) => item.item_status === 'claimed' && item.item_owner === me.id),
-      held: all.filter((item) => item.item_status === 'claimed' && item.item_owner === me.id)
-        .map((item) => ({ item: item.item_id, facts: store.itemThread(board, item.item_id) })),
-      sentBack: all
-        .filter((item) => item.item_status === 'open' && item.item_verdict === 'REJECT' && item.item_built_by === me.id)
-        .map((item) => ({ item, verdict: store.verdictsFor(board, item.item_id).at(-1) })),
-      mainMerges: mainMergesFor(board, all.filter((item) => item.item_status === 'open' && item.item_built_by === me.id)),
-      awaiting: all.filter((item) => item.item_status === 'submitted' && item.item_built_by === me.id),
-      toVerify: all.filter((item) => item.item_status === 'submitted' && item.item_built_by !== me.id),
-      toMerge,
-      staleVerdicts,
-      ...(isMain ? { landingBatches: store.landingBatches(board) } : {}),
-      open: all.filter((item) => item.item_status === 'open'),
-      hold: store.laneHold(board, me.lane),
-      holds: store.laneHolds(board),
-      unread: store.unreadCount(board, me.id),
-      newest: store.peekShouts(board, me.id, 1),
-      ...(me.id === COORDINATOR ? { inbox: coordinatorInbox(board, me.id, decisions.openDecisions ?? store.openDecisions(board, COORDINATOR)) } : {}),
-      agents: store.listAgents(board),
-      viewOpened: viewSetupComplete(ctx, board),
-    };
-  });
-  card.relayProblems = unlinkedRelayProjects();
-  card.hookProblems = unwiredHookProblems(root);
-  card.newWorktreeLocation = mainRoot
-    ? worktreeLocation(mainRoot, worktreeConfig)
-    : unavailableWorktreeLocation();
-  const { me } = card;
-  const name = (id) => agentDisplayName(card.agents, ctx.config, id);
-  card.stale = staleFrozenItems(card.all, loadSpec(root, ctx.config).rows, staleDoctrineRows(ctx, doctrine)).map((item) => ({ ...item, ...staleItemFinding(item) }));
-  if (isMain) {
-    card.staleFollowUps = { count: card.stale.length + card.staleIntegrations.length,
-      list: 'pullboard resume --json', items: card.stale, integrations: card.staleIntegrations };
-    delete card.staleIntegrations;
-    card.reviewQueue = { items: card.toVerify, awaiting: card.awaiting };
-  }
-  const say = (line) => io.say(line);
-  card.doctrineNotes = resumeDoctrineNotes(ctx.info, doctrine);
-  for (const row of card.doctrineNotes) say(`new doctrine ${row.id} — ${row.text}`);
-  const releaseNotes = card.whatsNew = resumeReleaseNotes(ctx.info);
-  for (const note of (releaseNotes?.releases ?? [])) {
-    say(`new in ${note.version} — ${note.headline}: ${note.paragraph}`);
-  }
-  if (releaseNotes?.omitted) say(`${releaseNotes.omitted} earlier release${releaseNotes.omitted === 1 ? '' : 's'} omitted; see the full notes in CHANGELOG.md`);
-  else if (releaseNotes?.releases.length) say('Full release notes: CHANGELOG.md');
-  for (const problem of card.relayProblems) say(problem.message);
-  for (const problem of card.hookProblems) say(`${problem.message}; ${problem.next}`);
-  const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
-  say(`resume: ${me.displayName}${me.family ? ` [family ${me.family}]` : ''}, ${me.lane} lane${isMain ? ', the main checkout' : ''}, at ${root}`);
-  card.view = view;
-  // A view left running needs no line at every session start; a start, a busy port or a failure does.
-  if (view.state !== 'running' && backgroundViewLine(view)) say(backgroundViewLine(view));
-  if (card.inbox) for (const line of coordinatorInboxLines(card.inbox, name, (at) => span(ctx, at), firstLine)) say(line);
-  say(`New agent worktrees: ${card.newWorktreeLocation}`);
-  card.setup = withBoard(ctx, board => withStarterWork(boardSetup(ctx, card, setupScope), { board, me, main: isMain, config: ctx.config, root, seat: ctx.io.callerRole() === 'seat' }));
-  if (!loadSpec(root, ctx.config).rows.length && card.all.length) say('Spec rows are optional; add a requirement later: pullboard spec draft "<text>".');
-  if (card.setup) {
-    say(`Setting up: step ${card.setup.step} of 5`);
-    say(card.setup.question);
-    say(card.setup.personCommand ? `For the person: ${card.setup.personCommand}` : card.setup.waitingOn === 'coordinator-apply' ? `Next: ${card.setup.agentNext}` : `Record the answer: ${card.setup.command}`);
-    if (card.setup.afterAnswer) say(card.setup.afterAnswer);
-    if (card.setup.meanwhile) say(card.setup.meanwhile);
-  }
-  const dirty = dirtyFiles(root).length;
-  if (!isMain) {
-    const branch = tryGit(root, ['rev-parse', '--abbrev-ref', 'HEAD']).stdout || 'HEAD';
-    // Against the main checkout's branch, not its HEAD, which is detached while the coordinator verifies.
-    const mainRef = /^branch (.+)$/m.exec(tryGit(root, ['worktree', 'list', '--porcelain']).stdout.split('\n\n')[0])?.[1];
-    const [behind = 0, ahead = 0] = mainRef ? tryGit(root, ['rev-list', '--left-right', '--count', `${mainRef}...HEAD`]).stdout.split(/\s+/).map(Number) : [];
-    const against = mainRef ? `${ahead} ahead of main, ${behind} behind${behind ? ' (merge main before you submit)' : ''}` : 'main is detached for a verification, so ahead and behind are unknown';
-    say(`branch ${branch}: ${against}${dirty ? `; ${plural(dirty, 'file')} uncommitted` : ''}`);
-  } else if (dirty) {
-    say(`${plural(dirty, 'file')} uncommitted in the main checkout`);
-  }
-  if (isMain) {
-    card.commits = commitOwners(uncommittedSetup(root, ctx.config)?.differ ?? [], [ctx.config.spec, ctx.config.practice], root);
-    for (const line of commitOwnerLines(card.commits)) say(line);
-  }
-  for (const request of card.requests) say(`request #${request.shout_id}: ${request.shout_text}; answer with pullboard answer ${request.shout_id} done, or declined <reason>`);
-  card.decisions = takeDecisionNotices(ctx.info.gitDir, card.held);
-  delete card.held;
-  for (const notice of card.decisions) say(`decision for #${notice.item} ${notice.text}`);
-  for (const item of card.holding) {
-    say(`holding #${item.item_id} ${item.item_title}, lease ${span(ctx, item.item_lease_until)} left${item.item_check ? `; check: ${item.item_check}` : ''}`);
-    const files = briefFiles(item.item_brief);
-    if (files.length) say(`  files: ${files.join(', ')}`);
-  }
-  for (const { item, verdict } of card.sentBack) {
-    say(`sent back: #${item.item_id} ${verdict ? `${verdict.verdict_reason} by ${name(verdict.verdict_by)}: ${firstLine(verdict.verdict_note)}` : 'rejected'}`);
-  }
-  for (const { item, merge } of card.mainMerges) say(mainMergeLines(item, merge, name).join('; '));
-  if (isMain && card.staleFollowUps.count) say(`${plural(card.staleFollowUps.count, 'stale follow-up')}; list them with ${card.staleFollowUps.list}`);
-  else if (!isMain) for (const item of card.stale) say(`stale: ${item.message}; next: ${item.next}`);
-  for (const item of card.staleVerdicts) say(staleVerdictRefusal(item, item.item_verdict_state).message);
-  if (card.awaiting.length) say(`awaiting a verdict: ${card.awaiting.map((item) => `#${item.item_id} (${span(ctx, item.item_updated_at)})`).join(', ')}`);
-  if (isMain) {
-    for (const batch of card.landingBatches.filter((entry) => !['landed', 'blocked'].includes(entry.state))) say(`landing ${batch.id}: ${batch.state}, owner ${batch.owner}, tip ${batch.tip}; log ${batch.logPath}; next: pullboard land --adopt`);
-    /** Limit each text section; JSON keeps every record for a complete handoff. */
-    const section = (entries, line) => {
-      for (const entry of entries.slice(0, 3)) say(line(entry));
-      if (entries.length > 3) say(`  ${entries.length - 3} more; list them with pullboard resume --json`);
-    };
-    section(card.openDecisions, (ask) => `open decision #${ask.id} from ${name(ask.asker)} (${ask.age}): ${firstLine(ask.question)}`);
-    section(card.recentAnswers, (answer) => `recent decision #${answer.id}: ${name(answer.answeredBy)} answered ${name(answer.asker)} (${answer.age} ago): ${firstLine(answer.answer)}`);
-    if (card.toMerge.length || card.staleVerdicts.length) {
-      const groups = card.verifiedNotMerged;
-      // Conflicts remain useful diagnostics even when the acceptance must be re-reviewed.
-      const freshness = item => item.item_verdict_state ? ' [STALE_VERDICT]' : '';
-      /** Keep merge groups on one line while retaining all entries in JSON. */
-      const listed = (entries, line) => entries.slice(0, 3).map(line).join(', ')
-        + (entries.length > 3 ? `, +${entries.length - 3} more (pullboard resume --json)` : '') || 'none';
-      say(`verified, not merged — merges cleanly: ${listed(groups.clean, (item) => `#${item.item_id} ${firstLine(item.item_title)}${freshness(item)}`)}`);
-      say(`verified, not merged — conflicts: ${listed(groups.conflicts, ({ item, files }) => `#${item.item_id} ${firstLine(item.item_title)} (${files.join(', ') || 'files unavailable'})${freshness(item)}`)}`);
-      say(`verified, not merged — claimed for integration: ${listed(groups.integrating, ({ item, by, at, commit }) => `#${item.item_id} by ${name(by)} at ${at} (${commit.slice(0, 12)})${freshness(item)}`)}`);
-    }
-    section(card.needsYou, (need) => need.kind === 'decision'
-      ? `waiting on the person: #${need.id} from ${need.ref} (${span(ctx, need.at)}): ${firstLine(need.text)}`
-      : `needs the person: ${need.ref}: ${firstLine(need.text)} (${need.what})`);
-    section(card.rigor?.undrafted ?? [], (cause) => `Rigor needs a proved draft: ${cause.key}, items ${cause.items.map(item => `#${item.id}`).join(', ')}; pullboard rigor draft "${cause.key.replaceAll('"', '\\"')}" "<rule>" --check "<command>" --red <commit> --green <commit>`);
-    if (card.toVerify.length) say('review queue:');
-    section(card.toVerify, (item) => `  to verify: #${item.item_id} ${item.item_lane} (${span(ctx, item.item_updated_at)})`);
-    if (card.toMerge.length) say('merge verified work, run the gate, then record each with pullboard merged <id> <commit>');
-    for (const hold of card.holds) say(`held: the ${hold.hold_lane} lane, ${hold.hold_reason}`);
-    const byLane = Object.entries(Map.groupBy(card.open, (item) => item.item_lane)).map(([lane, items]) => `${lane} ${items.length}`);
-    say(`open: ${card.open.length}${byLane.length ? ` (${byLane.join(', ')})` : ''}`);
-  } else if (card.hold) {
-    say(`the ${me.lane} lane is held by ${name(card.hold.hold_by)}: ${card.hold.hold_reason}`);
-  }
-  if (card.unread && !card.inbox) say(`${plural(card.unread, 'unread shout')}; newest from ${name(card.newest[0].shout_from)}: ${firstLine(card.newest[0].shout_text)} (pullboard inbox reads them)`);
-  const inLane = card.open.filter((item) => item.item_lane === me.lane);
-  const isVerified = (id) => card.all.find((other) => other.item_id === Number(id))?.item_status === 'verified';
-  const ready = inLane.filter((item) => !item.item_after || item.item_after.split(',').every(isVerified)).length;
-  let next;
-  if (isMain) next = coordinatorNext(card, loadSpec(root, ctx.config).rows);
-  else if (card.holding.length) next = buildNext(card);
-  else if (card.sentBack.length) next = reworkNext(card);
-  else if (card.hold) next = 'wait for the hold to lift: pullboard next --wait 9 (minutes)';
-  else if (ready) next = `pullboard next (${ready} ready in your lane)`;
-  else if (inLane.length) next = `pullboard next --wait 9 (minutes); ${inLane.length} in your lane ${inLane.length === 1 ? 'waits' : 'wait'} on other work`;
-  else if (card.awaiting.length) next = 'pullboard next --wait 9 (minutes); a rejected item comes back to your lane';
-  else next = 'nothing open in your lane; pullboard next --verify names work you can check';
-  if (card.setup) next = card.setup.agentNext ?? card.setup.command;
-  if (card.commits) next = commitFirst(card.commits, next);
-  if (card.inbox) next = inboxFirst(card.inbox, next);
-  io.result?.({ ...card, root, dirty, next });
-  say(`next: ${next}`);
-  const flowAlert = isMain ? flowAlertLine(card.flow) : null;
-  if (flowAlert) say(flowAlert);
-  return 0;
-}
-
-/**
- * \`pullboard view\` (N26): serve the micro site for every project on this machine until stopped,
- * registering the repo it starts in, and open it in the browser unless asked not to. With --export,
- * write the current board's read-only static snapshot instead, and return its folder.
- *
- * @param {any} io
- * @param {any} values
- * @returns {Promise<number>}
- */
-export async function viewHere(io, values) {
-  if (values.export !== undefined) {
-    if (values.project) throw new Refused('USAGE', 'choose either --project for a live scoped view or --export for a static snapshot');
-    const exported = await exportView(io.cwd, resolve(io.cwd, values.export));
-    io.result?.(exported);
-    io.say(`wrote snapshot ${exported.path}`);
-    return 0;
-  }
-  const projectRequested = Boolean(values.project);
-  const port = values.port === undefined ? (projectRequested ? 0 : defaultViewPort()) : Number(values.port);
-  if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Refused('USAGE', '--port is a number from 0 to 65535; 0 picks a free one');
-  let projectRoot;
-  let scopeCommonDir;
-  let info;
-  try {
-    info = repoInfo(io.cwd);
-    if (projectRequested) {
-      const projects = listApiProjects();
-      const matches = projects.filter((project) => {
-        try { return repoInfo(project.root).commonDir === info.commonDir; }
-        catch { return false; }
-      });
-      if (matches.length !== 1) throw new Refused('PROJECT_NOT_REGISTERED', 'run pullboard view --project inside a registered project repository or linked worktree, or use plain pullboard view for every project');
-      projectRoot = matches[0].root;
-      scopeCommonDir = info.commonDir;
-    } else if (info.isMain && existsSync(join(info.root, CONFIG_FILE))) {
-      await registerProjectAndLink(info.root, new Date(), loadConfig(info.root), io);
-    }
-  } catch (error) {
-    if (projectRequested && error instanceof Refused && error.code !== 'PROJECT_NOT_REGISTERED') {
-      throw new Refused('PROJECT_NOT_REGISTERED', 'run pullboard view --project inside a registered project repository or linked worktree, or use plain pullboard view for every project');
-    }
-    if (!(error instanceof Refused)) throw error;
-    if (projectRequested) throw error;
-  }
-  const internalForeground = process.env.PULLBOARD_VIEW_BACKGROUND_CHILD === '1'
-    || process.env.PULLBOARD_VIEW_FOREGROUND === '1';
-  if (!internalForeground) {
-    const existing = port ? await runningView(port, scopeCommonDir) : null;
-    if (existing) {
-      if (info && existsSync(join(info.root, CONFIG_FILE))) {
-        const ctx = context(io);
-        withBoard(ctx, board => recordViewReuse(ctx, board, existing));
-      }
-      reportView(io, { ...existing, reused: true });
-      return 0;
-    }
-    if (process.env.AI_AGENT !== undefined || !io.physicalStdoutIsTTY) return await launchBackgroundView(io, port, projectRoot);
-  }
-  let view;
-  try {
-    // The adapter override is carried only by the in-process command streams, for private CLI fixtures.
-    view = await (io.serveView ?? serveView)({ port, isMain: codeIsFromMain(), ...(projectRoot ? { projectRoot } : {}) });
-    const sentinel = startServeSentinel({ projectRoot });
-    const boundAt = new Date().toISOString();
-    const closeServer = view.close;
-    view = {
-      ...view,
-      pid: process.pid,
-      boundAt,
-      close: async () => { await sentinel.close(); forgetView(view.port); await closeServer(); },
-    };
-    try {
-      rememberView({ port: view.port, secret: new URL(view.url).searchParams.get('k'), pid: process.pid, boundAt,
-        ...(scopeCommonDir ? { scopeCommonDir } : {}) }, { rememberPort: port === 0 && !scopeCommonDir });
-    } catch (error) {
-      throw new Refused('VIEW_STATE', `could not save the private view session: ${error.message}`);
-    }
-    // Only a successful fresh bind writes this board's typed setup receipt.
-    let info;
-    try { info = repoInfo(io.cwd); }
-    catch (error) { if (!(error instanceof Refused)) throw error; }
-    if (info && existsSync(join(info.root, CONFIG_FILE))) {
-      const ctx = context(io);
-      withBoard(ctx, board => recordViewBind(ctx, board, boundAt));
-    }
-  } catch (error) {
-    if (view) await view.close();
-    if (error instanceof Refused && error.code === 'PORT_BUSY') {
-      // pullboard.dev only looks on the default port, so a busy default names the holder to stop.
-      // The background child is handed --port explicitly, so the default is matched by number.
-      let hosted = false;
-      try { hosted = port !== 0 && port === defaultViewPort(); } catch { /* A malformed override names no default port. */ }
-      error = busyViewPortRefusal(port, hosted);
-    }
-    if (process.env.PULLBOARD_VIEW_BACKGROUND_CHILD === '1' && process.send) {
-      process.send({ type: 'startup-error', code: error.code ?? 'VIEW_START', message: error.message });
-    }
-    throw error;
-  }
-  reportView(io, { ...view, reused: false });
-  if (process.env.PULLBOARD_VIEW_BACKGROUND_CHILD === '1' && process.send) {
-    process.send({ type: 'ready', url: view.url, port: view.port, pid: process.pid, boundAt: view.boundAt });
-  }
-  io.flush?.(0);
-  if (!values['no-open'] && process.env.PULLBOARD_VIEW_BACKGROUND_CHILD !== '1') {
-    const opener = process.platform === 'darwin' ? ['open', [view.url]] : process.platform === 'win32' ? ['cmd', ['/c', 'start', '', view.url]] : ['xdg-open', [view.url]];
-    spawn(opener[0], opener[1], { detached: true, stdio: 'ignore' }).on('error', () => {}).unref();
-  }
-  await new Promise((stop) => {
-    process.once('SIGINT', stop);
-    process.once('SIGTERM', stop);
-  });
-  await view.close();
-  return 0;
-}
-
-/**
- * Serve MCP over stdio as this checkout's agent (A9). Stdout carries only the protocol, so the command
- * takes no --json; each tool call runs its own CLI command, with its own relay sync, through main.
- * A person's move never comes through it (P6).
- */
-export async function mcpHere(io, { first, values }) {
-  if (first) throw new Refused('USAGE', 'pullboard mcp takes no arguments; run pullboard mcp from the agent\'s worktree');
-  if (values.json) throw new Refused('USAGE', 'pullboard mcp speaks MCP on stdout; run pullboard mcp without --json');
-  context(io);
-  return serveMcp({ cwd: io.cwd, input: io.stdin, output: io.stdout, log: io.stderr, runCommand: main });
-}
-
-/** Serve API v1 until a shutdown signal, printing its address before waiting (A2). */
-export async function serveHere(io, values) {
-  traceServeStartup('serve-context-start');
-  const ctx = context(io);
-  traceServeStartup('serve-context-ready');
-  const mainRoot = git(ctx.info.root, ['worktree', 'list', '--porcelain']).split('\n')[0].slice('worktree '.length);
-  traceServeStartup('serve-registration-start');
-  await registerProjectAndLink(mainRoot, new Date(), loadConfig(mainRoot), io);
-  traceServeStartup('serve-registration-ready');
-  const port = values.port === undefined ? 0 : Number(values.port);
-  if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Refused('USAGE', '--port is a number from 0 to 65535; use 0 to choose a free one');
-  traceServeStartup('serve-listen-start');
-  const api = await serveApi({ port, runCommand: main, isMain: ctx.allowSchemaUpgrade });
-  traceServeStartup('serve-listen-ready');
-  io.result?.({ url: api.url, port: api.port });
-  io.say(`Pullboard API v1: ${api.url}`);
-  io.say('Only this machine can reach it, with its session secret. Ctrl-C stops it.');
-  io.flush?.(0);
-  traceServeStartup('serve-ready-written');
-  await new Promise((stop) => {
-    const stopped = () => { process.off('SIGINT', stopped); process.off('SIGTERM', stopped); stop(); };
-    process.once('SIGINT', stopped);
-    process.once('SIGTERM', stopped);
-  });
-  await api.close();
-  return 0;
-}
 
 
-/**
- * Make a worktree for a new agent in a lane, beside the main checkout, on its own branch, already
- * joined: one command where a new agent would otherwise copy three with placeholders in them.
- *
- * @param {any} io
- * @param {string | undefined} lane
- * @param {string} route
- * @param {string | null} family
- * @param {string | undefined} model
- * @returns {Promise<number>}
- */
-export async function worktreeFor(io, lane, route, family = null, model) {
-  const ctx = context(io);
-  if (!lane || lane === COORDINATOR || !isLane(ctx.config, lane)) {
-    throw new Refused('NO_LANE', `no lane "${lane ?? ''}"; lanes: ${laneNames(ctx.config).slice(1).join(', ') || 'none yet, declare them in pullboard.json'}`);
-  }
-  if (!store.ROUTES.includes(route)) {
-    throw new Refused('BAD_ROUTE', `route "${route}" is strong (needs a frontier model) or light (any model can build it from the brief)`);
-  }
-  model = requiredModel(model, process.env, `worktree ${shellWord(lane)}${route === 'strong' ? '' : ` --route ${shellWord(route)}`}${family ? ` --family ${shellWord(family)}` : ''}`);
-  const mainRoot = primaryCheckoutRoot(ctx.info);
-  if (!mainRoot) throw new Refused('NO_POLICY', 'the primary checkout cannot be proven from Git metadata or the read-only project registry; restore the registry and retry');
-  const mainConfig = loadConfig(mainRoot);
-  refuseUncommittedSetup(mainRoot, mainConfig);
-  const pathFor = (n) => mainConfig.worktrees === 'inside'
-    ? join(mainRoot, '.claude', 'worktrees', `${lane}-${n}`)
-    : join(dirname(mainRoot), `${basename(mainRoot)}-${lane}-${n}`);
-  const isTaken = (n) => existsSync(pathFor(n)) || tryGit(mainRoot, ['rev-parse', '--verify', '--quiet', `refs/heads/${lane}/${n}`]).status === 0;
-  let n = 1;
-  while (isTaken(n)) n += 1;
-  mkdirSync(dirname(pathFor(n)), { recursive: true });
-  git(mainRoot, ['worktree', 'add', '-q', '-b', `${lane}/${n}`, pathFor(n), git(mainRoot, ['rev-parse', 'HEAD'])]);
-  const root = git(pathFor(n), ['rev-parse', '--show-toplevel']);
-  let id;
-  try { id = await withBoard(ctx, async (board) => await ordered(ctx, board, 'register', [{ lane, path: root, route, family, model }])); }
-  catch (error) {
-    const registered = withBoard(ctx, (board) => store.agentAt(board, root));
-    if (registered) {
-      io.err('pullboard: registration is already ordered; the worktree is preserved. Retry enrollment to obtain its credential: ' + cdTo(root) + ' pullboard join ' + lane + ' --model ' + shellWord(model) + (route === 'strong' ? '' : ' --route ' + route) + (family ? ' --family ' + shellWord(family) : ''));
-      throw error;
-    }
-    // Only remove the clean worktree just created here; preserve it if another process changed it.
-    const removed = tryGit(mainRoot, ['worktree', 'remove', root]);
-    if (removed.status === 0) tryGit(mainRoot, ['branch', '-d', `${lane}/${n}`]);
-    else io.err(`pullboard: registration failed; the changed worktree was preserved at ${root}`);
-    throw error;
-  }
-  const displayName = displayAgentName({ agent_id: id, agent_model: model }, ctx.config.agents.names);
-  const modelWord = shellWord(model);
-  const prompt = `You are ${displayName}, in the ${lane} lane. Work only in ${shellWord(root)}, and start every command with ${cdTo(root)}\nModel: ${modelWord}. This worktree joined with --model ${modelWord}. For another worktree using the same model, pass --model ${modelWord} or set PULLBOARD_MODEL=${modelWord}; for a different agent, use that agent's actual model label.\nRead ${shellWord(join(root, 'AGENTS.md'))} first. Its rules govern this work, over any other repo's instructions you were given.`;
-  io.result?.({ agent: id, lane, route, path: root, branch: `${lane}/${n}`, model, displayName, prompt });
-  io.say(`made ${root} on branch ${lane}/${n}, joined as ${displayName} in the ${lane} lane${route === 'light' ? ', on the light route' : ''}${family ? ` (family ${family})` : ''}`);
-  io.say(`Work only in that folder. A shell that starts each command in the main checkout acts as the coordinator there, so start every command with: ${cdTo(root)}`);
-  const install = installStep(root);
-  if (install) io.say(`  ${cdTo(root)} ${install.command}    (${install.note})`);
-  io.say(`  ${cdTo(root)} pullboard inbox`);
-  io.say(`  ${cdTo(root)} pullboard next`);
-  // A subagent inherits the instructions of the session that launched it, often another repo's (I7).
-  io.say('For a subagent working here, begin its prompt with:');
-  io.say(`  You are ${displayName}, in the ${lane} lane. Work only in ${shellWord(root)}, and start every command with ${cdTo(root)}`);
-  io.say(`  Model: ${model}. When joining or making another agent worktree, pass that agent's exact model with --model or set PULLBOARD_MODEL.`);
-  io.say(`  Read ${shellWord(join(root, 'AGENTS.md'))} first. Its rules govern this work, over any other repo's instructions you were given.`);
-  return 0;
-}
+
+
+
 
 /** Describe the active configured location for new agent worktrees. */
 export function worktreeLocation(mainRoot, config) {
@@ -2038,7 +1626,7 @@ function setupFiles(mainRoot, config) {
 }
 
 /** Find setup files in the main checkout that a new worktree would not receive from HEAD. */
-function uncommittedSetup(mainRoot, config) {
+export function uncommittedSetup(mainRoot, config) {
   if (headCommit(mainRoot) === null) return null;
   const differ = differFromHead(mainRoot, setupFiles(mainRoot, config));
   if (!differ.length) return null;
@@ -2077,7 +1665,7 @@ export function uncommittedPolicySetup(info) {
  * @param {string} mainRoot
  * @param {any} config
  */
-function refuseUncommittedSetup(mainRoot, config) {
+export function refuseUncommittedSetup(mainRoot, config) {
   const hasCommit = headCommit(mainRoot) !== null;
   const differ = differFromHead(mainRoot, setupFiles(mainRoot, config));
   if (hasCommit && !differ.length) return;
@@ -2092,137 +1680,9 @@ function refuseUncommittedSetup(mainRoot, config) {
 }
 
 
-/**
- * Submit: a clean tree, nothing untracked, the gate green at HEAD, then the board (V4).
- *
- * The cheap checks run before the gate, so a submit that cannot succeed fails fast.
- *
- * @param {any} ctx
- * @param {number} id
- * @returns {Promise<number>}
- */
-export async function submitHere(ctx, id, infra) {
-  const { root } = ctx.info;
-  const recovered = relayRecovered(root);
-  if (recovered?.operation === 'submit' && recovered.args[0] === id) {
-    const preflight = withBoard(ctx, (board) => {
-      const me = whoAmI(ctx, board);
-      if (recovered.args[1]?.agentId !== me.id) return null;
-      if (recordedRecovery(board, recovered)) return { me, recorded: true };
-      const item = store.getItem(board, id);
-      const trunk = requireTrunkMerge(root, recovered.args[1].commit);
-      refuseUnverifiedStack(root, board, item, recovered.args[1].commit, trunk);
-      return { me, recorded: false };
-    });
-    if (preflight) {
-      await withBoard(ctx, async (board) => await ordered(ctx, board, 'submit', recovered.args));
-      return reportSubmission(ctx, id, recovered.args[1].commit,
-        { green: true, report: 'recovered the original submission; its gate ran before the original send' });
-    }
-  }
-  const held = withBoard(ctx, (board) => {
-    const me = whoAmI(ctx, board);
-    const item = store.getItem(board, id);
-    seatCheckout.refuseHeldElsewhere(ctx.info, store.listAgents(board), item, 'submit');
-    if (item.item_status !== 'claimed' || item.item_owner !== me.id) throw new Refused('NOT_YOURS', 'claim this item before submitting it');
-    const correction = store.pendingRefreezeProblem(board, id);
-    if (correction) throw correction;
-    return item;
-  });
-  const policy = itemPolicy(root, held);
-  const acceptedMain = mainPolicy(root);
-  ctx = { ...ctx, config: policy.config };
-  withBoard(ctx, (board) => refuseProvesNothing(() => acceptedMain.config, board, store.getItem(board, id)));
-  const dependencies = withBoard(ctx, board => dependencySnapshots(board.db, held));
-  submissionPaths(root, held, headCommit(root), { mainCommit: acceptedMain.commit, dependencies });
-  const { me, claimHead } = withBoard(ctx, (board) => {
-    const who = whoAmI(ctx, board);
-    const item = store.getItem(board, id);
-    if (item.item_status !== 'claimed' || item.item_owner !== who.id) {
-      throw new Refused('NOT_YOURS', `item #${id} is not claimed by you; claim it first`);
-    }
-    // A bar that moved since claim can get no verdict (V3), so say so now, not after a verifier's run (V11).
-    // A cited row taken out of force (retired, wont) cannot be frozen at all, and says so too.
-    if (item.item_frozen_digest) {
-      let digest = null;
-      let unusable = '';
-      try {
-        digest = freezer(ctx, { board })(item).digest;
-      } catch (error) {
-        if (!(error instanceof Refused) || error.code === 'A5_GRAMMAR_VERSION') throw error;
-        unusable = error.message.replace(/^\[\w+\] /, '').split(';')[0];
-      }
-      if (digest !== item.item_frozen_digest) {
-        const step = unusable
-          ? `the coordinator either restores the row and runs pullboard refreeze ${id}, or withdraws #${id}`
-          : `${who.id === COORDINATOR ? '' : 'the coordinator runs '}pullboard refreeze ${id}, then you claim it and submit again`;
-        throw new Refused('CRITERIA_CHANGED', `the spec rows #${id} cites changed after it was claimed${unusable ? ` (${unusable})` : ''}, so no verifier could judge it; ${step}`);
-      }
-    }
-    return { me: who, claimHead: item.item_claim_head };
-  });
-  if (!isClean(root)) throw new Refused('DIRTY', 'commit your changes first; the gate must check what you submit');
-  const stray = untracked(root);
-  if (stray.length) throw new Refused('UNTRACKED', `commit or ignore ${stray.length} untracked file(s), e.g. ${stray[0]}`);
-  const commit = headCommit(root);
-  if (!commit) throw new Refused('NO_COMMIT', 'nothing committed yet');
-  withBoard(ctx, (board) => submitPreflight(board, id, { agentId: me.id, commit, tree: headTree(root) ?? '' }));
-  const trunk = requireTrunkMerge(root, commit);
-  withBoard(ctx, (board) => refuseUnverifiedStack(root, board, held, commit, trunk));
-  machineNameProblems(root, `${acceptedMain.commit}..${commit}`, { refuse: acceptedMain.config.commits.noHostName === true, say: (line) => ctx.io.say(line) });
-  const infraRecord = infraNotes.infraNote({ root, claimHead, files: filesSince(root, id, claimHead, commit), gates: [ctx.config.gate, acceptedMain.config.gate], infra, requireInfraNote: acceptedMain.config.submit.requireInfraNote });
-  // Doctrine counts only fall: accepted main's rules, at this exact commit (D1). No rule, no change.
-  const doctrine = hasSubmitRules(root, acceptedMain.commit, acceptedMain.config.practice)
-    ? await withGateSlot(root, () => holdDoctrine(root, { mainCommit: acceptedMain.commit, commit, practice: acceptedMain.config.practice, timeoutMs: acceptedMain.config.check?.timeoutMs }),
-      { itemCheck: true, agent: me.id, item: String(id), kind: 'doctrine', onWait: queuedItemLease(ctx, held, me.id, 'build'), onReceipt: (receipt) => ctx.io.say(`doctrine hold ${gateReceipt.receiptLine(receipt)}`) })
-    : [];
-  for (const rule of doctrine) ctx.io.say(`doctrine: ${ruleLine(rule)}`);
-  // Every submit proves its frozen check and reachable tests anew on this exact commit (V4,V16).
-  // Empty frozen gates adopt accepted main setup; only a full fallback may stamp its tree.
-  const submitConfig = { ...ctx.config, gate: ctx.config.gate.trim() ? ctx.config.gate : acceptedMain.config.gate, submitGate: acceptedMain.config.submitGate, staticChecks: acceptedMain.config.staticChecks,
-    submitInvariants: acceptedMain.config.submitInvariants,
-    // The accepted project runner interprets its current invariant files; candidate config cannot replace it.
-    ...(acceptedMain.config.submitInvariants.length ? { affectedTests: acceptedMain.config.affectedTests } : {}) };
-  const gate = await runSubmitGate(root, submitConfig, { base: claimHead, trunk: acceptedMain.commit, check: frozenCheck(held), agent: me.id, item: String(id), onWait: queuedItemLease(ctx, held, me.id, 'build'), onBrowserFallback: browserAdmissionReporter(ctx.io, ctx.io.relayJson),
-    onFailure: nativeFlakes.observer(ctx, { kind: 'submit', main: acceptedMain.commit, config: submitConfig }, { ordered, withBoard, resourceAgent }) });
-  // Only the person's live waivers can pass a red proof, failure by failure; the item's own check is never waived [B3].
-  const waived = !gate.isGreen && gate.check?.green ? withBoard(ctx, (board) => waivedFailures(board, accountedFailures(gate, root))) : null;
-  if (!gate.isGreen && !waived) {
-    const message = `the submission proof is red at ${commit.slice(0, 12)}; fix it, commit, submit again. ${submitGateReport(gate)}`;
-    // No submission can follow this verdict. Read-only main comparisons must not retain the seat's write lease.
-    CHECKOUT_LEASES.get(ctx.io)?.release();
-    CHECKOUT_LEASES.delete(ctx.io);
-    let comparison = { main: null, files: [], unavailable: 'main comparison could not be completed' };
-    try { comparison = await compareMainFailures(root, gate.profile, gateWaitReporter(ctx.io), gate.output); } catch { /* Keep the original gate refusal if main evidence is unavailable. */ }
-    const mainNote = withBoard(ctx, board => mainRedMessage(root, board, gate.profile, comparison));
-    throw new Refused('GATE_RED', `${message}${mainNote ? `\n${mainNote}` : ''}`, 'fix the reported test or gate, commit the change, and run pullboard submit <id> again');
-  }
-  if (headCommit(root) !== commit || !isClean(root)) {
-    throw new Refused(
-      'MOVED_DURING_GATE',
-      `when the gate ended, HEAD or a tracked file differed from ${commit.slice(0, 12)}, the commit it started on, so the gate did not end on what you would submit; leave the worktree alone until the gate finishes, then submit again`,
-    );
-  }
-  const currentTrunk = requireTrunkMerge(root, commit); // The trunk may have moved while the gate ran.
-  const waivedLines = waived ? waived.map(waiverLine) : [];
-  await withBoard(ctx, async (board) => {
-    refuseUnverifiedStack(root, board, store.getItem(board, id), commit, currentTrunk);
-    // The waived run is written to the item's thread before the submission, so no waived proof reads as green.
-    if (waived) await ordered(ctx, board, 'appendFact', [id, { agentId: me.id, kind: 'measurement', text: `submission proof at ${commit.slice(0, 12)} was red and is recorded as waived, not green; every failure is covered by a live person waiver:\n${waivedLines.join('\n')}` }]);
-    return await ordered(ctx, board, 'submit', [id, { agentId: me.id, commit, tree: headTree(root) ?? '', files: filesSince(root, id, claimHead, commit), policyCommit: acceptedMain.commit, ...(infraRecord ? { infra: infraRecord } : {}),
-      submissionProof: { version: 1, files: gate.files, full: gate.full, deferred: gate.deferred, reason: gate.reason },
-      ...(gate.deferred ? { note: 'full suite deferred to the landing gate' } : {}) }]);
-  });
-  const report = waived
-    ? `submission proof waived, not green: ${waived.length} failure(s), each covered by a live person waiver; the whole output is in ${gate.log}\n${waivedLines.join('\n')}`
-    : submitGateReport(gate);
-  return reportSubmission(ctx, id, commit, { green: gate.isGreen, report, files: gate.files, full: gate.full, deferred: gate.deferred, deferFullFallback: gate.deferFullFallback, reason: gate.reason, check: gate.check,
-    log: gate.log, profile: gate.profile, profilePath: gate.profilePath, proofLog: gate.proofLog, proofProfilePath: gate.proofProfilePath,
-    ...(waived ? { waived: waived.map(({ file, name, waiver }) => ({ file, name, waiver: waiver.id, reason: waiver.reason, until: waiver.until })) } : {}) }, doctrine);
-}
 
 /** Report and pin the original submitted commit, including a recovered acknowledged outcome. */
-function reportSubmission(ctx, id, commit, gate, doctrine = []) {
+export function reportSubmission(ctx, id, commit, gate, doctrine = []) {
   const { root } = ctx.info;
   const pin = `refs/pullboard/items/${id}/${commit.slice(0, 12)}`;
   git(root, ['update-ref', pin, commit]);
@@ -2367,140 +1827,6 @@ export async function addBlueprint(ctx, board, me, blueprint, { report = true, r
   return summary;
 }
 
-/**
- * Verify from this checkout (V3, V7): the submitted commit must be here, at or under HEAD, and the
- * criterion is re-read from the spec, so a verdict is never given against a moved bar.
- *
- * @param {any} ctx
- * @param {number} id
- * @param {any} args
- * @returns {Promise<number>}
- */
-export async function verifyHere(ctx, id, { second, values }) {
-  const decision = { accept: 'ACCEPT', reject: 'REJECT' }[String(second ?? '').toLowerCase()];
-  if (!decision) throw new Refused('USAGE', 'pullboard verify <id> accept, or reject --reason CODE --note "..."');
-  const implies = parseImplies(values.implies);
-  const { root } = ctx.info;
-  let verificationProfile = null;
-  let accepted = null;
-  let acceptedLandingCommit = null;
-  /** Record one verdict on the open board. */
-  const decide = async (board) => {
-    checkMainVerifier(ctx, board, values);
-    const me = whoAmI(ctx, board);
-    const recovered = relayRecovered(root);
-    const previous = recovered?.args[1];
-    if (recovered?.operation === 'verify' && recovered.args[0] === id && previous?.agentId === me.id &&
-        previous.decision === decision && previous.reason === values.reason &&
-        previous.note === (textArg(ctx.io, values, 'note') ?? '') && previous.cause === (decision === 'REJECT' ? values.cause : undefined)) {
-      if (decision === 'ACCEPT' && !recordedRecovery(board, recovered)) {
-        const item = store.getItem(board, id);
-        const commit = resolveCommit(root, item.item_commit);
-        if (!commit) throw new Refused('NOT_AT_COMMIT', `check out the submitted commit first: ${cdTo(root)} git switch --detach ${item.item_commit.slice(0, 12)}`);
-        const trunk = requireTrunkMerge(root, commit);
-        refuseUnverifiedStack(root, board, item, commit, trunk);
-      }
-      return await ordered(ctx, board, 'verify', recovered.args);
-    }
-    const item = store.getItem(board, id);
-    itemSessions.refuseSelfSession(ctx.info, item);
-    const reReview = item.item_status === 'verified' && !item.item_merged_commit;
-    const stale = reReview ? verdictProjector(root, board).state(item) : null;
-    if (item.item_status !== 'submitted' && !stale) {
-      throw new Refused('NOT_SUBMITTED', `item #${id} is ${item.item_status}, not submitted`);
-    }
-    // Name an unknown implied item before the frozen check runs, not after it.
-    if (implies) checkImplies(board, implies);
-    const policy = itemPolicy(root, item);
-    ctx = { ...ctx, config: policy.config };
-    const head = headCommit(root) ?? '';
-    const commit = resolveCommit(root, item.item_commit);
-    if (!commit || !contains(root, commit, head)) {
-      throw new Refused('NOT_AT_COMMIT', `check out the submitted commit first: ${cdTo(root)} git switch --detach ${item.item_commit.slice(0, 12)}`);
-    }
-    let digest = 'missing';
-    let check;
-    let review;
-    let unaffectedMove = '';
-    try {
-      digest = freezer(ctx, { board })(item).digest;
-    } catch (error) {
-      if (!(error instanceof Refused) || error.code === 'A5_GRAMMAR_VERSION') throw error;
-    }
-    if (decision === 'ACCEPT') {
-      if (digest !== item.item_frozen_digest) throw new Refused('CRITERIA_CHANGED', 'the criterion changed; ask the coordinator to refreeze this item before checking it');
-      const checkedCommit = reReview ? head : commit;
-      const checkedLabel = reReview ? 'reviewed composition' : 'submitted commit';
-      const composeNow = () => composeReview(root, board, item, checkedCommit, { reReview, head, stale, refuseUnverifiedStack });
-      const admitted = composesAtAdmission(ctx.config) && Boolean(frozenCheck(item));
-      let trunk = null;
-      if (!admitted) ({ trunk, review } = composeNow());
-      const checkedItem = reReview ? { ...item, item_commit: checkedCommit } : item;
-      if (frozenCheck(item)) {
-        const browser = !browserFreeChecksEnabled() || await checkNeedsBrowser(root, frozenCheck(item), { commit: checkedCommit, onFallback: browserAdmissionReporter(ctx.io, ctx.io.relayJson) });
-        // A private checked composition needs this machine's live local gate markers [C7,V4].
-        const shortEligible = Boolean(await explicitCheckFiles(root, frozenCheck(item), { commit: checkedCommit }));
-        check = await withGateSlot(root, async (lease) => { if (admitted) ({ trunk, review } = composeNow()); const ran = await nativeFlakes.verify(ctx, checkedItem, frozenCheck(item), { board, main: trunk.commit, commit: checkedCommit }, { ordered, withBoard, resourceAgent })(lease); return ran.state === 'pass' ? { ...ran, guardNote: guardRevertNote(root, checkedItem, lease) } : ran; }, { browser, remote: false, agent: me.id, item: String(id), kind: 'review', itemCheck: true, shortEligible, onWait: queuedItemLease(ctx, item, me.id, 'review') });
-      } else {
-        check = checkAtCommit(root, checkedItem);
-      }
-      invalidateGitFacts(); // A private check can outlive changes in the reviewer's live checkout.
-      refuseSandboxBlocked(check);
-      verificationProfile = check.profile ?? null;
-      const evidence = check.checked
-        ? `\nlast output lines (up to 40):\n${(check.outputTail ?? '(no output)').split('\n').map((line) => `  ${line}`).join('\n')}\nfull output file: ${check.outputPath ?? `(unavailable${check.outputError ? `: ${check.outputError}` : ''})`}`
-        : '';
-      const checkTimings = timingDigest(check.profile);
-      const timingEvidence = check.profilePath ? `\n${checkTimings}\ntiming profile: ${check.profilePath}` : '';
-      if (check.state === 'unverified') throw new Refused('CHECK_UNVERIFIED', `the frozen ${check.stage} could not be verified at the ${checkedLabel}; restore the install or check environment, then retry verification; output digest:\n${check.report.replace(/^/gm, '  ')}${evidence}${timingEvidence}`);
-      if (check.state === 'red') throw new Refused('CHECK_RED', `the frozen item check is red at the ${checkedLabel} (${check.stage}); check.install may be needed for dependencies; reject with the failing behavior or ask the builder to fix and resubmit; output digest:\n${check.report.replace(/^/gm, '  ')}${evidence}${timingEvidence}`);
-      const receipt = store.events(board, { itemId: id }).filter(event => event.event_kind === 'submit').map(event => JSON.parse(event.event_detail)).find(event => event.commit === commit);
-      submissionPaths(root, item, commit, { mainCommit: receipt?.policyCommit, dependencies: dependencySnapshots(board.db, item) });
-      const currentTrunk = requireTrunkMerge(root, checkedCommit); // Re-read after the frozen check, before accepting.
-      // With verify.unrelatedTrunkMoves on, a move through commits that touch nothing this review read keeps its verdict (#928).
-      const judged = currentTrunk.commit === trunk.commit || ctx.config.verify.unrelatedTrunkMoves !== true ? null
-        : await judgeTrunkMove(root, { from: trunk.commit, to: currentTrunk.commit, item, checkedCommit, check: frozenCheck(item) });
-      if (currentTrunk.commit !== trunk.commit && (!judged || judged.overlap)) throw new Refused('VERDICT_TRUNK_MOVED', `main moved from ${trunk.commit} to ${currentTrunk.commit} during review${judged ? `, and the move reaches this review through ${judged.overlap}` : ''}; merge the latest main and re-review the clean composition`);
-      if (judged) unaffectedMove = `\nmain moved during this review through ${judged.moved.map((sha) => sha.slice(0, 12)).join(', ')}, judged unaffected: none of them changes this item's files or a file its check and affected tests read`;
-      if (headCommit(root) !== head || (reReview && (!isClean(root) || untracked(root).length))) {
-        throw new Refused('NOT_AT_COMMIT', 'the reviewed checkout moved during its check; restore the clean reviewed HEAD and retry verification');
-      }
-      refuseUnverifiedStack(root, board, item, checkedCommit, currentTrunk);
-    }
-    review ??= captureVerdictReview(root, board, item, verdictTrunk(root));
-    if (decision === 'ACCEPT') git(root, ['update-ref', `refs/pullboard/items/${id}/${review.head.slice(0, 12)}`, review.head]);
-    return await ordered(ctx, board, 'verify', [id, {
-      agentId: me.id,
-      decision,
-      reason: values.reason,
-      note: (textArg(ctx.io, values, 'note') ?? '') + unaffectedMove + (check?.guardNote ?? ''),
-      ...(decision === 'REJECT' && values.cause !== undefined ? { cause: values.cause } : {}),
-      head,
-      digest,
-      policy: ctx.config.verify.policy,
-      familyPolicy: ctx.config.verify.family,
-      review,
-      ...(decision === 'ACCEPT' ? { check: check.checked ? 'green' : 'none' } : {}),
-      ...(implies ? { implies } : {}),
-    }]);
-  };
-  const result = await withBoard(ctx, async (board) => {
-    const verdict = await decide(board);
-    if (verdict.decision === 'ACCEPT') {
-      accepted = store.getItem(board, id);
-      acceptedLandingCommit = store.checkedLandingCommit(board, accepted);
-    }
-    return verdict;
-  });
-  ctx.io.result?.({ id, ...result });
-  const verifiedSummary = timingDigest(verificationProfile);
-  const verifiedTiming = result.decision === 'ACCEPT' && verificationProfile && verifiedSummary ? `\n${verifiedSummary}\ntiming profile: ${verificationProfile.profilePath ?? '(not saved)'}` : '';
-  ctx.io.say(result.decision === 'ACCEPT'
-    ? `verified #${id}: ${result.reason}${result.check === 'none' ? '; no frozen check ran' : ''}${verifiedTiming}`
-    : `rejected #${id}: ${result.reason}; it is open again for rework`);
-  if (accepted) ctx.io.say(landNext(ctx.info, accepted, acceptedLandingCommit));
-  return 0;
-}
 
 /**
  * Say the exact command that lands an accepted item in this repo [B3].
@@ -2512,7 +1838,7 @@ export async function verifyHere(ctx, id, { second, values }) {
  * @param {string} [commit] - The exact checked composition the acceptance authorizes.
  * @returns {string}
  */
-function landNext(info, item, commit = item.item_commit) {
+export function landNext(info, item, commit = item.item_commit) {
   const mainRoot = primaryCheckoutRoot(info);
   const branch = mainCheckout(info.root)?.branch ?? '';
   const remote = landingRemote(info.root, branch);
@@ -2584,6 +1910,7 @@ async function nextSeatContext(ctx, board, me, item, seats) {
   let created = false;
   if (!agent) {
     let opened;
+    const { worktreeFor } = await import('./commands/worktree.js');
     await worktreeFor({ ...ctx.io, say: () => {}, result: (value) => { opened = value; } }, item.item_lane, me.route, me.family, me.model);
     agent = store.agentAt(board, opened.path);
     created = true;
@@ -2644,7 +1971,7 @@ export async function nextOnce(ctx, values) {
 
 
 /** Print an unreserved review first, then the build available through an explicit opt-out. */
-function sayReviewOffer(ctx, found) {
+export function sayReviewOffer(ctx, found) {
   const command = `pullboard next --verify ${found.item.item_id}${ctx.info.isMain ? ' --as coordinator' : ''}`;
   const offer = { item: found.item.item_id, command, queue: found.offer.queue, ratio: found.offer.ratio };
   ctx.io.result?.({ item: found.item, review: true, held: false, shared: [], offer, build: found.build });
@@ -2662,7 +1989,7 @@ function sayReviewOffer(ctx, found) {
  *
  * @param {any} ctx
  */
-function refuseWhileBuilding(ctx) {
+export function refuseWhileBuilding(ctx) {
   const building = withBoard(ctx, (board) => {
     const me = whoAmI(ctx, board).id;
     const items = store.listItems(board);
@@ -2672,71 +1999,6 @@ function refuseWhileBuilding(ctx) {
   if (building.length) throw new Refused('REVIEW_NOT_READY', `nothing to review yet; the builder is still working on ${building.join(', ')}`);
 }
 
-/**
- * `pullboard next` (N2): the whole start of an agent's loop in one command. With --wait, it keeps
- * looking until something is free, so an agent blocked on other work needs no polling of its own.
- *
- * @param {any} io
- * @param {any} values
- * @returns {Promise<number>}
- */
-export async function nextHere(io, values) {
-  let ctx = context(io);
-  if (values.build && values.verify) throw new Refused('USAGE', 'choose a build or a review: pullboard next --build or pullboard next --verify');
-  if (values.verifyId !== undefined && !values.verify) {
-    throw new Refused('USAGE', 'give an item id only with --verify: pullboard next --verify <id>');
-  }
-  if (values.verifyId !== undefined) idArg(values.verifyId, 'an item id after --verify');
-  const minutes = values.wait === undefined ? 0 : Number(values.wait);
-  if (!Number.isFinite(minutes) || minutes < 0 || minutes > 240) {
-    throw new Refused('USAGE', '--wait is a number of minutes from 0 to 240');
-  }
-  const deadline = Date.now() + minutes * 60_000;
-  const origin = ctx.info.root;
-  for (;;) {
-    const found = await nextOnce(ctx, values);
-    if (found.context) ctx = found.context;
-    if (found.specMerged) {
-      io.say(`merged main before claiming #${found.specMerged.item}: added spec rows ${found.specMerged.rows.join(', ')}`);
-      ctx = context(io);
-      continue;
-    }
-    if (found.item) {
-      if (found.offer) { sayReviewOffer(ctx, found); return 0; }
-      const item = found.item;
-      const agents = withBoard(ctx, (board) => store.listAgents(board));
-      io.result?.({ item, review: Boolean(values.verify), held: Boolean(found.held), shared: found.shared ?? [], reasons: found.reasons ?? [], ...(found.seat ? { seat: found.seat } : {}) });
-      for (const reason of found.reasons ?? []) io.say(displayedWait(reason, agents, ctx.config));
-      const here = cdTo(ctx.info.root);
-      const as = ctx.info.isMain ? ' --as coordinator' : '';
-      if (values.verify) {
-        sayCheckBaseline(io, item);
-        io.say(`next to verify: #${item.item_id} ${item.item_title}, built by ${agentDisplayName(agents, ctx.config, item.item_built_by)} at ${item.item_commit.slice(0, 12)}`);
-        io.say(`reserved for you until ${item.item_review_until}: another agent's verdict on it is refused until then; pullboard next --verify again renews it`);
-        io.say(`check out exactly that commit, here: ${here} git switch --detach ${item.item_commit}`);
-        io.say(`then: ${here} pullboard verify ${item.item_id} accept${as} --note "how you proved it", or reject${as} --reason CODE --note "what failed"`);
-      } else {
-        if (found.seat && found.seat.path !== origin) io.say(seatCheckout.seatLeadLine(found.seat, item, found.held));
-        if (found.reviewSkipped) io.say(`${reviewQueueLine(ctx, found.reviewSkipped, span)}; explicit build intent recorded with this claim`);
-        io.say(`${found.held ? (found.seat && found.seat.path !== origin ? `${found.seat.agent} holds` : 'you hold') : 'claimed'} #${item.item_id}: ${item.item_title}`);
-        if (found.seat) io.say(`${found.seat.created ? 'opened' : 'work in'} ${found.seat.agent}, ${found.seat.lane} lane: ${here}`);
-        if (found.shared?.length) io.say(`it touches ${found.shared.length === 1 ? 'a file' : `${found.shared.length} files`} you worked in recently: ${found.shared.slice(0, 4).join(', ')}`);
-        if (item.item_criterion) io.say(`criterion: ${item.item_criterion}`);
-        if (item.item_check) io.say(`check: ${item.item_check}   (run it before you submit)`);
-        for (const row of item.item_frozen ? JSON.parse(item.item_frozen).rows : []) io.say(`  ${row.id}: ${row.text}`);
-        sayBrief(io, item.item_brief);
-        io.say(`when it is built and committed: ${here} pullboard submit ${item.item_id}`);
-      }
-      return 0;
-    }
-    if (!found.retry && (found.laneWork || Date.now() >= deadline)) {
-      if (values.verify) refuseWhileBuilding(ctx);
-      const agents = withBoard(ctx, (board) => store.listAgents(board));
-      return refuseNextIdle(io, found.reasons, found.reasons.map((reason) => displayedWait(reason, agents, ctx.config)), { minutes, verify: values.verify, laneWork: found.laneWork });
-    }
-    if (!found.retry) await new Promise((done) => setTimeout(done, 5000));
-  }
-}
 
 /**
  * `pullboard sweep` (N15, N17): run a checker, then file one routed item per file it flags, each
@@ -2875,60 +2137,7 @@ export function browserAdmissionReporter(io, jsonMode = false) {
   };
 }
 
-/** Read or update machine-wide gate capacity. */
-export function settingsCommand(io, { first, second, rest }) {
-  if (!first && !second && !rest.length) {
-    const settings = loadMachineSettings();
-    const queue = gateQueueSettings();
-    // The result names the queue order in effect, defaults included; the file keeps only what was set.
-    const offerAtInit = relayOfferEnabled();
-    const shortSlots = gateShortSlots();
-    io.result?.({ settings: { ...settings, gate: { ...settings.gate, queue: { ...settings.gate?.queue, ...queue }, shortSlots }, relay: { ...settings.relay, offerAtInit } }, memoryFloorMB: memoryFloorMB() });
-    io.say(`gateSlots: ${settings.gateSlots}`);
-    io.say(`browserSlots: ${settings.browserSlots}`);
-    io.say(`gate.queue.reviewsFirst: ${queue.reviewsFirst}${queue.reviewsFirst ? '' : ' (landings first, then arrival order)'}`);
-    io.say(`gate.queue.currentReleaseFirst: ${queue.currentReleaseFirst}${queue.currentReleaseFirst ? '' : ' (release priority is off)'}`);
-    io.say(`gate.queue.agingMinutes: ${queue.agingMinutes}${queue.reviewsFirst || queue.currentReleaseFirst ? '' : ' (used only while reviewsFirst or currentReleaseFirst is true)'}`);
-    io.say(`gate.memoryFloorMB: ${memoryFloorMB() ?? 'off (the gate queue does not wait for memory)'}`);
-    io.say(`view.background: ${settings.view?.background !== false}${settings.view?.background === false ? ' (init and resume leave the view to you)' : ' (init and resume keep pullboard view running for pullboard.dev)'}`);
-    io.say(`relay.offerAtInit: ${offerAtInit}${offerAtInit ? ' (init asks once to share your boards with your phone)' : ' (init stays quiet about sharing)'}`);
-    io.say(`gate.shortSlots: ${shortSlots}${shortSlots ? '' : ' (off; runs that name their test files wait for a gate slot)'}`);
-    return 0;
-  }
-  if (!SETTING_FORMS.includes(first) || !second || rest.length) {
-    throw new Refused('USAGE', 'pullboard settings gateSlots <n> | browserSlots <n> | gate.shortSlots <n>');
-  }
-  if (first === 'gate.shortSlots') {
-    if (!/^(?:0|[1-9]\d*)$/u.test(second) || !Number.isSafeInteger(Number(second))) {
-      throw new Refused('BAD_SHORT_SLOTS', 'gate.shortSlots must be a whole number, 0 or more; run pullboard settings gate.shortSlots <n>');
-    }
-    const settings = setGateShortSlots(Number(second));
-    io.result?.({ settings });
-    io.say(`gate.shortSlots set to ${settings.gate.shortSlots}`);
-    return 0;
-  }
-  if (!/^[1-9]\d*$/u.test(second) || !Number.isSafeInteger(Number(second))) {
-    if (first === 'gateSlots') throw new Refused('USAGE', 'pullboard settings gateSlots <positive integer>');
-    throw new Refused(first === 'browserSlots' ? 'BAD_BROWSER_SLOTS' : 'BAD_GATE_SLOTS', `${first} must be a positive integer; run pullboard settings ${first} <n>`);
-  }
-  const settings = first === 'browserSlots' ? setBrowserSlots(Number(second)) : setGateSlots(Number(second));
-  io.result?.({ settings });
-  io.say(`${first} set to ${settings[first]}`);
-  return 0;
-}
 
-/** Register machine-level SSH capacity without requiring a board identity or a runner account. */
-export function runnerCommand(io, { first, second, rest, values }) {
-  if (first !== 'add' || !second || rest.length || !/^[1-9]\d*$/u.test(values.slots ?? '')
-    || !/^(?:0|[1-9]\d*)$/u.test(values.browser ?? '')) {
-    throw new Refused('USAGE', 'pullboard runner add <ssh-host> --slots <positive integer> --browser <integer from zero through slots>');
-  }
-  const runner = addRunner({ host: second, slots: Number(values.slots), browser: Number(values.browser),
-    ...(values.node !== undefined ? { node: values.node } : {}), ...(values.root !== undefined ? { root: values.root } : {}) });
-  io.result?.({ runner });
-  io.say(`registered runner ${runner.host}: ${runner.slots} slots, ${runner.browser} browser`);
-  return 0;
-}
 
 /**
  * Every spec id something cites (S8): commit headers since the spec's first commit, and every item
@@ -2940,7 +2149,7 @@ export function runnerCommand(io, { first, second, rest, values }) {
  * @param {{ ids: Map<string, string>, since: string | null }} history - this checkout's.
  * @returns {Map<string, string>} Each id, with who cites it.
  */
-function citations(ctx, { ids, since }) {
+export function citations(ctx, { ids, since }) {
   const cited = since ? commitCitations(ctx.info.root, since) : new Map();
   if (!existsSync(ctx.file)) return cited;
   const byItems = new Map();
@@ -2956,7 +2165,7 @@ function citations(ctx, { ids, since }) {
 }
 
 /** Current board evidence, with each item's accepting receipts included once. */
-function specProof(ctx) {
+export function specProof(ctx) {
   if (!existsSync(ctx.file)) return { items: [], verdicts: [] };
   return withBoard(ctx, (board) => {
     const items = store.listItems(board, { all: true });
@@ -2964,359 +2173,7 @@ function specProof(ctx) {
   });
 }
 
-/**
- * The spec commands: reads, sign-offs and person decisions applied by the coordinator.
- *
- * @param {any} io
- * @param {any} args
- * @returns {Promise<number>}
- */
-export async function specCommand(io, { first, second, rest, values }) {
-  const ctx = context(io);
-  const commandFlags = {
-    '--json': ['json'],
-    check: ['json'],
-    view: ['out'],
-    show: [],
-    unmet: ['must'],
-    signoff: ['by', 'note', 'note-file'],
-    signers: ['key', 'by'],
-    draft: ['aim', 'gate', 'section', 'doctrine', 'source'],
-    approve: ['by', 'text'],
-    decline: ['reason'],
-    answer: [],
-    apply: [],
-    fit: ['text', 'reason'],
-  }[first ?? '--json'];
-  if (!commandFlags) throw new Refused('USAGE', 'use pullboard spec --json | check | view | show <id> | unmet [--must] | draft "<text>" | signoff <ids> | approve <ids> | decline <ids> --reason "why" | answer <id> "<choice or text>" | apply');
-  const allowedFlags = [...new Set([...commandFlags, 'json'])];
-  for (const flag of Object.keys(values)) {
-    if (!allowedFlags.includes(flag)) {
-      const next = flag === 'must' ? 'use --must with spec unmet' : 'use a flag accepted by this spec command';
-      throw new Refused('FLAG_NOT_ALLOWED', `spec ${first ?? '--json'} does not take --${flag}; ${next}`);
-    }
-  }
-  if (first === 'fit') {
-    return await withBoard(ctx, async (board) => await fitCommand(ctx, board, null, second ?? 'list', rest, values, { ordered, whoAmI }));
-  }
-  const spec = loadSpec(ctx.info.root, ctx.config);
-  if (!spec.exists) throw new Refused('NO_SPEC', `no ${ctx.config.spec}; run: pullboard init`);
-  const practice = ctx.doctrine;
-  const signoffs = readSignoffs(ctx.info.root);
-  if (first === 'draft') {
-    if (second && /\|\s*gate\s*:/iu.test(second)) {
-      throw new Refused('INLINE_GATE', 'move the gate after the requirement as --gate "<check>"');
-    }
-    if (!second?.trim() || rest.length || /[\r\n|]/u.test(second)) {
-      throw new Refused('USAGE', 'give one nonempty, single-line requirement: pullboard spec draft "<text>"');
-    }
-    if (values.gate !== undefined && (!values.gate.trim() || /[\r\n|]/u.test(values.gate))) {
-      throw new Refused('USAGE', 'give one nonempty, single-line gate without a field separator, or omit --gate to use review');
-    }
-    if (values.doctrine) {
-      if (typeof values.source !== 'string' || !values.source.trim() || /[\r\n|]/u.test(values.source)) {
-        throw new Refused('USAGE', 'a doctrine ruling needs its source; give --source "shout 42" or --source "chat, 2026-10-16"');
-      }
-      withBoard(ctx, (board) => {
-        if (!ctx.info.isMain || whoAmI(ctx, board).id !== COORDINATOR) throw new Refused('COORDINATOR_ONLY', 'only the coordinator proposes standing rulings; ask your coordinator to run spec draft --doctrine --source');
-      });
-      const planned = proposeDoctrine(ctx, values, second, { reserved: (hookRead(ctx, (board) => store.rowDrafts(board)) ?? []).map((draft) => draft.id), write: false });
-      const result = proposeDoctrine(ctx, values, second, { id: (await reserveRow(ctx, { ...planned.row, target: 'doctrine' }, true)).id });
-      io.result?.(result);
-      io.say(result.id);
-      return 0;
-    }
-    if (values.source !== undefined) throw new Refused('FLAG_NOT_ALLOWED', 'spec draft --source belongs to --doctrine; use both when proposing a ruling');
-    const tier = values.aim ? 'aim' : 'must';
-    const plan = draftRow(ctx.info.root, ctx.config, { target: 'spec', text: second.trim(), gate: values.gate?.trim() ?? 'review', tier, section: values.section, write: false,
-      taken: [...(hookRead(ctx, (board) => store.rowDrafts(board)) ?? []).map((draft) => draft.id), ...(ctx.info.isMain ? [] : trunkRowIds(ctx.info.root, primaryCheckoutRoot(ctx.info), ctx.config))] });
-    // A lane cannot write SPEC.md, so its reservation is the draft, cited at once and written by spec apply; the main checkout writes its row now (#878).
-    const entry = await reserveRow(ctx, plan.row, ctx.info.isMain);
-    const { id, row } = ctx.info.isMain ? draftRow(ctx.info.root, ctx.config, { target: 'spec', text: plan.row.text, gate: plan.row.gate, tier, section: values.section, id: entry.id }) : { id: entry.id, row: entry };
-    io.result?.({ id, row });
-    io.say(id);
-    return 0;
-  }
-  if (first === 'approve' || first === 'decline') {
-    requirePersonChannel(io.personChannel);
-    return withBoard(ctx, async (board) => {
-      const me = whoAmI(ctx, board);
-      if (!ctx.info.isMain || me.id !== COORDINATOR) throw new Refused('B26_PERSON_APPROVAL', 'only the person from the main checkout approves or declines rows; use pullboard view for the person to decide');
-      const ids = [second, ...rest].filter(Boolean).flatMap((text) => text.split(/[\s,]+/u)).filter(Boolean);
-      // An approve keeps a pending answer: plain, it approves the answered text; --text says what it replaces.
-      const kept = first === 'approve' ? pendingAnswers(ctx.info.root, ctx.config, ids, store.rowDecisions(board)) : new Map();
-      const decide = { decision: first, reason: values.reason, by: values.by, on: new Date().toISOString(), commit: headCommit(ctx.info.root) ?? '' };
-      const records = values.text === undefined && kept.size ? ids.flatMap((id) => prepareRowDecisions(ctx.info.root, ctx.config, { ...decide, ids: [id], text: kept.get(id)?.text }))
-        : prepareRowDecisions(ctx.info.root, ctx.config, { ...decide, ids, text: values.text });
-      const decisions = await ordered(ctx, board, 'recordRowDecisions', [{ agentId: store.PERSON, channel: io.personChannel ?? 'terminal', decisions: records }]);
-      io.result?.({ decisions });
-      decisions.forEach((record) => {
-        const old = record.kind === 'spec' ? kept.get(record.id) : undefined;
-        const now = decisionAnswer(record);
-        if (old && old.text !== record.text) io.say(`${record.id}: this text replaces the pending answer ${old.answer} with ${now === null ? `"${record.text}"` : `the answer ${now}`}`);
-        io.say(`${record.kind === 'doctrine' ? 'doctrine:' : ''}${record.id}: ${first === 'approve' ? (old && old.text === record.text ? `approved with the answer ${old.answer}` : 'approved') : 'declined'}, pending apply`);
-      });
-      return 0;
-    });
-  }
-  if (first === 'answer') {
-    requirePersonChannel(io.personChannel, process.env, { command: personCommand(primaryCheckoutRoot(ctx.info) ?? ctx.info.root, ['spec', 'answer', second, rest.join(' ')]) });
-    return withBoard(ctx, async (board) => {
-      const me = whoAmI(ctx, board);
-      if (!ctx.info.isMain || me.id !== COORDINATOR) throw new Refused('B26_PERSON_APPROVAL', 'only the person answers a pending question, from the main checkout or the view', 'ask the person to answer it in pullboard view, or in their own terminal at the main checkout');
-      const given = rest.join(' ').trim();
-      if (!second || !given || /[\r\n|]/u.test(given)) throw new Refused('USAGE', 'give one row and a one-line answer without a field separator: pullboard spec answer <id> "<choice or text>"');
-      const row = spec.rows.find((entry) => entry.id === second);
-      if (!row) throw new Refused('NO_ROW', `${second} is not a row in ${ctx.config.spec}`, 'list the pending questions with pullboard spec --json, then answer one of them');
-      if (row.status !== 'pending') throw new Refused('SPEC_ANSWER', `${second} is ${row.status}, not a pending question`, `read it with pullboard spec show ${second}; only a pending row takes an answer`);
-      const { text } = answerQuestion(row.text, given, second);
-      const records = prepareRowDecisions(ctx.info.root, ctx.config, { ids: [second], decision: 'approve', text, on: new Date().toISOString(), commit: headCommit(ctx.info.root) ?? '' });
-      const decisions = await ordered(ctx, board, 'recordRowDecisions', [{ agentId: store.PERSON, channel: io.personChannel ?? 'terminal', decisions: records }]);
-      // The answer reported is read back from the signed text, never carried as a field of its own.
-      const answered = decisions.map((record) => ({ ...record, answer: decisionAnswer(record) }));
-      io.result?.({ decisions: answered });
-      answered.forEach((record) => io.say(`${record.id}: answered ${record.answer}, pending apply`));
-      return 0;
-    });
-  }
-  if (first === 'apply') {
-    if (second || rest.length) throw new Refused('USAGE', 'pullboard spec apply takes no ids; it applies current person decisions');
-    return withBoard(ctx, async (board) => {
-      const me = whoAmI(ctx, board);
-      if (!ctx.info.isMain || me.id !== COORDINATOR) throw new Refused('COORDINATOR_ONLY', 'only the coordinator applies row decisions; ask your coordinator to run pullboard spec apply');
-      // A lane's board drafts (#878) reach SPEC.md as draft rows at their own ids; the person approves them there as before.
-      const drafted = pendingRowDrafts(loadSpec(ctx.info.root, ctx.config), store.rowDrafts(board)).map((draft) => draftRow(ctx.info.root, ctx.config, { target: 'spec', text: draft.text, gate: draft.gate, tier: draft.tier, section: /^(.*?)\d+$/u.exec(draft.id)[1], id: draft.id }));
-      drafted.forEach((row) => io.say(`${row.file}: ${row.id} drafted from a lane, for the person to approve`));
-      clashingRowDrafts(loadSpec(ctx.info.root, ctx.config), store.rowDrafts(board)).forEach((draft) => io.say(`${ctx.config.spec}: ${draft.id} holds other text, so the draft by ${draft.by} was not written; shout ${draft.by} to run pullboard spec draft again and cite the new id`));
-      const plan = planRowApply(ctx.info.root, ctx.config, store.rowDecisions(board));
-      writeRowApply(ctx.info.root, plan);
-      let applied;
-      try { applied = await ordered(ctx, board, 'applyRowDecisions', [{ agentId: me.id, events: plan.records.map((record) => record.event) }]); }
-      catch (error) { restoreRowApply(ctx.info.root, plan); throw error; }
-      io.result?.({ applied, files: plan.files.map((file) => file.file) });
-      applied.forEach((record) => io.say(`${record.file}: ${record.id} ${record.decision === 'approve' ? 'approved' : 'wont'}${record.reason ? `: ${record.reason}` : ''}`));
-      if (!applied.length && !drafted.length) io.say('no pending row decisions');
-      else io.say('stage and commit the changed row files and any .pullboard/signoffs.jsonl receipts');
-      return 0;
-    });
-  }
-  if (first === 'check' || first === undefined) {
-    const files = [[ctx.config.spec, spec], ...(practice.exists ? [[practice.name, practice]] : [])];
-    for (const [, parsed] of files) assertRequiredSigners(ctx.info.root, parsed.rows);
-    const collisionFiles = [[ctx.config.spec, spec], ...(practice.repoExists ? [[practice.name, practice.repo]] : [])];
-    const renameBase = collisionFiles.some(([name]) => name === DOCTRINE_FILE)
-      ? legacyDoctrineRenameBase(ctx.info.root, DOCTRINE_FILE)
-      : null;
-    const baselineNotes = new Set();
-    const previousSources = new Map();
-    const previousCounts = new Map(collisionFiles.map(([name]) => {
-      const baselineName = renameBase && name === DOCTRINE_FILE ? LEGACY_DOCTRINE_FILE : name;
-      const previous = name === DOCTRINE_FILE && !renameBase
-        ? { status: 1, stdout: '' }
-        : coordinatorFile(ctx.info.root, baselineName, renameBase ?? undefined);
-      if (previous.baseline) baselineNotes.add(previous.baseline);
-      const rows = previous.status === 0 ? parseSpec(previous.stdout, { strictGrammarVersion: false }).rows : [];
-      previousSources.set(name, rows);
-      const counts = new Map();
-      for (const row of rows) counts.set(row.id, (counts.get(row.id) ?? 0) + 1);
-      return [name, counts];
-    }));
-    const locationsById = new Map();
-    for (const [name, parsed] of collisionFiles) {
-      for (const row of parsed.rows) {
-        const locations = locationsById.get(row.id) ?? [];
-        locations.push({ name, line: row.line });
-        locationsById.set(row.id, locations);
-      }
-    }
-    const collisionFindings = new Map(collisionFiles.map(([name]) => [name, []]));
-    for (const [id, locations] of locationsById) {
-      if (locations.length < 2) continue;
-      const currentCounts = new Map();
-      for (const location of locations) currentCounts.set(location.name, (currentCounts.get(location.name) ?? 0) + 1);
-      const known = [...currentCounts].every(([name, count]) => count <= (previousCounts.get(name)?.get(id) ?? 0));
-      for (let index = 0; index < locations.length; index++) {
-        const location = locations[index];
-        const other = locations[(index + 1) % locations.length];
-        collisionFindings.get(location.name).push({
-          level: known ? 'warning' : 'error', line: location.line, id,
-          message: `${known ? 'known duplicate id' : 'duplicate id'}; also appears at ${other.name}:${other.line}`,
-        });
-      }
-    }
-    let errors = 0;
-    const messages = [...baselineNotes];
-    for (const [name, parsed] of files) {
-      const findings = [
-        ...lintSpec(parsed).filter((finding) => !finding.message.startsWith('duplicate id;')),
-        ...(collisionFindings.get(name) ?? []),
-      ];
-      findings.forEach((finding) => messages.push(`${name}:${finding.line} ${finding.id ?? ''} ${finding.level}: ${finding.message}`.replace('  ', ' ')));
-      const history = parsed === practice ? doctrineHistory(ctx.info.root, name) : committedIds(ctx.info.root, name);
-      const cited = name === ctx.config.spec ? citations(ctx, history) : new Map();
-      const lost = permanenceProblems(parsed === practice ? practice.repo : name === ctx.config.spec ? withRowDrafts(parsed, hookRead(ctx, (board) => store.rowDrafts(board))) : parsed, { committed: history.ids, cited });
-      if (name === ctx.config.spec) {
-        const mainRows = new Set((previousSources.get(name) ?? []).map(row => row.id));
-        for (const problem of lost) {
-          if (mainRows.has(problem.id)) problem.message = 'is present on main but missing from this worktree; run git merge main, then pullboard spec check';
-        }
-        const answered = handAnsweredQuestions(previousSources.get(name) ?? [], parsed.rows, () => hookRead(ctx, (board) => store.rowDecisions(board)) ?? []);
-        lost.push(...answered.map((id) => ({ id, message: io.guidance(`pending question answered by hand; ask the person to run pullboard spec answer ${id} "<choice or text>" and restore the pending row`) })));
-      }
-      lost.forEach((problem) => messages.push(`${name}: ${problem.id} error: ${problem.message}`));
-      const fileErrors = findings.filter((finding) => finding.level === 'error').length + lost.length;
-      errors += fileErrors;
-      messages.push(`${name}: ${parsed.rows.length} rows, ${fileErrors} errors, ${findings.length + lost.length - fileErrors} warnings`);
-    }
-    const unnamed = productProblems(ctx.config, spec);
-    unnamed.forEach((problem) => messages.push(`${ctx.config.spec}: error: ${problem}`));
-    errors += unnamed.length;
-    if (values.json && !errors) {
-      const rows = files.flatMap(([file, parsed]) => parsed.rows.map(({ id, status, tier, text, gate, serves, signers = [], section, line, origin, version, reason, file: source, source: from }) => (
-        { id, status, tier, text, gate, serves, signers, section, line, file: source ?? file,
-          ...(from === undefined ? {} : { source: from }), ...(origin ? { origin, version, reason } : {}) }
-      )));
-      const fit = readFitBatch(ctx.info.commonDir, { isMain: ctx.info.isMain, channel: io.personChannel });
-      io.result({ rows, ...(fit.proposals.length ? { fit: fit.proposals, fitBatch: fit.batch } : {}) });
-    } else messages.forEach((message) => io.say(message));
-    if (!values.json) fitSummary(readFitBatch(ctx.info.commonDir, { isMain: ctx.info.isMain, channel: io.personChannel })).forEach((message) => io.say(message));
-    return errors ? 1 : 0;
-  }
-  if (first === 'signers' && second === 'add') {
-    requirePersonChannel(io.personChannel);
-    const signer = addSigner(ctx.info.root, { by: values.by, key: values.key });
-    io.result?.(signer);
-    io.say(signer.added
-      ? signer.initial
-        ? `added SSH signer ${signer.by}; stage and commit ${signer.path}, .pullboard/first-commit, and .pullboard/signers.initial`
-        : `added SSH signer ${signer.by} to ${signer.path}; commit ${signer.path} and .pullboard/signoffs.jsonl`
-      : `${signer.by} is already listed in ${signer.path}`);
-    return 0;
-  }
-  if (first === 'view') {
-    const out = values.out ? resolve(ctx.io.cwd, values.out) : join(ctx.info.gitDir, 'pullboard', 'spec.html');
-    const html = renderSpecView({
-      title: spec.title,
-      ...withBoard(ctx, board => rowDecisionView(ctx.info.root, ctx.config, store.rowDecisions(board), spec, practice)),
-      signoffs,
-      generatedAt: new Date().toISOString().slice(0, 16).replace('T', ' '),
-      files: { spec: ctx.config.spec, practice: ctx.config.practice },
-    });
-    mkdirSync(dirname(out), { recursive: true });
-    writeFileSync(out, html);
-    io.result?.({ path: out });
-    io.say(`wrote ${out}`);
-    io.say(`open: ${pathToFileURL(out).href}`);
-    return 0;
-  }
-  if (first === 'show') {
-    const doctrineId = second?.startsWith('doctrine:');
-    const parsed = doctrineId ? practice : spec;
-    const id = doctrineId ? second.slice('doctrine:'.length) : second;
-    const source = parsed.rows.find((entry) => entry.id === id);
-    const row = source && withBoard(ctx, (board) => decisionProjection(store.rowDecisions(board), source, doctrineId ? 'doctrine' : 'spec', rowDecisionContext(ctx.info.root, ctx.config)));
-    if (!row) throw new Refused('NO_ROW', `no row ${second ?? ''} in ${ctx.config.spec}`);
-    const standing = standings(parsed.rows, signoffs).get(row.id) ?? { met: [], stale: [] };
-    io.result?.({ row, standing });
-    io.say(`${row.id} [${row.status}${row.tier ? `, ${row.tier}` : ''}] ${row.text}`);
-    if (row.stage) io.say(row.stage);
-    if (row.reason) io.say(`reason: ${row.reason}`);
-    if (row.gate) io.say(`gate: ${row.gate}`);
-    if (row.serves.length) io.say(`serves: ${row.serves.join(', ')}`);
-    if (row.source) io.say(`source: ${row.source}`);
-    io.say(`signed: ${standing.met.map((entry) => `${entry.by} ${entry.on}`).join(', ') || 'no'}${standing.stale.length ? `; stale: ${standing.stale.length}` : ''}`);
-    for (const entry of [...standing.met, ...standing.stale]) if (entry.note) io.say(`note (${entry.by}): ${entry.note}`);
-    return 0;
-  }
-  if (first === 'unmet') {
-    const rows = unmetRows(spec.rows, signoffs, { mustOnly: values.must });
-    const proof = specProof(ctx);
-    const testFiles = citedTestFiles(ctx.info.root);
-    const by = standings(spec.rows, signoffs);
-    io.result?.({ rows: rows.map((row) => ({ ...row, stage: rowStage(by.get(row.id), rowEvidence(ctx.info.root, row.id, { ...proof, testFiles })) })) });
-    rows.forEach((row) => io.say(`${row.id} [${row.tier || 'no tier'}] ${row.text} — ${rowStage(by.get(row.id), rowEvidence(ctx.info.root, row.id, { ...proof, testFiles }))}`));
-    io.say(`${rows.length} approved rows without a current sign-off`);
-    return 0;
-  }
-  if (first === 'signoff') {
-    requirePersonChannel(io.personChannel);
-    const ids = [second, ...rest].filter(Boolean).flatMap((text) => idList(text));
-    if (!ids.length) throw new Refused('USAGE', 'pullboard spec signoff <ids> [--by <principal>] [--note "what was checked"]');
-    const invalid = ids.filter((id) => spec.rows.find((row) => row.id === id)?.status !== 'approved');
-    if (invalid.length) throw new Refused('CANNOT_SIGN', `${invalid.join(', ')}: only approved rows in this spec are signed`);
-    const proof = specProof(ctx);
-    const testFiles = citedTestFiles(ctx.info.root);
-    const evidence = ids.map((id) => ({ id, ...rowEvidence(ctx.info.root, id, { ...proof, testFiles }) }));
-    const missing = evidence.filter((row) => !row.files.length && !row.verified.length).map((row) => row.id);
-    if (missing.length) throw new Refused('NO_EVIDENCE', `${missing.join(', ')} has no evidence; build it or cite its id in a test first`);
-    for (const row of evidence) {
-      io.say(`evidence for ${row.id}:`);
-      if (row.files.length) io.say('  cited by tests (none run by pullboard):');
-      for (const file of row.files) io.say(`    ${file}`);
-      for (const item of row.verified) io.say(`  verified #${item.id}: ${item.note || '(no accepting note)'}`);
-    }
-    const note = textArg(io, values, 'note') ?? '';
-    const by = values.by ?? (hasSignerFile(ctx.info.root) ? defaultPrincipal(ctx.info.root) : '');
-    const count = signOff(ctx.info.root, spec, { ids, by, on: new Date().toISOString(), note, commit: headCommit(ctx.info.root) ?? '' });
-    io.result?.({ count, by, ids, evidence });
-    io.say(`signed ${count} rows as ${by}; commit .pullboard/signoffs.jsonl`);
-    return 0;
-  }
-  throw new Refused('USAGE', 'pullboard spec --json | check | view | show <id> | unmet [--must] | draft "<text>" | signoff <ids> | signers add | approve <ids> | decline <ids> --reason "why" | answer <id> "<choice or text>" | apply');
-}
 
-/**
- * The hooks git runs. In a repo without pullboard.json they pass, so a stray hook never blocks.
- *
- * @param {any} io
- * @param {any} args
- * @returns {Promise<number>}
- */
-export async function hookCommand(io, { first, second }) {
-  const info = repoInfo(io.cwd);
-  let ctx;
-  try {
-    ctx = context(io);
-  } catch (error) {
-    if (error instanceof Refused && error.code === 'NO_CONFIG') return 0;
-    throw error;
-  }
-  let problems = [];
-  if (first === 'pre-commit' || first === 'pre-merge-commit') {
-    applyFixers(info.root, ctx.config.fix).forEach((note) => io.err(`pullboard pre-commit: ${note}`));
-    const agent = info.isMain ? null : hookRead(ctx, (board) => store.agentAt(board, info.root));
-    const landing = hookRead(ctx, (board) => store.landingBatches(board).some((batch) => batch.root === info.root && !['landed', 'blocked'].includes(batch.state)));
-    if (landing) io.caller('coordinator', info.root);
-    else if (agent) io.caller('seat', info.root);
-    problems = preCommitProblems({ root: info.root, isMain: info.isMain || landing, config: ctx.config, agent, boardFile: ctx.file, preMergeHook: first === 'pre-merge-commit', onNotice: (message) => io.err(`pullboard pre-commit: warning: ${message}`) });
-  } else if (first === 'commit-msg') {
-    const message = readFileSync(second ?? '', 'utf8');
-    const spec = withRowDrafts(loadSpec(info.root, ctx.config), hookRead(ctx, (board) => store.rowDrafts(board)));
-    commitCitationWarnings(message, { spec, doctrine: ctx.doctrine })
-      .forEach((warning) => io.say(`pullboard commit-msg: warning: ${warning}`));
-    problems = commitMsgProblems(message, { rules: ctx.config.commits, spec, doctrine: ctx.doctrine });
-  } else if (first === 'pre-push') {
-    const refsText = await readStdin(io.stdin);
-    problems = prePushProblems(info.root, refsText);
-    if (!problems.length) {
-      const landing = pushesTrunk(refsText, trunkRef(info.root));
-      const waived = landing && withBoard(ctx, (board) => store.waivedLandingProof(board, headTree(info.root)));
-      const recordedException = landing && withBoard(ctx, (board) => store.landingBatches(board).some((batch) => batch.proof?.tree === headTree(info.root) && batch.proof.failures?.length));
-      if (waived && isClean(info.root) && !untracked(info.root).length) io.say(`pre-push: exact landing tree covered by live person waivers in batch ${waived.id}; no ordinary green stamp`);
-      else if (recordedException) problems = ['the landing proof has an expired or missing person waiver; ask the person for a new expiring waiver'];
-      else {
-        const gate = await runGate(info.root, ctx.config, { landing, agent: resourceAgent(ctx), onWait: gateWaitReporter(io) });
-        if (gate.isCached) io.say('pre-push: the gate passed on this exact tree; not running it twice');
-        if (!gate.isGreen) problems = [`the gate is red; fix it before pushing. ${gateReport(gate)}`];
-      }
-    }
-  } else {
-    throw new Refused('USAGE', 'pullboard hook pre-commit | pre-merge-commit | commit-msg <file> | pre-push');
-  }
-  if (!problems.length) return 0;
-  io.err(`pullboard ${first}: blocked\n${problems.map((problem) => `  - ${io.guidance(problem)}`).join('\n')}\n${FIX_NOTE}`);
-  return 1;
-}
 
 /**
  * Run one command. Returns the exit code: 0 done, 1 refused, 2 usage.

@@ -311,3 +311,32 @@ test('a declaration counts only in the header, globs expand, and literal URLs re
   const braces = box.commit();
   assert.equal(selectAffectedTests(box.root, { base: after, commit: braces, changed: ['src/actual.js'] }).full, true, 'an unexpandable glob falls back');
 });
+
+test('a discovered command module or engine leaf selects what reads its registry [C7,V4]', (t) => {
+  const box = graph(t);
+  box.put('bin/pullboard.js', "import '../src/cli.js';\n");
+  box.put('src/cli.js', "import './commands/index.js';\nimport './machine.js';\n");
+  box.put('src/commands/index.js', "const modules = (file) => import(new URL(file, import.meta.url).href);\nexport const COMMANDS = { alpha: () => modules('./alpha.js') };\n");
+  box.put('src/commands/alpha.js', 'export function run() { return 0; }\n');
+  box.put('src/machine.js', "import { readFileSync } from 'node:fs';\nexport const ENGINE_VERSION = readFileSync('x-engine.js', 'utf8').length;\n");
+  box.put('src/x-engine.js', 'export const X_ENGINE = 1;\n');
+  box.put('src/unrelated.js', 'export const value = 1;\n');
+  box.put('test/direct-cli.test.js', "const BIN = '../bin/pullboard.js';\n");
+  box.put('test/machine-reader.test.js', "import '../src/machine.js';\n");
+  box.put('test/unrelated.test.js', "import '../src/unrelated.js';\n");
+  const base = box.commit();
+
+  box.put('src/commands/alpha.js', 'export function run() { return 1; }\n');
+  const commandCommit = box.commit();
+  const command = selectAffectedTests(box.root, { base, commit: commandCommit });
+  assert.equal(command.full, false, command.reason);
+  assert.ok(command.files.includes('test/direct-cli.test.js'), 'a changed command module selects the tests that run the CLI');
+  assert.ok(!command.files.includes('test/unrelated.test.js'), 'and nothing unrelated');
+
+  box.put('src/x-engine.js', 'export const X_ENGINE = 2;\n');
+  const engineCommit = box.commit();
+  const engine = selectAffectedTests(box.root, { base: commandCommit, commit: engineCommit });
+  assert.equal(engine.full, false, engine.reason);
+  assert.ok(engine.files.includes('test/machine-reader.test.js'), 'a changed engine leaf selects the tests that import machine.js');
+  assert.ok(!engine.files.includes('test/unrelated.test.js'), 'and nothing unrelated');
+});

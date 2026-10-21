@@ -2,8 +2,10 @@
 import {
   context,
   idArg,
-  submitHere,
 } from '../cli.js';
+import {
+  submitHere,
+} from './submit.js';
 
 /** Run `pullboard done` and return its exit code. */
 export async function run(io, { first, values }) {

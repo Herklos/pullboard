@@ -8,10 +8,12 @@ import {
   freezer,
   nextOnce,
   ordered,
-  submitHere,
   whoAmI,
   withBoard,
 } from '../cli.js';
+import {
+  submitHere,
+} from './submit.js';
 
 /** Run `pullboard run` and return its exit code. */
 export function run(io, { values }) {

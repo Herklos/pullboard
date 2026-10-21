@@ -1,81 +1,21 @@
 /**
- * Every command, one line each, in name order. A command adds its own module under src/commands/ and one line here, so two
- * items adding different commands touch different lines. Modules load on first use, so a command that is not run costs nothing.
+ * Every command, discovered: each src/commands/<name>.js is the pullboard <name> command and exports run. An item
+ * adding a command adds its own new file and no line of any shared one, so two items adding different commands never
+ * conflict, even at the same sorted spot [C7,V4]. Modules load on first use, so a command that is not run costs nothing.
  */
-export const COMMANDS = {
-  add: () => import('./add.js'),
-  answer: () => import('./answer.js'),
-  blueprint: () => import('./blueprint.js'),
-  check: () => import('./check.js'),
-  claim: () => import('./claim.js'),
-  decisions: () => import('./decisions.js'),
-  digest: () => import('./digest.js'),
-  doctor: () => import('./doctor.js'),
-  doctrine: () => import('./doctrine.js'),
-  done: () => import('./done.js'),
-  edit: () => import('./edit.js'),
-  escalate: () => import('./escalate.js'),
-  export: () => import('./export.js'),
-  fact: () => import('./fact.js'),
-  flakes: () => import('./flakes.js'),
-  forget: () => import('./forget.js'),
-  gate: () => import('./gate.js'),
-  health: () => import('./health.js'),
-  help: () => import('./help.js'),
-  hold: () => import('./hold.js'),
-  hook: () => import('./hook.js'),
-  hooks: () => import('./hooks.js'),
-  import: () => import('./import.js'),
-  inbox: () => import('./inbox.js'),
-  init: () => import('./init.js'),
-  join: () => import('./join.js'),
-  land: () => import('./land.js'),
-  lane: () => import('./lane.js'),
-  lanes: () => import('./lanes.js'),
-  ledger: () => import('./ledger.js'),
-  lifecycle: () => import('./lifecycle.js'),
-  list: () => import('./list.js'),
-  log: () => import('./log.js'),
-  mcp: () => import('./mcp.js'),
-  merged: () => import('./merged.js'),
-  milestone: () => import('./milestone.js'),
-  next: () => import('./next.js'),
-  pass: () => import('./pass.js'),
-  prompt: () => import('./prompt.js'),
-  queue: () => import('./queue.js'),
-  refreeze: () => import('./refreeze.js'),
-  relay: () => import('./relay.js'),
-  release: () => import('./release.js'),
-  reopen: () => import('./reopen.js'),
-  resources: () => import('./resources.js'),
-  resume: () => import('./resume.js'),
-  rigor: () => import('./rigor.js'),
-  roadmap: () => import('./roadmap.js'),
-  run: () => import('./run.js'),
-  runner: () => import('./runner.js'),
-  sentinel: () => import('./sentinel.js'),
-  sentinels: () => import('./sentinels.js'),
-  serve: () => import('./serve.js'),
-  settings: () => import('./settings.js'),
-  shout: () => import('./shout.js'),
-  show: () => import('./show.js'),
-  skills: () => import('./skills.js'),
-  spec: () => import('./spec.js'),
-  stats: () => import('./stats.js'),
-  status: () => import('./status.js'),
-  submit: () => import('./submit.js'),
-  sweep: () => import('./sweep.js'),
-  takeover: () => import('./takeover.js'),
-  tour: () => import('./tour.js'),
-  verify: () => import('./verify.js'),
-  version: () => import('./version.js'),
-  view: () => import('./view.js'),
-  watch: () => import('./watch.js'),
-  whoami: () => import('./whoami.js'),
-  why: () => import('./why.js'),
-  withdraw: () => import('./withdraw.js'),
-  worktree: () => import('./worktree.js'),
-};
+import { readdirSync } from 'node:fs';
+
+const FOLDER = new URL('./', import.meta.url);
+
+/** Load one command module by its file name under src/commands/. */
+function loader(file) {
+  return () => import(new URL(file, FOLDER).href);
+}
+
+export const COMMANDS = Object.fromEntries(readdirSync(FOLDER)
+  .filter((file) => file.endsWith('.js') && file !== 'index.js')
+  .sort()
+  .map((file) => [file.slice(0, -'.js'.length), loader(file)]));
 
 /** Commands that run but stay out of help and the result-command list. */
 export const UNLISTED_COMMANDS = ['mcp'];

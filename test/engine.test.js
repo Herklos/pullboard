@@ -1,7 +1,8 @@
+/** @pullboard-test-input source-tree */
 /** @pullboard-test-loads src/engine.js src/machine.js */
 /** Real-SQLite tests for the deterministic, sequence-ordered move engine [H3,H16]. */
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -625,11 +626,13 @@ test('a failed durable receipt rolls back an otherwise successful move and its c
 });
 
 test('the engine version is the highest feature engine [C7,V4]', () => {
-  assert.equal(typeof ENGINE_REGISTRY, 'object', 'src/machine.js declares a registry of feature engines');
   const entries = Object.entries(ENGINE_REGISTRY);
   assert.ok(entries.length > 0, 'the registry names at least one feature engine');
   for (const [name, engine] of entries) assert.ok(Number.isSafeInteger(engine) && engine > 0, `feature ${name} declares a positive whole engine number`);
   assert.equal(ENGINE_VERSION, Math.max(...entries.map(([, engine]) => engine)), 'the engine version is the highest number any feature declares');
-  const keys = entries.map(([name]) => name);
-  assert.deepEqual(keys, [...keys].sort(), 'features are listed in name order, so two items adding different features add lines in different places');
+  const source = new URL('../src/', import.meta.url);
+  const files = readdirSync(source).filter((file) => /-engine\.js$/u.test(file));
+  assert.deepEqual(Object.keys(ENGINE_REGISTRY), files.map((file) => file.slice(0, -'-engine.js'.length)).sort(), 'every src/*-engine.js leaf is a feature engine, discovered by its file name');
+  for (const file of files) assert.match(readFileSync(new URL(file, source), 'utf8'), /^export const [A-Z][A-Z0-9_]*_ENGINE = \d+;$/mu, `${file} declares its one engine constant`);
+  assert.doesNotMatch(readFileSync(new URL('machine.js', source), 'utf8'), /Math\.max\([A-Z_]+ENGINE,/u, 'src/machine.js lists no engine by name');
 });

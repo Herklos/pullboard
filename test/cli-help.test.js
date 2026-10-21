@@ -177,11 +177,12 @@ test('help names come from the command declarations [C7,N37]', async (t) => {
   assert.equal(generated.all, HELP.all, 'a new declaration preserves the full-help bytes');
 
   const original = readFileSync(join(directory, 'cli.js'), 'utf8');
-  const registry = readFileSync(join(directory, 'commands/index.js'), 'utf8');
-  const declaration = /export const COMMANDS = \{/u;
-  assert.match(registry, declaration);
-  const extendedRegistry = registry.replace(declaration, (text) => text + "\n/** A private new command proves help follows actual dispatch declarations. */\n'future-command': () => ({ run: () => 0 }),");
-  const registryUrl = 'data:text/javascript;base64,' + Buffer.from(extendedRegistry).toString('base64');
+  const registryUrl = 'data:text/javascript;base64,' + Buffer.from([
+    `import { COMMANDS as actual, UNLISTED_COMMANDS } from ${JSON.stringify(pathToFileURL(join(directory, 'commands/index.js')).href)};`,
+    "/** A private new command proves help follows actual dispatch declarations. */",
+    "export const COMMANDS = { ...actual, 'future-command': () => ({ run: () => 0 }) };",
+    'export { UNLISTED_COMMANDS };',
+  ].join('\n')).toString('base64');
   const extended = original.replace(/\bfrom (['"])\.\/commands\/index\.js\1/u, 'from ' + JSON.stringify(registryUrl))
     .replace(/\bfrom (['"])(\.[^'"]+)\1/gu, (_match, _quote, path) => 'from ' + JSON.stringify(pathToFileURL(resolve(directory, path)).href));
   const privateCli = await import('data:text/javascript;base64,' + Buffer.from(extended).toString('base64'));
@@ -271,10 +272,8 @@ test('every command comes from its own module [C7,V4]', async () => {
   const registry = await import(pathToFileURL(join(source, 'commands/index.js')).href).catch(() => null);
   assert.ok(registry?.COMMANDS, 'src/commands/index.js registers the commands');
   const names = Object.keys(registry.COMMANDS);
-  assert.deepEqual(names, [...names].sort(), 'the registry lists commands in name order, one line each, so two new commands add lines in different places');
-  const listing = readFileSync(join(source, 'commands/index.js'), 'utf8');
+  assert.deepEqual(names, [...names].sort(), 'the registry lists commands in name order');
   for (const name of names) {
-    assert.match(listing, new RegExp(`^  ${name}: \\(\\) => import\\('\\./${name}\\.js'\\),$`, 'mu'), `${name} is registered by exactly one line`);
     const module = await registry.COMMANDS[name]();
     assert.equal(typeof module.run, 'function', `src/commands/${name}.js exports run`);
   }
@@ -290,4 +289,21 @@ test('every command comes from its own module [C7,V4]', async () => {
     const text = readFileSync(join(source, 'commands', `${file}.js`), 'utf8');
     assert.equal((text.match(/^export (?:async )?function run\(/gmu) ?? []).length, 1, `${file}.js declares one run function`);
   }
+});
+
+test('each command body lives in its own module, not in src/cli.js [C7,V4]', () => {
+  const source = resolve(import.meta.dirname, '../src');
+  const cli = readFileSync(join(source, 'cli.js'), 'utf8');
+  const bodies = {
+    hook: 'hookCommand', mcp: 'mcpHere', next: 'nextHere', resume: 'resumeHere', runner: 'runnerCommand', serve: 'serveHere',
+    settings: 'settingsCommand', spec: 'specCommand', submit: 'submitHere', verify: 'verifyHere', view: 'viewHere', worktree: 'worktreeFor',
+  };
+  const declaration = (name) => new RegExp(`^(?:export )?(?:async )?function ${name}\\(`, 'mu');
+  for (const [command, body] of Object.entries(bodies)) {
+    assert.doesNotMatch(cli, declaration(body), `${body} no longer lives in src/cli.js`);
+    const module = readFileSync(join(source, 'commands', `${command}.js`), 'utf8');
+    assert.match(module, declaration(body), `src/commands/${command}.js holds the ${body} body`);
+  }
+  const done = readFileSync(join(source, 'commands/done.js'), 'utf8');
+  assert.match(done, /from '\.\/submit\.js'/u, 'done shares the submit module rather than keeping a second body');
 });
