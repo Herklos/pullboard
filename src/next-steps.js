@@ -545,6 +545,8 @@ export const NEXT_STEPS = Object.freeze({
   SNAPSHOT_PAGE_MISSING: 'refresh the phone board, or run pullboard relay from its linked computer to restage the missing encrypted pages',
   SNAPSHOT_READ_EXPIRED: 'refresh the phone board to obtain a new read pin, then retry the older-history read',
   SNAPSHOT_UPLOAD_EXPIRED: 'retry the saved upload; the linked CLI starts a fresh upload session without discarding pending data',
+  SPEC_APPROVAL_BASELINE: 'ask the coordinator to restore the original approval baseline from a known-good board export',
+  AGENT_APPROVAL_REQUIRED: 'ask the person to confirm or decline the named row through pullboard view or their own terminal',
   SPEC_ANSWER: 'read the row with pullboard spec show <id>; the person answers a pending question with pullboard spec answer <id> "<choice or text>"',
   SPEC_ANSWER_CHOICES: 'the person approves the exact answered text instead: pullboard spec approve <id> --text "<ask>: <answer>. Choices: <choices>."',
   SPEC_BEHIND_MAIN: 'git merge main',
