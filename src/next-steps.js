@@ -449,6 +449,8 @@ export const NEXT_STEPS = Object.freeze({
   RELAY_BASELINE_UNCERTAIN: 'run the command again when the relay answers; it first checks whether the relay kept the board upload',
   RELAY_BOARD_DELETED: 'keep working locally, or run pullboard relay on to link the board again',
   RELAY_BUSY: 'run the command again after the other worktree finishes sending',
+  RELAY_OUTBOX: 'keep the relay-outbox.sealed file and the board as they are, then ask for help before relinking',
+  RELAY_OUTBOX_PENDING: 'run pullboard status once the relay answers; it sends the queued moves in order first',
   RELAY_CURSOR: 'fetch a consistent snapshot: pullboard relay',
   RELAY_DIVERGED: 'run pullboard relay off, then pullboard relay on to link again from this machine',
   RELAY_KEYCHAIN: 'unlock the system keychain, then run the command again',

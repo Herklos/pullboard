@@ -43,6 +43,7 @@ import {
   applyRelayMove,
   checkpointSequence,
   engineReceipt,
+  executableArgs,
   prepareEngineMove,
   refuseRelayMove,
   requireSupportedEngine,
@@ -93,6 +94,16 @@ import {
   baselineNotAccepted,
   transientRelayFailure,
 } from './relay-move-fallback.js';
+import {
+  earlierMoves,
+  keepRefusal,
+  outboxAhead,
+  outboxEntrySummary,
+  outboxFile,
+  readOutbox,
+  removeOutbox,
+  writeOutbox,
+} from './relay-outbox.js';
 import { Refused } from './refused.js';
 import { refusalFromReceipt } from './recorded-refusal.js';
 import { relaySenderProblem } from './relay-sender.js';
@@ -130,6 +141,7 @@ export const DEFAULT_RELAY = 'https://app.pullboard.dev';
 const LINK_FILES = new WeakMap();
 const STATE_FILES = new WeakMap();
 const MOVE_FALLBACK_NOTICES = new WeakSet();
+const OUTBOX_NOTICES = new WeakSet();
 const KEY_WARNED_COMMANDS = new WeakSet();
 const BASELINE_ATTEMPTS = new WeakMap();
 const BASELINE_NOTICES = new WeakSet();
@@ -441,6 +453,12 @@ function recoverySummary(state) {
   return { pending: skip > 0, skip, next: skip > 0 ? `pullboard relay recover --skip ${skip}` : '' };
 }
 
+/** The queued moves and replay refusals pullboard status shows, when there are any (#922). */
+function outboxFields(state) {
+  return { ...(state?.outbox?.moves?.length ? { outbox: structuredClone(state.outbox.moves) } : {}),
+    ...(state?.outboxRefusals?.length ? { outboxRefusals: structuredClone(state.outboxRefusals) } : {}) };
+}
+
 /** Expose key-free link status; only an explicit link operation includes its pairing carrier. */
 function summary(root, state, { pairing = false } = {}) {
   if (!state) {
@@ -453,8 +471,10 @@ function summary(root, state, { pairing = false } = {}) {
   const oversizedSnapshot = snapshotSize(state);
   return { linked: true, board: state.board, url: state.url, account: state.account ?? '', login: state.login ?? '',
     link: 'https://app.pullboard.dev/#board=' + state.board + fragment,
-    sequence: state.sequence, behind: (state.baselinePause ? behind(root, state) : state.mode === 'ordered' ? Number(Boolean(state.pending)) : behind(root, state)) + Number(Boolean(state.snapshot || state.checkpoint)),
+    sequence: state.sequence, behind: (state.baselinePause ? behind(root, state) : state.mode === 'ordered' ? Number(Boolean(state.pending)) : behind(root, state)) + Number(Boolean(state.snapshot || state.checkpoint))
+      + (state.outbox?.moves?.length ?? 0),
     recovery: recoverySummary(state),
+    ...outboxFields(state),
     ...(relayStorage(state.storage) ? { storage: relayStorage(state.storage) } : {}),
     ...(oversizedSnapshot ? { oversizedSnapshot } : {}),
     ...(state.baselinePause ? { pausedUpload: structuredClone(state.baselinePause) } : {}),
@@ -998,6 +1018,8 @@ function reportRecoveredReply(record, io) {
 
 /** Apply a validated relay prefix with durable, transaction-bound receipts on this replica. */
 async function catchUp(root, file, state, io) {
+  // Queued moves sit on top of this board until the outbox replays; another machine's moves must not land under them.
+  if (outboxAhead(state)) throw new Refused('RELAY_OUTBOX_PENDING', 'this machine holds moves the relay has not ordered yet; run pullboard status to send them first');
   const key = readBoardKey(state.board);
   const after = localRecords(root, appliedSequence);
   let remote;
@@ -1160,6 +1182,169 @@ function keepMoveForLaterBaseline(file, state, error, io) {
   io.err(`pullboard: [${safePauseCode(error)}] the move is saved on this machine; ${error.transportFailure ? `the relay did not answer (${error.transportFailure})` : safePauseMessage(error)}; it goes up inside the board baseline on a later command once the relay answers`);
 }
 
+/** Whether this command may queue a move in the ordered outbox: the board's relay.outbox setting, off by default (#922). */
+function outboxEnabled(io) {
+  try { return io?.relayOutbox?.() === true; } catch { return false; }
+}
+
+/**
+ * Whether a failure on an accepted link may queue the move instead of refusing it (#922): the relay said nothing
+ * definite, and the move needs no relay answer to exist (a registration mints its token there; a person's request
+ * is the phone's to send).
+ */
+function outboxQueueable(state, error, operation, io) {
+  return state.mode === 'ordered' && state.baselineAccepted === true && !state.baselineConflict && !io?.personRequest
+    && !['register', 'ensureCoordinator'].includes(operation) && transientRelayFailure(error) && outboxEnabled(io);
+}
+
+/** The board's relay-applied sequence, read from an exported image. */
+function exportedSequence(native) {
+  return Number(native.tables.board_meta.find((row) => row.meta_key === 'relay_applied_sequence')?.meta_value ?? 0);
+}
+
+/** Keep the key-free outbox summary on the link, or drop it once the outbox is empty. */
+function saveOutboxSummary(file, state, outbox) {
+  if (outbox?.moves.length) state.outbox = { restored: outbox.restored, moves: outbox.moves.map(outboxEntrySummary) };
+  else delete state.outbox;
+  saveLink(file, state);
+}
+
+/**
+ * Queue a move the relay could not take on an accepted link, then make it on this machine (#922).
+ * The first queued move seals the board as the relay last ordered it; the move is written before it is applied,
+ * so a crash between the two leaves it queued and the replay starts from that image anyway. A move this board
+ * refuses is refused now and never queued.
+ */
+async function queueMove(root, file, state, io, { operation, args, command, move, error, applyLocally }) {
+  const key = readBoardKey(state.board);
+  const where = outboxFile(file);
+  const outbox = await readOutbox(where, key, state.board) ?? (() => {
+    const base = localRecords(root, (board) => exportBoard(board));
+    return { version: 1, base, baseSequence: exportedSequence(base), restored: false, moves: [] };
+  })();
+  if (!move) {
+    const sent = withSeatName(root, operation, args);
+    move = localRecords(root, (board) => prepareEngineMove(board, operation, sent));
+    move.actor = relayMoveActor(move) ?? credentialActor(move);
+  }
+  // `after` is the relay sequence this machine had seen: a refusal at replay names the moves ordered since.
+  const entry = { move, intent: operationIntent(operation, args), queuedAt: new Date().toISOString(), after: state.sequence,
+    ...(command ? { command, commandIntent: operationIntent('cli:' + command.cliOperation, command) } : {}) };
+  outbox.moves.push(entry);
+  await writeOutbox(where, key, state.board, outbox);
+  if (state.pending?.move?.id === move.id) delete state.pending;
+  saveOutboxSummary(file, state, outbox);
+  let result;
+  try { result = await applyLocally(); }
+  catch (refusal) {
+    outbox.moves.pop();
+    if (outbox.moves.length) await writeOutbox(where, key, state.board, outbox);
+    else removeOutbox(where);
+    saveOutboxSummary(file, state, outbox);
+    throw refusal;
+  }
+  if (!OUTBOX_NOTICES.has(io)) {
+    OUTBOX_NOTICES.add(io);
+    io.err(`pullboard: [${safePauseCode(error)}] ${error.transportFailure ? `the relay did not answer (${error.transportFailure})` : safePauseMessage(error)}; the move is saved on this machine and waits in the relay outbox (${outbox.moves.length} pending); it goes up in order when the relay answers, and pullboard status lists it`);
+  }
+  return result;
+}
+
+/**
+ * Put the queued moves back on top of the board after a replay stopped part way (#922): seal the board as the relay
+ * has now ordered it, then apply each remaining move here again, so this machine keeps showing them.
+ */
+async function rebaseOutbox(root, file, state, outbox, key) {
+  outbox.base = localRecords(root, (board) => exportBoard(board));
+  outbox.baseSequence = exportedSequence(outbox.base);
+  outbox.restored = false;
+  await writeOutbox(outboxFile(file), key, state.board, outbox);
+  saveOutboxSummary(file, state, outbox);
+  for (const entry of outbox.moves) {
+    localRecords(root, (board) => {
+      try { store.atomic(board, () => store[entry.move.operation](board, ...executableArgs(entry.move, board))); }
+      catch (error) { if (!(error instanceof Refused)) throw error; }
+    });
+  }
+}
+
+/**
+ * Replay the ordered outbox before this machine applies or sends anything else (#922). The board goes back to the
+ * image the relay last ordered, catches up with every other machine's moves, then sends each queued move in order:
+ * a move the relay already holds from a lost reply is not sent twice, and a move refused at replay is reported with
+ * the moves ordered before it. A relay that fails again part way puts the rest back on top and throws its failure.
+ */
+async function flushOutbox(root, file, state, io) {
+  const where = outboxFile(file);
+  if (!state.outbox && !existsSync(where)) return;
+  const key = readBoardKey(state.board);
+  const outbox = await readOutbox(where, key, state.board);
+  if (!outbox?.moves.length) {
+    removeOutbox(where);
+    saveOutboxSummary(file, state, null);
+    return;
+  }
+  try {
+    if (!outbox.restored) {
+      // Probe first: a relay that is still down leaves this machine's board exactly as its person last saw it.
+      try { await request(state, '/api/v1/boards/' + state.board + '/events?after=' + outbox.baseSequence, {}, io); }
+      catch (error) { if (error.code !== 'SNAPSHOT_REQUIRED') throw error; }
+      localRecords(root, (board) => {
+        const cursors = board.db.prepare('SELECT agent_id, agent_last_shout_id FROM agent').all();
+        restoreRelaySnapshot(board, outbox.base, outbox.baseSequence);
+        // Reading shouts is this machine's own progress; the restore keeps the newer read position.
+        const keep = board.db.prepare('UPDATE agent SET agent_last_shout_id = ? WHERE agent_id = ? AND (agent_last_shout_id IS NULL OR agent_last_shout_id < ?)');
+        for (const row of cursors) if (Number.isSafeInteger(row.agent_last_shout_id)) keep.run(row.agent_last_shout_id, row.agent_id, row.agent_last_shout_id);
+      });
+      state.sequence = outbox.baseSequence;
+      outbox.restored = true;
+      await writeOutbox(where, key, state.board, outbox);
+      saveOutboxSummary(file, state, outbox);
+    }
+    await catchUp(root, file, state, io);
+    while (outbox.moves.length) {
+      const entry = outbox.moves[0];
+      const receiptOf = () => localRecords(root, (board) => engineReceipt(board, entry.move.id));
+      let receipt = receiptOf();
+      let sequence = receipt?.sequence;
+      if (!receipt) {
+        await actorTransport(root, file, state, credentialActor(entry.move), io);
+        sequence = state.sequence + 1;
+        const sealed = await sealedRecord(key, entry.move, state, 'move', sequence);
+        const registration = seatReceipt(entry.move, sequence, sealed);
+        state.pending = { move: entry.move, intent: entry.intent, ...(entry.command ? { command: entry.command, commandIntent: entry.commandIntent } : {}),
+          sequence, sealed, ...(registration ? { registration } : {}) };
+        saveLink(file, state);
+        let failure;
+        try { await sendPending(root, file, state, io); } catch (error) { failure = error; }
+        if (failure && !receiptOf()) {
+          if (!['RELAY_UNAVAILABLE', 'RELAY_RESPONSE'].includes(failure.code)) throw failure;
+          try { await catchUp(root, file, state, io); } catch { throw failure; }
+        }
+        receipt = receiptOf();
+        if (!receipt) throw failure ?? new Refused('RELAY_RESPONSE', 'the relay acknowledged a queued move without its replay receipt; run pullboard status to retry the outbox');
+        sequence = receipt.sequence;
+      }
+      if (state.pending?.move?.id === entry.move.id) delete state.pending;
+      if (state.recovered?.move?.id === entry.move.id) delete state.recovered;
+      if (receipt.outcome.error) {
+        const earlier = localRecords(root, (board) => earlierMoves(board, entry, sequence));
+        io.err(`pullboard: ${keepRefusal(state, entry, receipt.outcome.error, earlier)}`);
+      }
+      outbox.moves.shift();
+      if (outbox.moves.length) await writeOutbox(where, key, state.board, outbox);
+      else removeOutbox(where);
+      saveOutboxSummary(file, state, outbox);
+    }
+  } catch (error) {
+    if (outbox.restored && outbox.moves.length) {
+      if (state.pending && outbox.moves.some((entry) => entry.move.id === state.pending.move?.id)) delete state.pending;
+      await rebaseOutbox(root, file, state, outbox, key);
+    }
+    throw error;
+  }
+}
+
 /** Send one board operation before executing it locally, and report its canonical engine result. */
 export async function relayOperation(root, operation, args, io, command, applyLocally) {
   const file = linkFile(root);
@@ -1181,8 +1366,10 @@ export async function relayOperation(root, operation, args, io, command, applyLo
     moves.add(state.board);
     try {
       let ordered;
+      const queue = (error, move) => queueMove(root, file, state, io, { operation, args, command, move, error, applyLocally: applyPausedMoveLocally });
       try { ordered = await ensureOrdered(root, file, state, io); }
       catch (error) {
+        if (outboxQueueable(state, error, operation, io)) return await queue(error);
         // #341: a baseline the relay has not accepted never blocks a move; the move rides in the later baseline.
         if (!baselineNotAccepted(state) || !transientRelayFailure(error)) throw error;
         keepMoveForLaterBaseline(file, state, error, io);
@@ -1192,7 +1379,14 @@ export async function relayOperation(root, operation, args, io, command, applyLo
         if (state.baselinePause) reportBaselinePause(state, io);
         return applyPausedMoveLocally();
       }
-      await catchUp(root, file, state, io);
+      try {
+        // #922: moves queued while the relay was down go up first, in the order they were made.
+        await flushOutbox(root, file, state, io);
+        await catchUp(root, file, state, io);
+      } catch (error) {
+        if (outboxQueueable(state, error, operation, io)) return await queue(error);
+        throw error;
+      }
       if (state.pending) {
         delete state.pending;
         saveLink(file, state);
@@ -1208,28 +1402,34 @@ export async function relayOperation(root, operation, args, io, command, applyLo
         return previousReceipt.outcome.result;
       }
       let move = recoveredMove(root, state, operation, args, command);
-      if (!move) {
-        const sent = withSeatName(root, operation, args);
-        move = localRecords(root, (board) => prepareEngineMove(board, operation, sent, io.personRequestMoveId ? { id: io.personRequestMoveId } : {}));
-        if (io.personRequest) move.personRequest = structuredClone(io.personRequest);
-        const problem = move.personRequest && localRecords(root, board => requestMoveProblem(board, move, { checkExecutorLease: false }));
-        if (problem) throw problem;
-        move.actor = relayMoveActor(move) ?? credentialActor(move);
-        await actorTransport(root, file, state, credentialActor(move), io);
-        const sequence = state.sequence + 1;
-        const sealed = await sealedRecord(readBoardKey(state.board), move, state, 'move', sequence);
-        const registration = seatReceipt(move, sequence, sealed);
-        state.pending = { move, intent: operationIntent(operation, args),
-          ...(command ? { command, commandIntent: operationIntent('cli:' + command.cliOperation, command) } : {}), sequence,
-          sealed, ...(registration ? { registration } : {}) };
-        saveLink(file, state);
-        try { await sendPending(root, file, state, io); }
-        catch (error) {
-          if (!['RELAY_UNAVAILABLE', 'RELAY_RESPONSE'].includes(error.code)) throw error;
-          // A lost acknowledgement can be recovered now without asking the caller to retry side effects.
-          try { await catchUp(root, file, state, io); } catch { throw rememberLostReply(file, state, move.id, error); }
-          if (!localRecords(root, (board) => engineReceipt(board, move.id))) throw rememberLostReply(file, state, move.id, error);
+      try {
+        if (!move) {
+          const sent = withSeatName(root, operation, args);
+          move = localRecords(root, (board) => prepareEngineMove(board, operation, sent, io.personRequestMoveId ? { id: io.personRequestMoveId } : {}));
+          if (io.personRequest) move.personRequest = structuredClone(io.personRequest);
+          const problem = move.personRequest && localRecords(root, board => requestMoveProblem(board, move, { checkExecutorLease: false }));
+          if (problem) throw problem;
+          move.actor = relayMoveActor(move) ?? credentialActor(move);
+          await actorTransport(root, file, state, credentialActor(move), io);
+          const sequence = state.sequence + 1;
+          const sealed = await sealedRecord(readBoardKey(state.board), move, state, 'move', sequence);
+          const registration = seatReceipt(move, sequence, sealed);
+          state.pending = { move, intent: operationIntent(operation, args),
+            ...(command ? { command, commandIntent: operationIntent('cli:' + command.cliOperation, command) } : {}), sequence,
+            sealed, ...(registration ? { registration } : {}) };
+          saveLink(file, state);
+          try { await sendPending(root, file, state, io); }
+          catch (error) {
+            if (!['RELAY_UNAVAILABLE', 'RELAY_RESPONSE'].includes(error.code)) throw error;
+            // A lost acknowledgement can be recovered now without asking the caller to retry side effects.
+            try { await catchUp(root, file, state, io); } catch { throw rememberLostReply(file, state, move.id, error); }
+            if (!localRecords(root, (board) => engineReceipt(board, move.id))) throw rememberLostReply(file, state, move.id, error);
+          }
         }
+      } catch (error) {
+        // #922: on an accepted link, a relay that stays down queues the move; a lost reply's copy is matched at replay.
+        if (move && !localRecords(root, (board) => engineReceipt(board, move.id)) && outboxQueueable(state, error, operation, io)) return await queue(error, move);
+        throw error;
       }
       const receipt = localRecords(root, (board) => engineReceipt(board, move.id));
       if (!receipt) throw new Refused('RELAY_RESPONSE', 'the acknowledged operation has no replay receipt; fetch a consistent relay snapshot');
@@ -1273,6 +1473,7 @@ export async function syncRelay(root, io) {
     try {
       if (state.recovery) throw new Refused('RELAY_RECOVERY_PENDING', `a relay recovery for sequence ${state.recovery.skip} is pending; retry pullboard relay recover --skip ${state.recovery.skip} before syncing`);
       if (!await ensureOrdered(root, file, state, io)) return summary(root, state);
+      await flushOutbox(root, file, state, io);
       await catchUp(root, file, state, io);
       if (state.pending) {
         // The complete prefix did not acknowledge this interrupted send. It must not run later.
@@ -1294,10 +1495,10 @@ export async function syncRelay(root, io) {
         }
       } else if (error.code === 'AUTH_REQUIRED') {
         if (!orderedMoveCommand(io)) reportExpiredSignIn(state, io);
-      } else if (!(orderedMoveCommand(io) && baselineNotAccepted(state) && transientRelayFailure(error))) io.err(`pullboard: ${error.message}; run pullboard status to see pending uploads`);
+      } else if (!(orderedMoveCommand(io) && (baselineNotAccepted(state) || outboxQueueable(state, error, null, io)) && transientRelayFailure(error))) io.err(`pullboard: ${error.message}; run pullboard status to see pending uploads`);
       return { linked: true, board: state.board, url: state.url, sequence: state.sequence,
-        behind: (state.mode === 'ordered' ? Number(Boolean(state.pending)) : behind(root, state)) + Number(Boolean(state.snapshot || state.checkpoint)),
-        recovery: recoverySummary(state) };
+        behind: (state.mode === 'ordered' ? Number(Boolean(state.pending)) : behind(root, state)) + Number(Boolean(state.snapshot || state.checkpoint)) + (state.outbox?.moves?.length ?? 0),
+        recovery: recoverySummary(state), ...outboxFields(state) };
     }
   }, io);
 }
@@ -1665,6 +1866,7 @@ export async function relayOn(root, address, io, { session, credential, quiet = 
       if (ready) ready = await ensureOrdered(root, file, state, io);
       if (ready) {
         rmSync(deletedLinkFile(root), { force: true });
+        await flushOutbox(root, file, state, io);
         await catchUp(root, file, state, io);
         await deliverDeviceWraps(root, io);
         updateRelayMachine(machine => { machine.excluded = machine.excluded.filter(entry => entry !== repoInfo(root).root); });

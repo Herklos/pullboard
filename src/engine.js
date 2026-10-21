@@ -187,7 +187,7 @@ function validateMove(move) {
 }
 
 /** Restore only the frozen criterion callback; no receiver runs another machine's Git or shell. */
-function executableArgs(move, board) {
+export function executableArgs(move, board) {
   const args = structuredClone(move.args);
   if (move.operation === 'appendFact') {
     if (!args[1] || typeof args[1] !== 'object' || Array.isArray(args[1])) throw new Refused('RELAY_MOVE', 'a fact needs its typed arguments; use the current Pullboard engine');

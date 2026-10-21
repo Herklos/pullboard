@@ -59,6 +59,7 @@ import {
   COORDINATOR,
   DOCTRINE_FILE,
   LEGACY_DOCTRINE_FILE,
+  configFromSource,
   loadConfig,
 } from './config.js';
 import { displayAgentName } from './agent-names.js';
@@ -864,7 +865,16 @@ export async function reserveRow(ctx, row, written) {
 /** Note the session behind a claim or submit (#921): its ledger must be writable before the move, and record after it. */
 async function withItemSession(info, operation, args, move) { const noted = operation === 'claim' || operation === 'submit'; if (noted) itemSessions.requireLedger(info); const result = await move(); if (noted) itemSessions.recordItemSession(info, args[0], operation); return result; }
 
+/**
+ * Whether the board's committed relay.outbox setting queues moves while the relay is down (#922).
+ * Why: it is read from the trunk's pullboard.json, so every machine on the board follows the same committed choice.
+ */
+function relayOutboxSetting(root) {
+  try { return configFromSource(coordinatorFile(root, CONFIG_FILE).stdout).relay?.outbox === true; } catch { return false; }
+}
+
 export async function ordered(ctx, board, operation, args) {
+  ctx.io.relayOutbox ??= () => relayOutboxSetting(ctx.info.root);
   // Every engine-27 registration records the seat that made it: the coordinator from the main
   // checkout, the joined agent from its worktree, or `machine` for a join no seat made (#579).
   if (operation === 'register' && args[0] && args[0].createdBy === undefined) {
@@ -2314,6 +2324,7 @@ async function runMain(argv, streams) {
     /** A network refusal preserves offline reads; linked mutation dispatch requires an acknowledgement. */
     const retry = async () => {
       try {
+        io.relayOutbox ??= () => relayOutboxSetting(io.cwd);
         await syncRelay(io.cwd, io);
         await retryCheckBaselines(io.cwd, io);
       }

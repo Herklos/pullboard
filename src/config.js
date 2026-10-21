@@ -174,6 +174,9 @@ export function configProblems(config) {
   if (config.flakes !== undefined && (!config.flakes || typeof config.flakes !== 'object' || Array.isArray(config.flakes)
       || config.flakes.rerun !== undefined && typeof config.flakes.rerun !== 'boolean'
       || Object.keys(config.flakes).some(key => key !== 'rerun'))) problems.push('"flakes" has only the optional boolean "rerun", off by default');
+  if (config.relay !== undefined && (!config.relay || typeof config.relay !== 'object' || Array.isArray(config.relay)
+      || config.relay.outbox !== undefined && typeof config.relay.outbox !== 'boolean'
+      || Object.keys(config.relay).some(key => key !== 'outbox'))) problems.push('"relay" has only the optional boolean "outbox", off by default');
   if (!['inside', 'beside'].includes(config.worktrees)) problems.push('"worktrees" is "inside" or "beside"');
   if (config.submitGate !== undefined && config.submitGate !== 'landing') {
     problems.push('"submitGate" is "landing" when the full suite should be deferred until landing');
