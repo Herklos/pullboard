@@ -482,6 +482,7 @@ test('land pushes one exact batch in verdict order and records each first-contai
   assert.deepEqual(calls(box).slice(start), [[]], 'one full batch gate; pre-push reads its exact green tree stamp');
   const merges = box.git(box.repo, 'rev-list', '--reverse', '--first-parent', `${base}..${result.batch.tip}`).split('\n');
   for (const [index, id] of order.entries()) assert.equal(json(box, box.repo, 'show', String(id)).item_merged_commit, merges[index]);
+  for (const [index, id] of order.entries()) assert.equal(box.git(box.repo, 'log', '-1', '--format=%b', merges[index]).trim(), `Pullboard-Item: #${id}`, 'each train merge body is only its item trailer, naming no lane branch');
   const receipt = events(box).filter((event) => event.event_kind === 'main-moved');
   assert.equal(receipt.length, 1);
   assert.equal(JSON.parse(receipt[0].event_detail).sha, result.batch.tip);
