@@ -63,7 +63,8 @@ async function snapshotDocument(plain) {
   if (plain[0] === 0x1f && plain[1] === 0x8b) {
     if (typeof DecompressionStream !== 'function') throw new Error('This browser cannot read gzip snapshots. Upgrade the browser client.');
     try {
-      const stream = new Blob([plain]).stream().pipeThrough(new DecompressionStream('gzip'));
+      // A Response body, not Blob.stream(): WebKit refuses to decode gzip piped from a Blob stream.
+      const stream = new Response(plain).body.pipeThrough(new DecompressionStream('gzip'));
       return JSON.parse(await withBrowserDeadline(() => new Response(stream).text()));
     } catch { throw new Refused('SNAPSHOT_FORMAT', 'The sealed gzip snapshot is invalid. Refresh it from a linked machine.'); }
   }

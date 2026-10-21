@@ -476,6 +476,10 @@ The local server uses a shared HTTP router. Streams recheck access before each p
 
 HTTP refusals use the same versioned error envelope above: 400 for malformed calls, 401 for a missing or wrong session secret, 403 for an agent belonging to another board, 404 for an unknown board, path or shout, and 409 for the CLI engine's refusal. Shouts and answers append their events in the same transaction as their records. A move returns its own event, including when it also sends a coordinator shout.
 
+## Spec gates
+
+`pullboard spec check` fails when an approved must-row names a gate file that was committed and is gone now (a lost test), and it names the row, the file and the removal. A gate file that was never committed only warns that its test is not written yet, so a new project's example spec still passes, and every other row only warns. The pre-commit hook refuses a commit that deletes or renames a file an approved must-row names, unless the same commit points that row at its new home.
+
 ## SSH spec sign-offs
 
 `pullboard spec signers add [--key <path>] [--by <principal>]` opts a repo into OpenSSH-signed spec sign-offs. The key defaults to Git `user.signingkey`, then `~/.ssh/id_ed25519.pub`. The principal defaults to the exact Git `user.email`; `--by` overrides it. `spec signoff` uses the same email default in a repo with SSH signers, and accepts `--by` when a listed principal differs. A row's `signers:` names those exact principals. Spec checking refuses a required principal without a corresponding signer entry.

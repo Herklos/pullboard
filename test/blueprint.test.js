@@ -10,6 +10,7 @@ import { bundledBlueprints, readBlueprint, validateBlueprint } from '../src/blue
 import { blueprintRowIds, starterStates } from '../src/blueprint-report.js';
 import { parseSpec } from '../src/spec.js';
 import { createE2eHelpers } from './e2e-helpers.js';
+import { assertStarterChecks } from './blueprint-starter-fixture.js';
 
 const BIN = resolve(import.meta.dirname, '../bin/pullboard.js');
 const PUBLISHED = JSON.parse(readFileSync(resolve(import.meta.dirname, '../src/blueprints/web-app.json'), 'utf8'));
@@ -246,7 +247,7 @@ test('every bundled starter item carries a criterion and a check [S1,I1]', () =>
     const items = readBlueprint(name, process.cwd()).items;
     assert.equal(added.items.length, items.length, `${name} files every starter`);
     assert.deepEqual(added.checksNotRun, added.items.map((item) => item.id), `${name}: every check is stored, none run`);
-    board.expected.push(...items.map((item) => [item.title, item.criterion, item.check]));
+    board.expected.push(...items.map((item) => [item.title, item.criterion, `cd './app' && (${item.check})`]));
   }
   for (const { box, expected } of boards) {
     const filed = json(box, 'list', '--all').items.sort((a, b) => a.item_id - b.item_id);
@@ -260,7 +261,7 @@ test('every bundled starter item carries a criterion and a check [S1,I1]', () =>
   const started = fresh.run('init', '--blueprint', 'web-app');
   assert.equal(started.status, 0, started.stdout + started.stderr);
   const startedItems = (JSON.parse(fresh.run('list', '--json').stdout).items ?? []).sort((a, b) => a.item_id - b.item_id);
-  assert.deepEqual(startedItems.map((item) => [item.item_title, item.item_criterion, item.item_check]), web.items.map((item) => [item.title, item.criterion, item.check]));
+  assert.deepEqual(startedItems.map((item) => [item.item_title, item.item_criterion, item.item_check]), web.items.map((item) => [item.title, item.criterion, `cd './app' && (${item.check})`]));
   assert.match(started.stdout, new RegExp(`checks stored, not run: ${startedItems.map((item) => `#${item.item_id}`).join(', ')}; no check baseline ran`, 'u'));
 });
 
@@ -1486,3 +1487,5 @@ test('a Something else answer that names the stack fits a plain Node project [A8
   assert.equal(proposal.decision, 'answer');
   assert.equal(proposal.text, `The app is built with: ${stack}. Choices: Next.js, SvelteKit, Rails, Something else.`);
 });
+
+test("every bundled blueprint's starter check runs from its lane's folder and a baseline never reads green for a command that fails on main [I1,V2]", () => assertStarterChecks({ emptyRepo, freshBoard, json }));
