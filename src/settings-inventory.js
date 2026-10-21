@@ -127,8 +127,8 @@ function machineSettings(rows) {
   const relayContext = { scope: 'machine', file: relayFile, raw: { relay } };
   add(rows, relayContext, 'relay.autoLink', false);
   add(rows, relayContext, 'relay.excluded', []);
-  add(rows, relayContext, 'relay.owner.account', null, { value: relay.owner?.account ?? relay.session?.account });
-  add(rows, relayContext, 'relay.owner.url', null, { value: relay.owner?.url ?? relay.session?.url });
+  add(rows, relayContext, 'relay.owner.account', null, { value: relay.owner?.account ?? relay.session?.account, origin: relay.owner?.account !== undefined || relay.session?.account !== undefined ? 'configured' : 'default' });
+  add(rows, relayContext, 'relay.owner.url', null, { value: relay.owner?.url ?? relay.session?.url, origin: relay.owner?.url !== undefined || relay.session?.url !== undefined ? 'configured' : 'default' });
   add(rows, relayContext, 'relay.session.token', 'not set', { secret: true });
   resourceSettings(rows, { scope: 'machine' }, join(machineHome(), 'resources.sqlite'));
 }

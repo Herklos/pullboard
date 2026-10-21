@@ -107,6 +107,9 @@ export async function proveSettingsApi() {
     for (const key of ['checks.provesNothing', 'verify.unrelatedTrunkMoves', 'flakes.rerun', 'flakes.quarantine', 'rigor.budget', 'relay.outbox', 'submitGate', 'landingShards', 'landing.publish', 'positiveControl', 'affectedTests']) assert.ok(find('repo', key), key);
     assert.equal(find('board', 'relay.token').value, 'set');
     assert.equal(find('machine', 'relay.session.token').value, 'set');
+    assert.equal(find('machine', 'relay.owner.account').value, 'fixture');
+    assert.equal(find('machine', 'relay.owner.account').origin, 'configured');
+    assert.equal(find('machine', 'relay.owner.url').origin, 'configured');
     assert.deepEqual(find('repo', 'lanes').value, { app: { owns: ['app/'], specs: ['O5'] } });
     const selected = await fetch(address + '?board=' + id, { headers: { 'x-pullboard-key': 'api-fixture' } });
     assert.equal(selected.status, 200);
@@ -140,12 +143,17 @@ export async function proveSettingsApi() {
     writeFileSync(machineFile, machineSaved);
     process.env.PULLBOARD_RELAY_KEY = canary;
     process.env.PULLBOARD_RELAY_TOKEN = canary;
+    process.env.PULLBOARD_VIEW_PORT = '4999';
     const environment = await (await fetch(address + '?board=' + id, { headers: { 'x-pullboard-key': 'api-fixture' } })).json();
     for (const key of ['relay.key', 'relay.token']) {
       const row = environment.settings.find(row => row.scope === 'board' && row.key === key);
       assert.equal(row.value, 'set');
       assert.equal(row.source, 'environment:' + (key === 'relay.key' ? 'PULLBOARD_RELAY_KEY' : 'PULLBOARD_RELAY_TOKEN'));
     }
+    const portSetting = environment.settings.find(row => row.key === 'view.port');
+    assert.equal(portSetting.value, 4999);
+    assert.equal(portSetting.source, 'environment:PULLBOARD_VIEW_PORT');
+    assert.equal(portSetting.origin, 'configured');
     assert.ok(!JSON.stringify(environment).includes(canary));
     const legacyRead = new DatabaseSync(join(legacy, '.git', 'pullboard', 'board.sqlite'), { readOnly: true });
     assert.equal(legacyRead.prepare('PRAGMA user_version').get().user_version, 0);
