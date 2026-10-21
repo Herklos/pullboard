@@ -89,7 +89,8 @@
       "feat",
       "fix"
     ],
-    "noEmoji": true
+    "noEmoji": true,
+    "noHostName": true
   },
   "staticChecks": "node --experimental-vm-modules --disable-warning=ExperimentalWarning bin/static-style-checks.js",
   "flakes": {

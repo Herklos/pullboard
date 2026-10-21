@@ -163,7 +163,9 @@ async function mergeGroup(state, items) {
     if (checked !== (entry.reviewedCommit ?? entry.commit ?? item.item_commit)) throw new Refused('LAND_ITEM_MOVED', `item #${item.item_id} was re-reviewed; rebuild its landing from the checked commit`);
     const stale = verdictProjector(state.root, state.board, { main: batch.base }).state(item);
     if (stale) throw staleVerdictRefusal(item, stale);
-    const result = tryGit(batch.root, ['merge', '--no-ff', checked, '-m', landingSubject(item)]);
+    // The body is the item trailer alone: the subject carries the title, and no lane branch is named [B3,R3].
+    // merge.log is switched off on this call, so a local Git config cannot append a shortlog to the body.
+    const result = tryGit(batch.root, ['-c', 'merge.log=false', 'merge', '--no-ff', '--no-log', checked, '-m', landingSubject(item), '-m', `Pullboard-Item: #${item.item_id}`]);
     if (result.status !== 0) {
       const files = tryGit(batch.root, ['diff', '--name-only', '--diff-filter=U']).stdout.split('\n').filter(Boolean);
       if (!files.length) throw new Refused('LAND_MERGE', `merge of #${item.item_id} failed outside a conflict: ${result.stderr || result.stdout}; inspect ${batch.root} and its hooks before adopting`);
