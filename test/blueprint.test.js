@@ -771,7 +771,7 @@ test('init --blueprint starts a board from a blueprint [I1,S1]', () => {
   const withCheck = join(outside, 'checked.blueprint.json');
   writeFileSync(withCheck, JSON.stringify({ ...PUBLISHED, items: PUBLISHED.items.map((item, index) => (index === 0 ? { ...item, check: 'true' } : item)) }));
   const checkedRepo = emptyRepo();
-  const checked = checkedRepo.run('init', '--blueprint', withCheck);
+  const checked = checkedRepo.run('init', '--blueprint', withCheck, '--verbose');
   assert.equal(checked.status, 0, checked.stdout + checked.stderr);
   assert.match(checked.stdout, /checks stored, not run: #\d+(?:, #\d+)*; no check baseline ran/u, 'the summary says the checks were not run');
   const filed = JSON.parse(checkedRepo.run('list', '--json').stdout).items ?? [];
