@@ -364,6 +364,8 @@ export const NEXT_STEPS = Object.freeze({
   NOT_VERIFIED: 'merge only verified items; see pullboard list --all',
   NOT_YOURS: 'shout its holder or the coordinator: pullboard shout coordinator "<what you need>"',
   NOT_YOUR_CHECKOUT: 'make an independent checkout with git worktree add -b <lane>/<n> ../<repo>-<lane>-<n>, then run pullboard join <lane> --model "<model name>" there; the same agent in a new session should run pullboard takeover from its own shell',
+  RIGOR_RANGE: 'pass --base the commit or branch this change grew from: pullboard rigor quality --base main',
+  RIGOR_RULE: 'name a rule pullboard help rigor lists: pullboard rigor quality --rule silent-catch',
   RIGOR_UNNOTICED: 'run pullboard rigor and draft a cause it lists, or wait until the cause repeats',
   RIGOR_UNPROVEN: 'name a check that fails at --red and passes at --green: pullboard rigor draft <key> "<rule>" --check "<command>" --red <commit> --green <commit>',
   RIGOR_PERSON_ONLY: 'ask the person to mark it from the main checkout: pullboard fact <id> root-cause "<why>" --cause <key> --never-again --as person',
