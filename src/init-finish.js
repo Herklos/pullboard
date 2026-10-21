@@ -47,7 +47,10 @@ export const SETUP_COMMIT_QUESTION = 'Commit Pullboard setup now? [Y/n] ';
 export const SETUP_COMMIT_LATER = "To commit Pullboard's files: pullboard init --yes";
 
 /** End setup with one action; the agent reads the remaining questions through resume. */
-export function initNextLine(agentSession) {
+export function initNextLine(agentSession, { verbose = false } = {}) {
+  if (verbose) return agentSession
+    ? 'Next: run pullboard resume now to continue setup in this session; the new skills load next session, and setup does not need them.'
+    : 'Next: ask your agent to set up Pullboard here; in Claude Code, start a new session first so it loads the Pullboard skills.';
   return agentSession ? 'Next: run pullboard resume to continue setup in this session.'
     : 'Next: ask your agent to run pullboard resume to finish setup.';
 }

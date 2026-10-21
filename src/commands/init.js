@@ -109,6 +109,6 @@ export async function run(io, { values }) {
     : `Kept ${setupCommit.skipped.length} earlier changes uncommitted.`);
   if (setupCommit.state === 'pending' && values.verbose) io.say(SETUP_COMMIT_LATER);
   if (setupCommit.state === 'committed') io.say(`Committed ${setupCommit.skipped.length ? 'only unchanged Pullboard files' : 'Pullboard setup'} at ${setupCommit.commit.slice(0, 12)}.`);
-  io.say(initNextLine(Boolean(agentSessionDigest())));
+  io.say(initNextLine(Boolean(agentSessionDigest()), { verbose: values.verbose }));
   return code;
 }
