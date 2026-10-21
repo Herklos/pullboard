@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { gzipSync, gunzipSync } from 'node:zlib';
 import { spawn } from 'node:child_process';
 import { availableParallelism } from 'node:os';
+import { loadavg } from 'node:os';
 import { test } from 'node:test';
 import * as store from '../src/board.js';
 import { decodeBoardKey, seal, unseal } from '../src/seal.js';
@@ -437,13 +438,23 @@ function paintWithinBudget(first) {
   return Number.isFinite(first.firstBoardPaint) && first.firstBoardPaint < 3000;
 }
 
-/** Hold busy processes on half the cores, as a loaded suite shares the CPU with the runner and Chrome; stop each by its own pid. */
+/**
+ * Hold busy processes on half the cores, as a loaded suite shares the CPU with the runner and Chrome; stop each by its
+ * own pid. A machine whose 1-minute load is already at its core count is loaded enough, so no stand-in is added and one
+ * line says so: stacking more on it starves the harness rather than measuring the page (#953).
+ */
 function cpuStandIn(t) {
-  const busy = Array.from({ length: Math.max(1, Math.floor(availableParallelism() / 2)) },
+  const [load] = loadavg();
+  const cores = availableParallelism();
+  if (load >= cores) {
+    t.diagnostic(`no CPU stand-in added: the 1-minute load ${load.toFixed(1)} is already at or above ${cores} cores`);
+    return { stop() {}, count: 0, load };
+  }
+  const busy = Array.from({ length: Math.max(1, Math.floor(cores / 2)) },
     () => spawn(process.execPath, ['-e', 'for (;;) {}'], { stdio: 'ignore' }));
   const stop = () => { for (const child of busy) if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); };
   t.after(stop);
-  return { stop, count: busy.length };
+  return { stop, count: busy.length, load };
 }
 
 test("the phone's first-paint budget is judged by the page, not by a loaded test runner [H5]", {
@@ -460,7 +471,7 @@ test("the phone's first-paint budget is judged by the page, not by a loaded test
       await chrome.close();
     }
   } finally { load.stop(); }
-  t.diagnostic(JSON.stringify({ cpuStandIn: load.count, firstBoardPaintMs: paints.map(ms => Math.round(ms)) }));
+  t.diagnostic(JSON.stringify({ cpuStandIn: load.count, loadBefore: Number(load.load.toFixed(1)), firstBoardPaintMs: paints.map(ms => Math.round(ms)) }));
   assert.ok(paints.every(ms => paintWithinBudget({ firstBoardPaint: ms })), `every page-measured first paint stays under 3000 ms under load: ${paints.join(', ')}`);
   // A test-only hold on the phone's current-state read really delays the paint past the bar, and the judgement turns red.
   const { chrome, first } = await openOnPhone(t, board, { holdStateMs: 3_500 });
