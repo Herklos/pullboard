@@ -5,6 +5,10 @@ import { fileURLToPath } from 'node:url';
 import { pathToFileURL } from 'node:url';
 import { cleanGitEnvironment } from './git.js';
 import {
+  COMMAND_CANDIDATE,
+  ENGINE_CANDIDATE,
+} from './discovery.js';
+import {
   commonJsIn,
   importsIn,
 } from './module-imports.js';
@@ -19,8 +23,6 @@ const DOCS_TREE_INPUT = '/** @pullboard-test-input docs-tree */';
 // A computed-import test may declare the repository modules it can load, in its leading comment header only.
 const LOADS = /^\/\*\* @pullboard-test-loads (.+?) \*\/$/u;
 const COMMAND_REGISTRY = 'src/commands/index.js';
-const COMMAND_MODULE = /^src\/commands\/(?!index\.js$)[\w-]+\.js$/u;
-const ENGINE_LEAF = /^src\/[\w-]+-engine\.js$/u;
 const GLOBAL = new Set(['bin/run-tests.js', 'package.json', 'package-lock.json', 'npm-shrinkwrap.json', 'yarn.lock', 'pnpm-lock.yaml', 'src/gate.js', 'src/cli.js', 'src/hooks.js', 'src/trusted-policy.js', 'src/affected-tests.js', 'src/module-imports.js']);
 
 /**
@@ -305,7 +307,8 @@ function graphAt(root, commit, changedDocs = []) {
   // Discovery is not an import: the command registry loads each src/commands module, and machine.js reads each
   // src/*-engine.js leaf as text. A change to one reaches the reader, so everything that imports the reader is selected.
   for (const module of paths) {
-    const reader = COMMAND_MODULE.test(module) ? COMMAND_REGISTRY : ENGINE_LEAF.test(module) ? 'src/machine.js' : null;
+    const reader = module.startsWith('src/commands/') && COMMAND_CANDIDATE.test(module.slice('src/commands/'.length)) ? COMMAND_REGISTRY
+      : module.startsWith('src/') && ENGINE_CANDIDATE.test(module.slice('src/'.length)) ? 'src/machine.js' : null;
     if (!reader) continue;
     if (!reverse.has(module)) reverse.set(module, new Set());
     reverse.get(module).add(reader);

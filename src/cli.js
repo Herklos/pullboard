@@ -1937,11 +1937,11 @@ export async function nextOnce(ctx, values) {
     if (values.verify) return nextReview(ctx, board, me, values, { ordered: (operation, args) => ordered(ctx, board, operation, args), idArg, trunkMerge });
     const warm = warmFiles(ctx, board, me);
     const seats = nextSessionSeats(ctx, board);
-    const owners = new Set(seats?.map((seat) => seat.agent_id));
-    const heldItems = seats ? store.listItems(board).filter((item) => item.item_status === 'claimed'
-      && item.item_parent_id === null && owners.has(item.item_owner)
-      && store.ROUTES.indexOf(item.item_route) <= store.ROUTES.indexOf(me.route)) : [];
-    const heldItem = heldItems.find((item) => item.item_owner === me.id) ?? heldItems[0];
+    // A claim belongs to the seat that made it: seats of one session share its environment, so a sibling's claim is
+    // never this seat's to resume or be pointed at (#958).
+    const heldItem = seats ? store.listItems(board).find((item) => item.item_status === 'claimed'
+      && item.item_parent_id === null && item.item_owner === me.id
+      && store.ROUTES.indexOf(item.item_route) <= store.ROUTES.indexOf(me.route)) : undefined;
     const { item, reasons, shared } = heldItem ? { item: heldItem, reasons: [], shared: [] }
       : store.nextFor(board, { agentId: me.id, lane: me.lane, runnable: values.runnable, routes: values.routes, warm,
         ...(seats ? { lanes: laneNames(ctx.config).filter((lane) => lane !== COORDINATOR) } : {}),

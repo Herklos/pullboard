@@ -10,6 +10,11 @@
  */
 
 import {
+  ENGINE_CANDIDATE,
+  ENGINE_FILE,
+  discovered,
+} from './discovery.js';
+import {
   readdirSync,
   readFileSync,
 } from 'node:fs';
@@ -30,7 +35,7 @@ export { WITHDRAW_MILESTONE_ENGINE } from './withdraw-milestone-engine.js';
  */
 export function discoverEngines(directory = new URL('./', import.meta.url)) {
   const found = {};
-  for (const file of readdirSync(directory).filter((name) => /-engine\.js$/u.test(name)).sort()) {
+  for (const file of discovered(readdirSync(directory), ENGINE_CANDIDATE, ENGINE_FILE, 'feature engine')) {
     const lines = readFileSync(new URL(file, directory), 'utf8').split('\n').filter((line) => /^export const /u.test(line));
     const match = lines.length === 1 ? /^export const [A-Z][A-Z0-9_]*_ENGINE = (\d+);$/u.exec(lines[0]) : null;
     if (!match) throw new Error(`${file} must declare exactly one line \`export const NAME_ENGINE = <number>;\` so ENGINE_VERSION can read it`);
