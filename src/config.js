@@ -53,6 +53,7 @@ export function defaults() {
     verify: { policy: 'any', family: 'off', reviewRatio: 3 },
     agents: { names: 'suffix' },
     check: { install: '', timeout: '5m' },
+    claim: { reopenFirstRefusalMinutes: 0 },
     lanes: {},
     products: {},
     shared: [],
@@ -113,6 +114,10 @@ function merge(base, raw) {
       : raw.agents && typeof raw.agents === 'object' && !Array.isArray(raw.agents)
         ? { ...base.agents, ...raw.agents }
         : raw.agents,
+    claim: raw.claim === undefined ? base.claim
+      : raw.claim && typeof raw.claim === 'object' && !Array.isArray(raw.claim)
+        ? { ...base.claim, ...raw.claim }
+        : raw.claim,
     check: raw.check === undefined ? base.check
       : raw.check && typeof raw.check === 'object' && !Array.isArray(raw.check)
         ? { ...base.check, ...raw.check }
@@ -223,6 +228,11 @@ export function configProblems(config) {
   if (config.checks !== undefined && (typeof config.checks !== 'object' || config.checks === null || Array.isArray(config.checks)
     || Object.keys(config.checks).some((key) => key !== 'provesNothing') || !['hold', 'warn'].includes(config.checks.provesNothing))) {
     problems.push('"checks" is { "provesNothing": "hold" or "warn" }: "hold" refuses claim and submit while an item\'s check already passes on main');
+  }
+  if (!config.claim || typeof config.claim !== 'object' || Array.isArray(config.claim)
+    || !Number.isSafeInteger(config.claim.reopenFirstRefusalMinutes) || config.claim.reopenFirstRefusalMinutes < 0
+    || config.claim.reopenFirstRefusalMinutes > Math.floor(8_640_000_000_000_000 / 60_000)) {
+    problems.push('"claim.reopenFirstRefusalMinutes" is a non-negative whole number of minutes within the supported date range; 0 disables it');
   }
   if (typeof config.check?.install !== 'string') problems.push('"check.install" is an install command string');
   const timeout = typeof config.check?.timeout === 'string' ? CHECK_TIMEOUT_RE.exec(config.check.timeout) : null;
