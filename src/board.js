@@ -30,7 +30,16 @@ import {
 } from './brief.js';
 import { COORDINATOR } from './config.js';
 import {
+  manualLandingFailure,
+  firstRefusal,
+  firstRefusalProblem,
+  firstRefusalReason,
+  firstRefusalDetail,
+  tellFirstRefusal,
+} from './claims.js';
+import {
   ENGINE_VERSION,
+  REOPEN_FIRST_REFUSAL_ENGINE,
   VERDICT_REVIEW_ENGINE,
   MILESTONE_RANK_ENGINE,
   GUARDS,
@@ -512,15 +521,16 @@ export function atomic(board, work) {
  * @param {string} kind
  * @param {number | null} itemId
  * @param {object} [detail]
+ * @param {Date} [at] An enabled move may share one instant with its deadline.
  */
-export function logEvent(board, by, kind, itemId, detail = {}) {
+export function logEvent(board, by, kind, itemId, detail = {}, at) {
   const model = agentModel(board, by);
   const isAgent = Boolean(board.db.prepare('SELECT 1 FROM agent WHERE agent_id = ?').get(by));
   const recorded = (board.executionEngineVersion ?? ENGINE_VERSION) >= 8 && isAgent
     ? { ...detail, model: model ?? 'unknown' } : detail;
   const inserted = board.db
     .prepare('INSERT INTO event (event_at, event_by, event_kind, item_id, event_detail) VALUES (?, ?, ?, ?, ?)')
-    .run(now(board), by, kind, itemId, JSON.stringify(recorded));
+    .run(at ? at.toISOString() : now(board), by, kind, itemId, JSON.stringify(recorded));
   board.lastEvent = board.db.prepare('SELECT * FROM event WHERE event_id = ?').get(inserted.lastInsertRowid);
   (board.emittedEvents ??= []).push(board.lastEvent);
 }
@@ -1137,6 +1147,7 @@ export function claim(board, id, { agentId, lane, leaseMs, freeze, head = null, 
           return null;
         },
         notHeldByAnother: (found) => (isHeld(board, found) && found.item_owner !== agentId ? new Refused('HELD', `item #${id} is held by ${found.item_owner} until ${found.item_lease_until}`) : null),
+        builderFirstRefusal: () => (board.executionEngineVersion ?? ENGINE_VERSION) >= REOPEN_FIRST_REFUSAL_ENGINE ? firstRefusalProblem(board, id, agentId) : null,
         correctionRefrozen: () => pendingRefreezeProblem(board, id),
         laneOpen: (found) => {
           // Declared: not checked when the caller renews its own live claim.
@@ -1218,11 +1229,13 @@ export function release(board, id, agentId, note = '') {
       else logEvent(board, agentId, 'release', id);
       return true;
     }
+    const window = (board.executionEngineVersion ?? ENGINE_VERSION) >= REOPEN_FIRST_REFUSAL_ENGINE ? firstRefusal(board, id) : null;
     moveItem(board, id, 'release', {
+      transition: (board.executionEngineVersion ?? ENGINE_VERSION) < REOPEN_FIRST_REFUSAL_ENGINE ? { ...MOVES.find(move => move.verb === 'release'), from: ['claimed'] } : null,
       checks: {
         joined: null,
         [IN_STATE]: () => new Refused('NOT_YOURS', `item #${id} is not claimed by you`),
-        isHolder: (found) => (found.item_owner === agentId ? null : new Refused('NOT_YOURS', `item #${id} is not claimed by you`)),
+        releaseOwnsWork: (found) => (found.item_owner === agentId || found.item_status === 'open' && window?.builder === agentId ? null : new Refused('NOT_YOURS', `item #${id} is not claimed by you`)),
         reviewReleaseExplained: null, // Claimed releases do not free a submitted review.
       },
       set: () => ({ item_owner: null, item_lease_until: null }),
@@ -1553,7 +1566,7 @@ function reserveWithin(board, id, { agentId, leaseMs, policy, familyPolicy = 'of
  * @param {{ agentId: string, decision: string, reason?: string, note?: string, cause?: string, head: string, digest: string, policy: string, familyPolicy?: string, check?: 'none' | 'green', review?: {commit: string, head?: string, trunk: string, paths: string[]}, implies?: number[], impliesId?: string }} verdict - implies: items this verdict changes (B29)
  * @returns {{ decision: string, reason: string, check?: 'none' | 'green' }}
  */
-export function verify(board, id, { agentId, decision, reason, note = '', cause, head, digest, policy, familyPolicy = 'off', check, review, implies, impliesId }) {
+export function verify(board, id, { agentId, decision, reason, note = '', cause, head, digest, policy, familyPolicy = 'off', check, review, implies, impliesId, reopenFirstRefusalMinutes }) {
   const verb = { ACCEPT: 'accept', REJECT: 'reject' }[decision];
   if (!verb) throw new Refused('BAD_DECISION', 'the decision is accept or reject');
   const isAccept = verb === 'accept';
@@ -1605,11 +1618,14 @@ export function verify(board, id, { agentId, decision, reason, note = '', cause,
       },
       set: (found) => ({ item_verdict: decision, item_verified_by: isAccept ? agentId : null, item_owner: isAccept ? found.item_owner : null }),
     });
-    const detail = { reason: code, commit: item.item_commit, ...(!isAccept && cause !== undefined && cause !== null ? { cause } : {}) };
+    const returnedAt = !isAccept && engine >= REOPEN_FIRST_REFUSAL_ENGINE && reopenFirstRefusalMinutes > 0 && item.item_built_by ? board.clock.now() : undefined;
+    const reservation = !isAccept && engine >= REOPEN_FIRST_REFUSAL_ENGINE ? firstRefusalDetail(board, item, reopenFirstRefusalMinutes, returnedAt) : {};
+    const detail = { ...reservation, reason: code, commit: item.item_commit, ...(!isAccept && cause !== undefined && cause !== null ? { cause } : {}) };
     if (isAccept && check !== undefined) detail.check = check;
     if (newReview) detail.review = { commit: review.commit, ...(Object.hasOwn(review, 'head') ? { head: review.head } : {}), trunk: review.trunk, paths: [...review.paths] };
-    logEvent(board, agentId, verb, id, implies?.length ? { ...detail, implies } : detail);
+    logEvent(board, agentId, verb, id, implies?.length ? { ...detail, implies } : detail, returnedAt);
     const trigger = board.lastEvent;
+    tellFirstRefusal(board, item, reservation, persistShout);
     if (!isAccept) recordRejectedItemRoute(board, id, engine, item, { escalate, shout, logEvent });
     tellVerdictImplications(board, (by, itemId, fact) => logEvent(board, by, 'fact', itemId, fact), id, { seed: impliesId, implies });
     if (!isAccept) postRigorNotices(board, trigger);
@@ -1625,7 +1641,7 @@ export function verify(board, id, { agentId, decision, reason, note = '', cause,
  * @param {{ agentId: string, note: string, cause?: string }} request
  * @returns {{ id: number, commit: string, supersedes?: number, landingFailure?: object }}
  */
-export function reopen(board, id, { agentId, note = '', conflict, cause }) {
+export function reopen(board, id, { agentId, note = '', conflict, cause, reopenFirstRefusalMinutes }) {
   return atomic(board, () => {
     let submittedCommit = null;
     const forMerge = conflict !== undefined && conflict !== null;
@@ -1681,32 +1697,19 @@ export function reopen(board, id, { agentId, note = '', conflict, cause }) {
         };
       },
     });
+    const returnedAt = (forMerge || landingFailure) && currentEngine >= REOPEN_FIRST_REFUSAL_ENGINE && reopenFirstRefusalMinutes > 0 && item.item_built_by ? board.clock.now() : undefined;
+    const reservation = (forMerge || landingFailure) && currentEngine >= REOPEN_FIRST_REFUSAL_ENGINE ? firstRefusalDetail(board, item, reopenFirstRefusalMinutes, returnedAt) : {};
     const returned = forMerge ? { supersedes, ...conflictDetail(conflict) } : supersedes ? { supersedes, landingFailure } : {};
-    logEvent(board, agentId, 'reopen', id, { commit: submittedCommit, note: note.trim() || conflictNote(conflict), judgment: null,
-      ...(cause !== undefined && cause !== null ? { cause } : {}), ...returned });
-    if (forMerge && supersedes === undefined && item.item_built_by) persistShout(board, { from: agentId, to: item.item_built_by, text: returnedHeadNotice(id, submittedCommit, conflict) });
-    postRigorNotices(board, board.lastEvent);
+    logEvent(board, agentId, 'reopen', id, { commit: submittedCommit, note: note.trim() || conflictNote(conflict), judgment: null, ...reservation,
+      ...(cause !== undefined && cause !== null ? { cause } : {}), ...returned }, returnedAt);
+    const trigger = board.lastEvent;
+    tellFirstRefusal(board, item, reservation, persistShout);
+    if (!reservation.reopenFirstRefusal && forMerge && supersedes === undefined && item.item_built_by) persistShout(board, { from: agentId, to: item.item_built_by, text: returnedHeadNotice(id, submittedCommit, conflict) });
+    postRigorNotices(board, trigger);
     return { id: item.item_id, commit: submittedCommit, ...returned };
   });
 }
 
-/** Read test and merge-commit evidence from a hand-written landing note without checking Git. */
-function manualLandingFailure(note) {
-  const generatedPrefix = /^Landing batch [a-z0-9_-]{1,80} failed /iu.exec(note);
-  const body = generatedPrefix ? note.slice(generatedPrefix[0].length) : note;
-  const evidence = body.match(/;[ \t]*merge commit[ \t]+(?<mergeCommit>[a-f0-9]{40}|[a-f0-9]{64})$/iu);
-  if (!evidence) return null;
-  const failureText = body.slice(0, evidence.index);
-  const firstTest = /(?<file>(?:[\w.-]+\/)*[\w.-]+\.[a-z0-9]+):[ \t]*/iu.exec(failureText);
-  if (!firstTest) return null;
-  const tests = failureText.slice(firstTest.index).split(/;[ \t]*/u).map((entry) => {
-    const test = entry.match(/^(?<file>(?:[\w.-]+\/)*[\w.-]+\.[a-z0-9]+):[ \t]*(?<name>[^;\r\n]+)$/iu);
-    if (!test || !test.groups.name.trim()) return null;
-    return { file: test.groups.file, name: test.groups.name.trim() };
-  });
-  if (!tests.length || tests.some((test) => !test)) return null;
-  return { tests, mergeCommit: evidence.groups.mergeCommit };
-}
 
 /**
  * Refuse unless the acting agent is the coordinator.
@@ -2378,6 +2381,8 @@ export function nextFor(board, { agentId, lane, verify = false, policy = 'any', 
     const waiting = (entry.item_after ? entry.item_after.split(',').map(Number) : [])
       .map((id) => current(board, itemById(board, id)))
       .filter((before) => before.item_status !== 'verified');
+    const reserved = firstRefusalReason(board, entry.item_id, agentId);
+    if (reserved) { reasons.push(reserved); continue; }
     if (!waiting.length) return { item: entry, reasons, shared };
     reasons.push(`#${entry.item_id} waits on ${waiting.map(waitingOn).join(', ')}`);
   }
