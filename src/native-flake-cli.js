@@ -32,9 +32,13 @@ export function observer(ctx, { kind, board, main, commit, privateCheck = false,
     // Diagnostics cannot block an existing check when its coordinator is detached or its observer cannot initialize.
     return async run => { if (!run.isGreen) diagnosticUnavailable({ run }, error); };
   }
-  /** Record the receipt the gate just wrote for its run; the board reads the receipt itself, never a run object [C7,D1]. */
+  /**
+   * Record the receipt the gate just wrote for its run; the board reads the receipt itself, never a run object [C7,D1].
+   * Only the coordinator's runs go on the board, since only they can prove a flake; a seat's run keeps its receipt on
+   * disk, so every seat's gate does not add a board move to each submit.
+   */
   const recordRun = async receiptId => {
-    const receipt = readGateReceipt(receiptStore(ctx.info.root), receiptId);
+    const receipt = agentId === COORDINATOR ? readGateReceipt(receiptStore(ctx.info.root), receiptId) : null;
     if (!receipt) return;
     const owners = receipt.failures.map(failure => laneOf(acceptedConfig, failure.file)).filter(owner => owner !== COORDINATOR);
     const lane = owners[0] ?? Object.keys(acceptedConfig.lanes)[0];
