@@ -31,7 +31,7 @@ const MACHINE_DEFAULTS = {
   'health.sentinel': true, 'view.background': true, 'relay.offerAtInit': true, runners: [],
 };
 const OPTIONAL_REPO_DEFAULTS = {
-  project: null, name: null, 'checks.provesNothing': 'warn', 'verify.unrelatedTrunkMoves': false,
+  project: null, name: null, 'checks.provesNothing': 'warn', 'verify.unrelatedTrunkMoves': false, 'verify.composeAtAdmission': false,
   'flakes.rerun': false, 'flakes.quarantine': false, 'rigor.budget': 400, 'relay.outbox': false,
   submitGate: null, landingShards: 1, 'landing.publish': null, positiveControl: null, affectedTests: null,
   'health.sentinel': true, 'testConcurrency.browser': 2,

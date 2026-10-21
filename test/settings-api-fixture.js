@@ -45,7 +45,7 @@ export async function proveSettingsApi() {
     const events = board.db.prepare('SELECT COUNT(*) AS n FROM event').get().n;
     store.closeBoard(board);
     const canary = ['fixture', 'credential', 'never-return-this'].join('-');
-    const config = { ...defaults(), gate: 'node --test', health: { sentinel: false }, testConcurrency: { files: 3, browser: 1 }, claim: { reopenFirstRefusalMinutes: 30 }, lanes: { app: { owns: ['app/'], specs: ['O5'], ignoredSecret: canary } } };
+    const config = { ...defaults(), verify: { ...defaults().verify, composeAtAdmission: true }, gate: 'node --test', health: { sentinel: false }, testConcurrency: { files: 3, browser: 1 }, claim: { reopenFirstRefusalMinutes: 30 }, lanes: { app: { owns: ['app/'], specs: ['O5'], ignoredSecret: canary } } };
     writeFileSync(join(repo, 'pullboard.json'), JSON.stringify(config));
     writeFileSync(join(home, 'settings.json'), JSON.stringify({ gateSlots: 3, browserSlots: 2, gate: { queue: { reviewsFirst: true }, shortSlots: 1 }, relay: { offerAtInit: false }, unknown: { token: canary } }));
     mkdirSync(join(home, 'relay-machine'));
@@ -102,6 +102,15 @@ export async function proveSettingsApi() {
     assert.equal(find('machine', 'gate.queue.agingMinutes').value, 30);
     assert.equal(find('machine', 'resources.custom.capacity').value, 4);
     assert.equal(find('repo', 'claim.reopenFirstRefusalMinutes').value, 30);
+    assert.equal(find('repo', 'verify.composeAtAdmission')?.value, true, 'the actual optional admission policy is inventoried');
+    assert.equal(find('repo', 'verify.composeAtAdmission').default, false);
+    assert.equal(find('repo', 'verify.composeAtAdmission').origin, 'configured');
+    assert.equal(find('repo', 'verify.composeAtAdmission').source, join(repo, 'pullboard.json'));
+    const defaultAdmission = rows.find(row => row.board === legacyId && row.key === 'verify.composeAtAdmission');
+    assert.equal(defaultAdmission.value, false);
+    assert.equal(defaultAdmission.default, false);
+    assert.equal(defaultAdmission.origin, 'default');
+    assert.equal(defaultAdmission.source, join(legacy, 'pullboard.json'));
     assert.equal(find('repo', 'health.sentinel').value, false);
     assert.equal(find('repo', 'testConcurrency.files').value, 3);
     for (const key of ['checks.provesNothing', 'verify.unrelatedTrunkMoves', 'flakes.rerun', 'flakes.quarantine', 'rigor.budget', 'relay.outbox', 'submitGate', 'landingShards', 'landing.publish', 'positiveControl', 'affectedTests']) assert.ok(find('repo', key), key);
@@ -119,6 +128,16 @@ export async function proveSettingsApi() {
     assert.equal((await fetch(address)).status, 401);
     assert.equal((await fetch(address, { method: 'POST', headers: { 'x-pullboard-key': 'api-fixture' } })).status, 400);
     assert.deepEqual(snapshot(root), before, 'GET neither migrates credentials nor changes settings, registry, resources or board bytes');
+    writeFileSync(join(repo, 'pullboard.json'), JSON.stringify({ ...config, verify: { ...config.verify, composeAtAdmission: false } }));
+    const falseSnapshot = snapshot(root);
+    const falseDocument = await (await fetch(address + '?board=' + id, { headers: { 'x-pullboard-key': 'api-fixture' } })).json();
+    const falseAdmission = falseDocument.settings.find(row => row.scope === 'repo' && row.key === 'verify.composeAtAdmission');
+    assert.equal(falseAdmission.value, false);
+    assert.equal(falseAdmission.default, false);
+    assert.equal(falseAdmission.origin, 'configured');
+    assert.equal(falseAdmission.source, join(repo, 'pullboard.json'));
+    assert.deepEqual(snapshot(root), falseSnapshot);
+    writeFileSync(join(repo, 'pullboard.json'), JSON.stringify(config));
     // Supported fields containing nested canary objects must refuse safely, not become raw JSON.
     for (const invalid of [
       { ...config, products: { app: [{ token: canary }] } },
