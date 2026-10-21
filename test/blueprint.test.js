@@ -788,7 +788,7 @@ test('init --blueprint starts a board from a blueprint [I1,S1]', () => {
   const nested = emptyRepo();
   mkdirSync(join(nested.repo, 'plans'));
   writeFileSync(join(nested.repo, 'plans', 'local.json'), JSON.stringify({ ...PUBLISHED, name: 'local', title: 'Local plan' }));
-  const fromSub = nested.runIn(join(nested.repo, 'plans'), 'init', '--blueprint', 'local.json');
+  const fromSub = nested.runIn(join(nested.repo, 'plans'), 'init', '--blueprint', 'local.json', '--verbose');
   assert.equal(fromSub.status, 0, fromSub.stdout + fromSub.stderr);
   assert.match(fromSub.stdout, /added the Local plan blueprint:/u, 'the file next to the caller is the one added');
   assert.equal((JSON.parse(nested.run('list', '--json').stdout).items ?? []).length, PUBLISHED.items.length);
