@@ -86,13 +86,16 @@ export async function publishTrunk({ root, board, config, say, onWait }) {
   let gate;
   try {
     gate = await runGate(directory, config, { trustStamp: false, landing: true, agent: 'coordinator', onWait });
+    // Push from the worktree that ran the suite, so the pre-push hook reads that run's green stamp instead of rerunning it.
+    if (gate.isGreen) {
+      const pushed = tryGit(directory, ['push', remote, `HEAD:refs/heads/${branch}`]);
+      if (pushed.status !== 0) throw new Refused('LAND_PUSH', `the landing push failed: ${pushed.stderr || pushed.stdout}; inspect the remote and hooks, then run pullboard publish again`);
+    }
   } finally {
     tryGit(root, ['worktree', 'remove', '--force', directory]);
     if (existsSync(directory)) rmSync(directory, { recursive: true, force: true });
   }
   if (gate.isGreen) {
-    const pushed = tryGit(root, ['push', remote, `${head}:refs/heads/${branch}`]);
-    if (pushed.status !== 0) throw new Refused('LAND_PUSH', `the landing push failed: ${pushed.stderr || pushed.stdout}; inspect the remote and hooks, then run pullboard publish again`);
     writeFileSync(stateFile(root), JSON.stringify({ published: head }) + '\n');
     say(`published ${branch} at ${head.slice(0, 12)}: the whole suite passed`);
     return { head, published: true, red: [] };
