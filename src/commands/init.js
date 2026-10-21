@@ -100,7 +100,7 @@ export async function run(io, { values }) {
   // Once registered, a background view lists this board for pullboard.dev [H5,N26].
   const view = await keepViewRunning();
   io.result?.({ ...result, view });
-  const viewLine = initViewLine(view);
+  const viewLine = initViewLine(view, { verbose: values.verbose });
   if (viewLine) io.say(viewLine);
   // Sharing remains a separate choice; --yes confirms only the setup commit.
   const code = await offerRelayAtInit(info.root, io, { details: values.verbose === true });

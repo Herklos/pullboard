@@ -15,7 +15,7 @@ export async function assertShortInit(t, sandbox) {
   const failures = [];
   /** Collect independent output assertions while allowing setup failures to retain their real cause. */
   const observe = (check) => { try { check(); } catch (error) { if (error.code !== 'ERR_ASSERTION') throw error; failures.push(error.message); } };
-  for (const mode of ['plain', 'blueprint', 'busy']) {
+  for (const mode of ['plain', 'blueprint', 'busy', 'failed']) {
     for (const verbose of [false, true]) {
       const box = sandbox();
       const repo = join(box.dir, `${mode}-${verbose ? 'verbose' : 'default'}`);
@@ -24,6 +24,10 @@ export async function assertShortInit(t, sandbox) {
       if (mode === 'busy') {
         box.env.PULLBOARD_VIEW_BACKGROUND = '1';
         box.env.PULLBOARD_VIEW_PORT = String(lease.port);
+      }
+      if (mode === 'failed') {
+        box.env.PULLBOARD_VIEW_BACKGROUND = '1';
+        box.env.PULLBOARD_VIEW_PORT = 'not-a-port';
       }
       const args = ['init', ...(mode === 'blueprint' ? ['--blueprint', 'web-app'] : []), ...(verbose ? ['--verbose'] : [])];
       const result = box.run(repo, ...args);
@@ -46,6 +50,7 @@ export async function assertShortInit(t, sandbox) {
         observe(() => assert.match(visible, new RegExp(`(?:port|Port) ${lease.port} .*in use`, 'u'), `${label}: actual port contention is reported`));
         assert.ok(held.listening, 'init leaves the owned listener running');
       }
+      if (mode === 'failed' && verbose) observe(() => assert.match(visible, /PULLBOARD_VIEW_PORT is a number from 0 to 65535/u, 'verbose preserves the actual view failure diagnostic'));
       assert.ok(existsSync(join(repo, 'AGENTS.md')), 'the short report still installs agent instructions');
       assert.ok(existsSync(join(repo, '.codex', 'rules', 'pullboard.rules')), 'the short report still installs Codex rules');
     }

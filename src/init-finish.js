@@ -53,10 +53,12 @@ export function initNextLine(agentSession) {
 }
 
 /** Describe the view without suggesting process termination, including when its port belongs to another program. */
-export function initViewLine(view) {
-  if (['started', 'running'].includes(view.state)) return `Pullboard view is running at http://127.0.0.1:${view.port}.`;
+export function initViewLine(view, { verbose = false } = {}) {
+  if (['started', 'running'].includes(view.state)) return `Pullboard view is running at http://127.0.0.1:${view.port}.${verbose && view.log ? ` Log: ${view.log}` : ''}`;
   if (view.state === 'busy') return `Port ${view.port} is in use; the background view did not start.`;
-  if (view.state === 'failed') return 'The background view did not start; setup is ready.';
+  if (view.state === 'failed') return verbose
+    ? `The background view did not start: ${view.message}${view.log ? ` (log: ${view.log})` : ''}`
+    : 'The background view did not start; setup is ready.';
   return null;
 }
 
