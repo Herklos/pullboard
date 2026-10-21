@@ -23,7 +23,7 @@ import {
 import {
   lex,
   lineAt,
-} from '../bin/checks/scan.js';
+} from './js-lex.js';
 import {
   cleanGitEnvironment,
   mainCheckout,
