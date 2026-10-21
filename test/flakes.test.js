@@ -98,6 +98,7 @@ function privateBuilder(box) {
 
 /** Await the real baseline, then start each later controlled assertion with a fresh execution counter. */
 function checkedItem(box) {
+  writeFileSync(box.counter, ''); // Earlier real push guards may have executed the same controlled target.
   const check = JSON.parse(readFileSync(join(box.root, 'pullboard.json'), 'utf8')).gate;
   const added = box.cli('add', box.lane, 'Controlled Native check', '--criterion', 'The controlled target passes without accepting retries.',
     '--route', 'light', '--brief', 'Files: test/alternating.test.mjs\nTest: run its configured Node TAP check. Preserve the original failed verdict while retaining exact diagnostic receipts.', '--check', check, '--wait');

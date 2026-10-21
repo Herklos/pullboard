@@ -279,10 +279,7 @@ test('watch --work announces a claimable item and a review left waiting [A2,N26]
   assert.equal(watch.out.lines.filter(({ line }) => JSON.parse(line).kind === 'review-wait' && JSON.parse(line).item === added.item_id).length, 1,
     'a waiting review is announced once');
   assert.ok(kinds.includes('accept') && kinds.includes('reject'), 'the verdicts print as events too');
-  const observed = events(box).slice(before);
-  assert.deepEqual(observed.filter(event => event.event_kind === 'check-baseline').map(event => [event.item_id, event.event_by]),
-    [[added.item_id, 'coordinator']], 'exactly the requested background baseline completes; watch adds no observation');
-  const moves = observed.filter(event => event.event_kind !== 'check-baseline').map(event => event.event_kind);
+  const moves = events(box).slice(before).map(event => event.event_kind);
   assert.deepEqual(moves, ['add', 'add', 'claim', 'release', 'check_accept', 'claim', 'submit', 'join', 'reserve', 'accept', 'claim', 'submit', 'reserve', 'reject'],
     'watch wrote no event: the new ones are exactly the moves this test made');
 });
