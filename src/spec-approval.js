@@ -1,0 +1,98 @@
+/** Approval provenance: a status word is not a person's decision [S1,B26,P6]. */
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import * as store from './board.js';
+import { tryGit } from './git.js';
+import { personNeeds } from './needs.js';
+import { Refused } from './refused.js';
+import { loadSpec, readSignoffs } from './spec.js';
+import { isVerifiedSignoff, verifyRowDecision } from './signature.js';
+
+/** Read each line's actual commit and Git author; neither identifies a person approval. */
+function rowOrigins(root, file) {
+  const result = tryGit(root, ['blame', '--line-porcelain', '--', file]);
+  const origins = new Map();
+  let line;
+  let commit;
+  let author = '';
+  for (const text of (result.status === 0 ? result.stdout : '').split('\n')) {
+    const header = /^([0-9a-f]{40,64}) \d+ (\d+)(?: \d+)?$/u.exec(text);
+    if (header) { commit = /^0+$/u.test(header[1]) ? null : header[1]; line = Number(header[2]); author = ''; }
+    else if (text.startsWith('author ')) author = text.slice(7);
+    else if (text.startsWith('\t') && line) origins.set(line, { commit, agent: author || 'unknown', attribution: 'Git author, seat unknown' });
+  }
+  return origins;
+}
+
+/** Match the exact current source, not just an id, a status word, or a Git author. */
+function matchesApproval(record, current) {
+  return record?.kind === 'spec' && record.id === current.row.id && record.file === current.file
+    && record.decision === 'approve' && record.text === current.row.text && record.replacement === current.source;
+}
+
+/** Read trustworthy receipts; an expected proof refusal leaves rows unconfirmed, never approved. */
+function approvalEvidence(root, evidenceErrors) {
+  try { return readSignoffs(root).filter(record => record.type === 'row-decision' && isVerifiedSignoff(record)); }
+  catch (error) {
+    if (!(error instanceof Refused)) throw error;
+    evidenceErrors.push({ code: error.code, message: error.message });
+    return [];
+  }
+}
+
+/** Check a board decision against local trust without making invalid proof block flag-mode work. */
+function confirmedDecision(root, decision, evidenceErrors) {
+  try { verifyRowDecision(root, decision); return true; }
+  catch (error) {
+    if (!(error instanceof Refused)) throw error;
+    evidenceErrors.push({ id: decision.id, code: error.code, message: error.message });
+    return false;
+  }
+}
+
+/** Load one provenance view for a command; no observation here manufactures an approval event. */
+export function specApprovalState(root, { board, config, spec = loadSpec(root, config) }) {
+  if (spec.exists === false) return { mode: config.specAgentApproval ?? 'flag', rows: [] };
+  const source = readFileSync(join(root, config.spec), 'utf8').split(/\r?\n/u);
+  const decisions = store.rowDecisions(board).filter(record => record.kind === 'spec' && record.file === config.spec);
+  const evidenceErrors = [];
+  const signed = approvalEvidence(root, evidenceErrors);
+  const unconfirmed = spec.rows.filter(row => row.status === 'approved').filter(row => {
+    const current = { row, file: config.spec, source: source[row.line - 1] };
+    const decision = decisions.findLast(record => record.id === row.id);
+    if (decision) {
+      if (!matchesApproval(decision, current)) return true;
+      return !confirmedDecision(root, decision, evidenceErrors);
+    }
+    return !matchesApproval(signed.findLast(record => record.kind === 'spec' && record.file === config.spec && record.id === row.id), current);
+  });
+  const origins = unconfirmed.length ? rowOrigins(root, config.spec) : new Map();
+  return { mode: config.specAgentApproval ?? 'flag', evidenceErrors, rows: unconfirmed.map(row => ({ id: row.id, text: row.text, gate: row.gate,
+    status: 'agent-approved', ...(origins.get(row.line) ?? { commit: null, agent: 'unknown', attribution: 'Git author, seat unknown' }) })) };
+}
+
+/** Current unconfirmed citations for a raw board item or an API item projection. */
+export function itemAgentApprovals(item, approval) {
+  const ids = new Set(item.specs ?? (item.item_spec_ids ?? '').split(',').filter(Boolean));
+  return approval.rows.filter(row => ids.has(row.id));
+}
+
+/** Qualify engineering verification without suggesting the person's governing judgment was approved. */
+export function agentApprovalLine(rows) {
+  return rows.length ? `verified against agent-approved ${rows.map(row => row.id).join(', ')}` : '';
+}
+
+/** Project current confirmation beside immutable items and their historical receipts. */
+export function projectSpecApprovals(state, approval) {
+  const byId = new Map(approval.rows.map(row => [row.id, row]));
+  const projected = { ...state, specApprovalEvidenceErrors: approval.evidenceErrors ?? [], spec: state.spec.map(row => ({ ...row, agentApproval: byId.has(row.id) ? { ...byId.get(row.id), mode: approval.mode } : null })),
+    items: state.items?.map(item => ({ ...item, agentApproved: itemAgentApprovals(item, approval), approvalQualification: agentApprovalLine(itemAgentApprovals(item, approval)) })) };
+  return { ...projected, needs: personNeeds(projected) };
+}
+
+/** An explicit refuse setting blocks unconfirmed citations; flag and allow always keep work moving. */
+export function refuseAgentApprovedRows(root, { board, config, item }) {
+  if (config.specAgentApproval !== 'refuse') return;
+  const rows = itemAgentApprovals(item, specApprovalState(root, { board, config }));
+  if (rows.length) throw new Refused('AGENT_APPROVAL_REQUIRED', `${rows.map(row => row.id).join(', ')} is agent-approved and spec.agentApproval is refuse; ask the coordinator to arrange confirmation or decline in the Spec view`);
+}

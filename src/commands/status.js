@@ -1,5 +1,6 @@
 /** The pullboard status command, in its own module so an item adding another command never edits these lines. */
 import * as store from '../board.js';
+import { personNeedsState } from '../needs-state.js';
 import {
   reviewQueueLine,
 } from '../next-steps.js';
@@ -31,7 +32,8 @@ export function run(io, { values }) {
   const summary = withBoard(ctx, (board) => {
     const me = whoAmI(ctx, board);
     const mine = store.listItems(board).filter((item) => item.item_status === 'claimed' && item.item_owner === me.id);
-    return { me, mine, stats: store.stats(board), reviewQueue: { ...store.reviewQueue(board), ...store.reviewQueueBreakdown(board) }, unread: store.unreadCount(board, me.id), relay: relayStatus(ctx.info.root),
+    const approvalState = personNeedsState(ctx.info.root, { board });
+    return { me, mine, needs: approvalState.needs, specApprovalEvidenceErrors: approvalState.specApprovalEvidenceErrors, stats: store.stats(board), reviewQueue: { ...store.reviewQueue(board), ...store.reviewQueueBreakdown(board) }, unread: store.unreadCount(board, me.id), relay: relayStatus(ctx.info.root),
       submitInvariantProposals: submitInvariantProposals(store.events(board), ctx.config) };
   });
   if (values.json) {
@@ -45,6 +47,7 @@ export function run(io, { values }) {
   io.say(`verdicts: ${accepted} accepted, ${rejected} rejected`);
   io.say(reviewQueueLine(ctx, summary.reviewQueue, span));
   for (const proposal of summary.submitInvariantProposals) io.say(submitInvariantLine(proposal));
+  for (const need of summary.needs.filter(need => need.kind === 'agent-approved')) io.say(`${need.text}; ${need.what}`);
   if (Object.keys(ctx.config.products).length) {
     const all = withBoard(ctx, (board) => store.listItems(board, { all: true }));
     productSummaries(ctx.config, loadSpec(ctx.info.root, ctx.config), all).forEach((product) => io.say(productLine(product)));

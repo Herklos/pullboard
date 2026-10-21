@@ -16,6 +16,7 @@ import {
   undraftedRigor,
 } from './rigor-notices.js';
 import { personNeeds } from './needs.js';
+import { projectSpecApprovals, specApprovalState } from './spec-approval.js';
 import {
   sentinelDraftNeeds,
   sentinels,
@@ -27,8 +28,8 @@ export function personNeedsState(root, { board: providedBoard = null, includeRig
   const board = providedBoard ?? { db: store.openBoardReadOnly(join(info.commonDir, 'pullboard', 'board.sqlite')) };
   try {
     const decisions = store.rowDecisions(board);
-    const state = projectFit(pendingFit(info.commonDir), projectRowDecisions(decisions, projectState(root, { board })));
     const config = loadConfig(root);
+    const state = projectSpecApprovals(projectFit(pendingFit(info.commonDir), projectRowDecisions(decisions, projectState(root, { board }))), specApprovalState(root, { board, config }));
     const rows = projectRowDecisions(decisions, { root, spec: loadSpec(root, config).rows, practice: loadDoctrine(root, config).rows });
     const rigorDrafts = rigorDraftNeeds(rows);
     const projected = { ...state, rigorDrafts, sentinelDrafts: sentinelDraftNeeds(sentinels(board)), ...(includeRigorUndrafted

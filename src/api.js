@@ -54,6 +54,7 @@ import {
   projectFlowStats,
 } from './stats-flow.js';
 import { projectRowDecisions } from './row-decisions.js';
+import { projectSpecApprovals, specApprovalState } from './spec-approval.js';
 import {
   fitFile,
   pendingFit,
@@ -90,6 +91,7 @@ function stateFileInputs(root, config) {
     { name: `spec:${config.spec}`, path: join(root, config.spec) },
     { name: `practice:${config.practice}`, path: join(root, config.practice) },
     { name: 'builtin:standard-doctrine.md', path: new URL('./standard-doctrine.md', import.meta.url) },
+    ...['signoffs.jsonl', 'signers', 'first-commit', 'signers.initial'].map(name => ({ name: `approval:${name}`, path: join(root, '.pullboard', name) })),
     { name: 'fit:blueprint-fit.json', path: fitFile(repoInfo(root).commonDir) },
   ];
 }
@@ -476,7 +478,7 @@ function buildLocalBoardState(root, boardId, board, codeIsMain, { previous = nul
     state.requests = projectData.requests;
     state.personRequests = projectData.personRequests;
     state.milestones = projectData.milestones;
-    const decorated = projectFit(pendingFit(repoInfo(root).commonDir), projectRowDecisions(projectData.rowDecisions, state));
+    const decorated = projectSpecApprovals(projectFit(pendingFit(repoInfo(root).commonDir), projectRowDecisions(projectData.rowDecisions, state)), specApprovalState(root, { board, config }));
     const bases = new Map(decorated.items.map((item) => [item.id, item]));
     for (const id of dirtyIds) {
       if (!currentById.has(id)) continue;

@@ -113,7 +113,7 @@ The board file is in the repository's Git common directory at `.git/pullboard/bo
 | `row grammar` | `1` | `SPEC_GRAMMAR_VERSION` in `src/spec.js`; optional `<!-- pullboard-grammar N -->` line in either file (absence means the current grammar) | Both files share the version. A declared version must match; an incompatible grammar change requires a coordinated version bump and compatible files. No automatic conversion occurs. |
 | `board schema` | `2` | `SCHEMA_VERSION` in `src/board.js`, persisted as `PRAGMA user_version` | Create missing tables and indexes, add missing columns in place with declared defaults, restore missing or changed triggers, and remove stale machine triggers without replacing rows. |
 | `event log` | `1` | `EVENT_LOG_VERSION` in `src/board.js`, persisted in `board_meta` as `event_log_version` | Older event-log versions upgrade in place; newer versions are refused with `EVENT_LOG_VERSION`. Preserve event rows when the board schema changes. |
-| `move engine` | `65` | `ENGINE_VERSION` in `src/machine.js`, carried as `engine` in every sealed executable move | Bump when a move's meaning changes, independently of the event log and sealed envelope. A newer engine is refused with `ENGINE_VERSION`, naming both versions and asking you to upgrade Pullboard. |
+| `move engine` | `68` | `ENGINE_VERSION` in `src/machine.js`, carried as `engine` in every sealed executable move | Bump when a move's meaning changes, independently of the event log and sealed envelope. A newer engine is refused with `ENGINE_VERSION`, naming both versions and asking you to upgrade Pullboard. |
 <!-- format-versions:end -->
 
 Relay transport capability `apiVersion: 2` is independent of these versions and
@@ -484,3 +484,11 @@ Engine 43 (`RIGOR_NOTICE_ENGINE`) posts one coordinator shout and one typed `rig
 A proved Rigor draft carries `source: rigor:<percent-encoded JSON>` with `version: 1`, its `key`, `evidence` (`items`, `occurrences`, `neverAgain`) and `proof` (`check`, `red`, `green`). The proof contains actual full commits, executed exit statuses and problem counts. The existing spec and doctrine row grammar reads this field; prose mentioning Rigor is not a typed source. The person uses ordinary Approve or Decline, and the coordinator applies the approved row without a new build item.
 
 Engine 54 replaces the automatic strong-to-strong ceiling escalation with one coordinator notice per rejection pair, naming the builder and both rejection receipts. Ordinary rejection still reopens and clears the owner and lease. Light and mid routes keep engine-50 automatic escalation. Engines 50 through 53 retain their original ceiling escalation when replayed.
+
+## Approval provenance
+
+An `approved` status written directly into the Spec is reported as `agent-approved` until the exact row is backed by a person decision or a verified signed row-decision receipt. Git blame supplies the row's commit and author, labelled “Git author, seat unknown”; it never establishes person approval. `pullboard spec approve <id>` confirms the row and `spec decline <id> --reason "why"` declines it through the existing person channel. File application remains a coordinator step.
+
+`pullboard.json` accepts the existing `"spec": "SPEC.md"` form, or `"spec": {"file": "SPEC.md", "agentApproval": "flag"}`. `flag` is the default and keeps work moving; `allow` suppresses the outstanding approval call; explicit `refuse` prevents a new frozen citation of an unconfirmed row with `AGENT_APPROVAL_REQUIRED`.
+
+Engine 68 retains the existing validated verifier note in new acceptance-event detail. Earlier engines retain their original receipt shape; later person confirmations project current approval state beside that immutable history. No new row status or approval authority is inferred from a Git author or an unsigned receipt.

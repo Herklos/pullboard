@@ -7,6 +7,7 @@ import {
   barCorrections,
 } from '../bar-corrections.js';
 import * as store from '../board.js';
+import { agentApprovalLine, itemAgentApprovals, specApprovalState } from '../spec-approval.js';
 import {
   sayCheckBaseline,
 } from '../check-baseline.js';
@@ -33,7 +34,7 @@ import {
 export function run(io, { first, values }) {
   const ctx = context(io);
   const id = idArg(first);
-  const { item, verdicts, moves, thread, related, reviewer, agents, mainMerge, infra } = withBoard(ctx, (board) => ({
+  const { item, verdicts, moves, thread, related, reviewer, agents, mainMerge, infra, approval } = withBoard(ctx, (board) => ({
     item: verdictProjector(ctx.info.root, board).project(store.getItem(board, id)),
     verdicts: store.verdictsFor(board, id),
     moves: store.events(board, { itemId: id }).filter((event) => ['attempt', 'escalate'].includes(event.event_kind)),
@@ -41,13 +42,17 @@ export function run(io, { first, values }) {
     related: store.relatedItems(board, store.getItem(board, id)),
     reviewer: store.reviewHolder(board, store.getItem(board, id)),
     agents: store.listAgents(board), mainMerge: mainMergeFor(board, id), infra: infraNotes.infraNoteOf(store.events(board, { itemId: id })),
+    approval: specApprovalState(ctx.info.root, { board, config: ctx.config }),
   }));
   const agentName = (id) => displayAgentName(agents.find((agent) => agent.agent_id === id) ?? { agent_id: id }, ctx.config.agents.names);
+  const agentApproved = itemAgentApprovals(item, approval);
+  const approvalQualification = agentApprovalLine(agentApproved);
   if (values.json) {
-    io.result({ ...item, verdicts, thread });
+    io.result({ ...item, verdicts, thread, agentApproved, approvalQualification });
     return 0;
   }
   io.say(itemLine(item, agentName, Boolean(mainMerge)));
+  if (item.item_status === 'verified' && approvalQualification) io.say(approvalQualification);
   if (item.item_verdict_state) io.say(staleVerdictRefusal(item, item.item_verdict_state).message);
   if (item.item_criterion) io.say(`criterion: ${item.item_criterion}`);
   if (item.item_check) io.say(`check: ${item.item_check}`);

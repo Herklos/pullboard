@@ -44,6 +44,7 @@ import {
   storeTriggers,
 } from './machine.js';
 import { LOCAL_LANDING_ENGINE } from './land-engine.js';
+import { SPEC_APPROVAL_ENGINE } from './spec-approval-engine.js';
 import { Refused } from './refused.js';
 import { refuseMaskedExit } from './check-mask.js';
 import {
@@ -1606,6 +1607,7 @@ export function verify(board, id, { agentId, decision, reason, note = '', cause,
       set: (found) => ({ item_verdict: decision, item_verified_by: isAccept ? agentId : null, item_owner: isAccept ? found.item_owner : null }),
     });
     const detail = { reason: code, commit: item.item_commit, ...(!isAccept && cause !== undefined && cause !== null ? { cause } : {}) };
+    if (isAccept && engine >= SPEC_APPROVAL_ENGINE) detail.note = note.trim();
     if (isAccept && check !== undefined) detail.check = check;
     if (newReview) detail.review = { commit: review.commit, ...(Object.hasOwn(review, 'head') ? { head: review.head } : {}), trunk: review.trunk, paths: [...review.paths] };
     logEvent(board, agentId, verb, id, implies?.length ? { ...detail, implies } : detail);

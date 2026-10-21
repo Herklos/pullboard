@@ -212,6 +212,7 @@ import {
   standings,
   unmetRows,
 } from './spec.js';
+import { refuseAgentApprovedRows } from './spec-approval.js';
 import {
   answerQuestion,
   landBlueprint,
@@ -1039,6 +1040,7 @@ export function freezer(ctx, { captureVerifyPolicy = false, board } = {}) {
       config = policy ? itemPolicy(ctx.info.root, { ...item, item_frozen: JSON.stringify({ policy }) }).config : ctx.config;
     }
     const doctrine = board ? agentDoctrine(ctx, board) : loadDoctrine(ctx.info.root, config);
+    if (board) refuseAgentApprovedRows(ctx.info.root, { board, config, item });
     const frozen = frozenCriterion(loadSpec(ctx.info.root, config), item, doctrine);
     if (!policy) return frozen; // Legacy criteria retain their original digest and committed claim base.
     const text = JSON.stringify({ ...JSON.parse(frozen.text), policy });
