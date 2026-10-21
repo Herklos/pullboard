@@ -1714,7 +1714,6 @@ export function reopen(board, id, { agentId, note = '', conflict, cause, reopenF
   });
 }
 
-
 /**
  * Refuse unless the acting agent is the coordinator.
  *
