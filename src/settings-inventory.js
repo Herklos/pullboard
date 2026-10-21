@@ -1,15 +1,27 @@
 /** Read-only, allowlisted settings projection for the local API [O5,O6]. */
-import { existsSync, readFileSync } from 'node:fs';
+import {
+  existsSync,
+  readFileSync,
+} from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { defaults, loadConfig } from './config.js';
+import {
+  defaults,
+  loadConfig,
+} from './config.js';
 import { repoInfo } from './git.js';
 import { machineHome } from './machine-home.js';
-import { machineSettingsFile, gateQueueSettings } from './queue-settings.js';
+import {
+  machineSettingsFile,
+  gateQueueSettings,
+} from './queue-settings.js';
 import { loadMachineSettings } from './settings.js';
 import { performanceCores } from './gate.js';
-import { defaultViewPort, DEFAULT_VIEW_PORT } from './view-port.js';
+import {
+  defaultViewPort,
+  DEFAULT_VIEW_PORT,
+} from './view-port.js';
 import { Refused } from './refused.js';
 
 const MACHINE_DEFAULTS = {
