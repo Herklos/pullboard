@@ -4,9 +4,46 @@ Notable changes to Pullboard, for people using it. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-10-21
+
+### Your board catches its own repeats
+
+Pullboard now turns a failure that keeps coming back into a rule with its proof. Rigor runs by itself: it names the files that keep colliding and proposes how to split them, and it carries your code and test quality rules as checks it runs on every change. Its new rules arrive as drafts, and only you approve them. Sentinels watch for something wrong right now: a board holds its own watches, which you approve and which report to their owner, and Rigor can draft one when a check could watch a repeat.
+
+### Added
+
+- The view shows blueprint fit proposals with their reasons, and sentinel drafts for you to approve. (#762, #920)
+- `pullboard stats` and `pullboard digest` say what the board caught: work a reviewer sent back and the gap it named, merges that went back instead of landing broken, flaky tests proven, and stuck states. It stays quiet unless someone asks. (#816)
+- Pullboard tracks flaky tests, including CI runs: a test that goes red and green on the same tree is filed once with its runs, and can stop blocking landings until its fix is verified (`pullboard flakes quarantine on`, off by default). (#887, #918, #813)
+- `pullboard queue` shows the work queue with release breakpoints, rank, route and who holds each item, and `pullboard health` names queue faults: a route nobody serves, an item nobody can take, a rank out of order. (#797, #798)
+- A recurring job declares its cadence with `pullboard loop declare`, and a missed run shows in health. (#815)
+- Optional two-tier landing: accepted work lands on your local trunk in seconds, and `pullboard publish` pushes only a head the whole suite passed (`landing.publish` set to `separate`; off by default). (#801)
+- A reopened item can wait for its own builder first, for a time you set (`claim.reopenFirstRefusalMinutes`; off by default). (#954)
+
+### Safer by default
+
+- A rule cannot lose its test silently: spec check fails when an approved row's gate file was deleted or renamed. (#809)
+- The board runs a revert control before it accepts a fix, a gate that rejects everything is an alarm and not a pass, and a check whose pipe hides its exit status is refused. (#810, #811, #812)
+- A verdict from the session that built the item is refused, and a change that edits an existing test or gate file says why. (#921, #814)
+- Lane branches, merge commits, docs and view files never name your machine or quote you. (#892, #893, #894, #895)
+
+### Your board on your phone
+
+- A board of any size opens on a phone from a small snapshot, then streams its full history while new moves arrive. The relay holds snapshots up to 64 MB, and an account nearing its storage quota is warned before any write is refused. (#903, #946, #949)
+- A linked board opens in Safari and other WebKit browsers. (#976)
+- A move still succeeds while the relay is down: it waits in an ordered outbox and is sent when the relay is back. A slow or lost relay reply never fails a local move. (#922, #919)
+- The hosted page shows a screen right away on iPhone Safari, names the real reason a signed-in browser sees no board with the one step that fixes it, and never flashes another screen first. (#897, #899, #900, #901, #904, #932)
+
 ### Fixed
 
-- A slow or lost relay reply no longer fails a move on a board the relay has not taken yet. When the first upload's reply is lost, Pullboard checks with the relay for up to two minutes and shows progress; if the relay never answers, the move is refused once, with the command to run again.
+- `pullboard init --yes` never hangs when an agent runs it; a Codex agent whose sandbox cannot write the board gets its one-step fix; an agent can make its first lane without stopping to ask. (#906, #913, #914)
+- `pullboard next` never tells a seat it holds another seat's claim, and the MCP `board_status` tool answers on a board with held items. (#958, #974)
+- A hung network mount no longer stalls Pullboard. (#912)
+- The tour leaves no demo project behind, links nothing to the relay, and finishes when an agent runs it. (#951, #952)
+
+### Upgrade note
+
+- Boards written by this version use the relay's new format, so a joined computer on an older version is asked to upgrade before it can read them; the phone page updates with the relay. (#903)
 
 ## [0.9.1] - 2026-10-19
 
