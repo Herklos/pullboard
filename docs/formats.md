@@ -113,7 +113,7 @@ The board file is in the repository's Git common directory at `.git/pullboard/bo
 | `row grammar` | `1` | `SPEC_GRAMMAR_VERSION` in `src/spec.js`; optional `<!-- pullboard-grammar N -->` line in either file (absence means the current grammar) | Both files share the version. A declared version must match; an incompatible grammar change requires a coordinated version bump and compatible files. No automatic conversion occurs. |
 | `board schema` | `2` | `SCHEMA_VERSION` in `src/board.js`, persisted as `PRAGMA user_version` | Create missing tables and indexes, add missing columns in place with declared defaults, restore missing or changed triggers, and remove stale machine triggers without replacing rows. |
 | `event log` | `1` | `EVENT_LOG_VERSION` in `src/board.js`, persisted in `board_meta` as `event_log_version` | Older event-log versions upgrade in place; newer versions are refused with `EVENT_LOG_VERSION`. Preserve event rows when the board schema changes. |
-| `move engine` | `64` | `ENGINE_VERSION` in `src/machine.js`, carried as `engine` in every sealed executable move | Bump when a move's meaning changes, independently of the event log and sealed envelope. A newer engine is refused with `ENGINE_VERSION`, naming both versions and asking you to upgrade Pullboard. |
+| `move engine` | `66` | `ENGINE_VERSION` in `src/machine.js`, carried as `engine` in every sealed executable move | Bump when a move's meaning changes, independently of the event log and sealed envelope. A newer engine is refused with `ENGINE_VERSION`, naming both versions and asking you to upgrade Pullboard. |
 <!-- format-versions:end -->
 
 Relay transport capability `apiVersion: 2` is independent of these versions and
@@ -179,6 +179,8 @@ Engine 62 (`HEALTH_CAP_ENGINE`; engine 61 is #887's) caps what one recorded heal
 Engine 63 (`RECURRING_JOB_ENGINE`) records recurring jobs. `declareJob` is the coordinator's or the person's: it stores a job's name, its cadence (`10m`, `2h`, `1d`, `hourly` or `daily`) and its owner, and a later declaration replaces the cadence and owner but keeps the run history. `recordJobRun` is any joined seat's and stores the job's name. Both events carry `engine: 63`. `pullboard health` reports a job with no run within one and a half cadences as `JOB_MISSED`, once per episode. An older engine refuses both moves with `ENGINE_VERSION`, and a replay at an older engine ignores their events.
 
 Engine 64 (`LOCAL_LANDING_ENGINE`) lets a landing batch reach the state `trunk`: merged onto the local trunk after its quick guards (the static checks and submit invariants), with each item's merged receipt recorded before anything is pushed. Only a board whose `pullboard.json` sets `landing: { "publish": "separate" }` lands this way; `pullboard publish` then runs the whole suite on the exact trunk head and pushes only a green head. A batch recorded at an older engine still needs `pushed` before its receipts.
+
+Engine 66 (`REOPEN_FIRST_REFUSAL_ENGINE`; engine 65 is #918's) holds a reopened item for its builder. With `claim.reopenFirstRefusalMinutes` above zero, a reject, a landing failure or a trunk conflict records when the item came back, and for that many minutes only its builder may claim it; another seat's claim is refused with `REOPEN_HELD_FOR_BUILDER`. Older engines replay those moves without the window.
 
 The CLI declares its engine in every relay request's `X-Pullboard-Engine` header.
 A linked board requires at least engine 48 after issuing any agent token or machine credential, including

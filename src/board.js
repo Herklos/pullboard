@@ -29,7 +29,14 @@ import {
   briefSections,
 } from './brief.js';
 import { COORDINATOR } from './config.js';
-import { manualLandingFailure, firstRefusal, firstRefusalProblem, firstRefusalReason, firstRefusalDetail, tellFirstRefusal } from './claims.js';
+import {
+  manualLandingFailure,
+  firstRefusal,
+  firstRefusalProblem,
+  firstRefusalReason,
+  firstRefusalDetail,
+  tellFirstRefusal,
+} from './claims.js';
 import {
   ENGINE_VERSION,
   REOPEN_FIRST_REFUSAL_ENGINE,
