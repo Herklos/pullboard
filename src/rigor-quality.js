@@ -54,7 +54,7 @@ export const QUALITY_RULES = Object.freeze([
   { key: 'guard-mutation', section: 'T', text: 'A guard test fails when the guard is deleted.',
     how: 'Rigor turns each throw a change adds to a source file into a no-op, one at a time, and runs the test files the change touches; a guard they still pass without is named.' },
   { key: 'size-budget', section: 'C', text: `A file over the ${LINE_CAP}-line cap, or a change that grows code past its ${GROWTH_BUDGET}-line budget, is named.`,
-    how: `Rigor names each changed source file that ends over ${LINE_CAP} lines and grew, and a change whose non-test code grows by more than ${GROWTH_BUDGET} lines net, at the file that grew most.` },
+    how: `Rigor names each changed source file that ends over ${LINE_CAP} lines and grew, and a change whose non-test code grows by more than ${GROWTH_BUDGET} lines net, or the board's rigor.budget setting, at the file that grew most.` },
   { key: 'root-cause-control', section: 'T', text: 'A root cause is proven by a control that would have come out differently before the fix lands.',
     how: 'Rigor runs each fix commit\'s changed test files on the fix\'s parent, where they must fail, and at the fix, where they must pass; a cause argued only in prose is review.' },
 ]);

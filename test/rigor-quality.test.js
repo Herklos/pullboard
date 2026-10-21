@@ -9,6 +9,7 @@ import { spawnSync } from 'node:child_process';
 import {
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   realpathSync,
   rmSync,
   writeFileSync,
@@ -160,6 +161,17 @@ test('quality rules are drafted for the person and stay off until approved [D1,D
   const row = drafts.find((draft) => draft.row.text.startsWith(QUALITY_RULES[0].text)).id;
   assert.equal(report.out.trim(), `web/page.js:1: ${row} fix-test: fix ${fix.slice(0, 12)} "fix(web): close the page" changes no test that reproduces its failure`,
     'the breach names its file, line, doctrine row and rule');
+  const config = JSON.parse(readFileSync(join(box.web, 'pullboard.json'), 'utf8'));
+  writeFileSync(join(box.web, 'pullboard.json'), JSON.stringify({ ...config, rigor: { budget: 0 } }));
+  const sizeRow = drafts.find((draft) => draft.row.text.startsWith(QUALITY_RULES[4].text)).id;
+  const budget = box.run(box.web, 'rigor', 'quality', '--rule', 'size-budget');
+  assert.equal(budget.code, 1, budget.out + budget.err);
+  assert.equal(budget.out.trim(), `web/page.js:1: ${sizeRow} size-budget: this change grows code by 1 lines, past its 0-line budget; split the change`,
+    'the board\'s committed rigor.budget setting replaces the default');
+  assert.equal(box.run(box.web, 'rigor', 'quality', '--rule', 'size-budget', '--budget', '5').code, 0, '--budget wins over the setting');
+  writeFileSync(join(box.web, 'pullboard.json'), JSON.stringify({ ...config, rigor: { budget: -1 } }));
+  assert.match(box.run(box.web, 'rigor', 'quality').err, /BAD_CONFIG/u);
+  writeFileSync(join(box.web, 'pullboard.json'), JSON.stringify(config, null, 2));
   const clean = box.run(box.repo, 'rigor', 'quality');
   assert.equal(clean.code, 0, clean.out + clean.err);
   assert.equal(clean.out.trim(), '', 'main against itself has no change to judge');

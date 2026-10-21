@@ -71,7 +71,8 @@ export function qualityCommand(root, key) {
  */
 export function rigorQualityCommand(io, { values }, { root, config }) {
   const rules = values.rule ? String(values.rule).split(',').map((key) => key.trim()).filter(Boolean) : undefined;
-  const budget = values.budget === undefined ? GROWTH_BUDGET : Number(values.budget);
+  // A flag wins over the board's committed rigor.budget setting, which wins over the default.
+  const budget = values.budget === undefined ? config.rigor?.budget ?? GROWTH_BUDGET : Number(values.budget);
   if (!Number.isSafeInteger(budget) || budget < 0) throw new Refused('USAGE', `--budget takes a whole number of lines, such as ${GROWTH_BUDGET}`);
   const range = changeRange(root, { base: values.base, head: values.head });
   const breaches = qualityBreaches(root, range, { rules, budget });
