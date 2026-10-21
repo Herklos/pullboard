@@ -40,6 +40,7 @@ import { MACHINE } from './machine.js';
 import {
   listApiProjects,
   registryFile,
+  registeredProjectRootsSnapshot,
 } from './projects.js';
 import { milestoneRoadmap } from './roadmap.js';
 import { proofStats } from './stats.js';
@@ -826,6 +827,10 @@ export function createLocalApiHandler({ secret, getPort, runCommand, projects = 
     throw new TypeError('createLocalApiHandler sessionCookie needs a cookie name and a canonical base64url value with at least 128 bits of random capacity');
   }
   const projectScope = apiProjectScope(projects, scope);
+  // Other API reads refresh the registry; settings must not prune or rewrite its saved metadata.
+  const settingsProjects = projects === listApiProjects
+    ? () => (registeredProjectRootsSnapshot() ?? []).map(root => ({ root })) : projects;
+  const settingsScope = apiProjectScope(settingsProjects, scope);
   const apiProjects = projectScope.projects;
   const scopeCommonDir = projectScope.commonDir;
   const codeIsMain = codeIsFromMain() && isMain !== false;
@@ -1026,7 +1031,7 @@ export function createLocalApiHandler({ secret, getPort, runCommand, projects = 
       if (req.headers.origin && req.headers.origin !== 'http://' + req.headers.host && !permittedOrigins.has(req.headers.origin)) throw new Refused('API_ORIGIN', 'use the API from its own origin');
       return { local: true };
     },
-    settings: (selected) => settingsInventory(apiProjects(), selected),
+    settings: (selected) => settingsInventory(settingsScope.projects(), selected),
     boards: () => withGitReadFacts(() => apiBoardListing(apiProjects, codeIsMain)),
     board: (id) => withGitReadFacts(() => findBoard(id, apiProjects, codeIsMain)),
     state: (board, who, seen, options) => withGitReadFacts(() => localState(board, seen, options).state),

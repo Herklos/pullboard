@@ -48,7 +48,6 @@ export async function proveSettingsApi() {
     const config = { ...defaults(), gate: 'node --test', health: { sentinel: false }, testConcurrency: { files: 3, browser: 1 }, claim: { reopenFirstRefusalMinutes: 30 }, lanes: { app: { owns: ['app/'], specs: ['O5'], ignoredSecret: canary } } };
     writeFileSync(join(repo, 'pullboard.json'), JSON.stringify(config));
     writeFileSync(join(home, 'settings.json'), JSON.stringify({ gateSlots: 3, browserSlots: 2, gate: { queue: { reviewsFirst: true }, shortSlots: 1 }, relay: { offerAtInit: false }, unknown: { token: canary } }));
-    writeFileSync(join(home, 'projects.json'), JSON.stringify({ fixture: canary }));
     mkdirSync(join(home, 'relay-machine'));
     writeFileSync(join(home, 'relay-machine', 'state.json'), JSON.stringify({ v: 1, autoLink: true, session: { token: canary, account: 'fixture', url: 'https://relay.example.invalid' }, approvals: [{ sealed: canary }], devices: [], excluded: [] }));
     writeFileSync(join(privateDir, 'relay.json'), JSON.stringify({ version: 1, board: id, url: 'https://relay.example.invalid', token: canary, agentTokens: { fixture: { token: canary } }, snapshot: canary }));
@@ -69,9 +68,12 @@ export async function proveSettingsApi() {
     oldBoard.exec('CREATE TABLE board_meta(meta_key TEXT PRIMARY KEY, meta_value TEXT)');
     oldBoard.prepare('INSERT INTO board_meta VALUES (?, ?)').run('board_id', legacyId);
     oldBoard.close();
+    writeFileSync(join(home, 'projects.json'), JSON.stringify({
+      projects: [repo, legacy, missing, join(root, 'gone')].map(root => ({ root, name: 'stale fixture name', project: '', added: '2026-01-01' })),
+      unknown: { token: canary },
+    }));
     let port;
-    handler = createLocalApiHandler({ secret: 'api-fixture', getPort: () => port, runCommand: async () => 0,
-      projects: () => [repo, legacy, missing].map(root => ({ root, name: 'fixture', project: '', added: '2026-01-01' })) });
+    handler = createLocalApiHandler({ secret: 'api-fixture', getPort: () => port, runCommand: async () => 0 });
     server = createServer(handler);
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
     port = server.address().port;
@@ -84,6 +86,7 @@ export async function proveSettingsApi() {
     const result = JSON.parse(text);
     assert.equal(result.version, 1);
     assert.equal(result.warnings[0].root, missing);
+    assert.ok(result.warnings.some(warning => warning.root === join(root, 'gone')), 'missing registered folders are reported without pruning');
     const rows = result.settings;
     const find = (scope, key) => rows.find(row => row.scope === scope && row.key === key);
     for (const row of rows) {
