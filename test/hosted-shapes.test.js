@@ -912,15 +912,6 @@ const CAUSES = [
       'webkit:phone/signed-in/unpaired/oversize/stale-key',
     ],
   },
-  {
-    item: 985,
-    cause: "a paired browser shows the healthy board but never mentions the board waiting for a phone approval",
-    cells: [
-      'chromium:board-no-view/signed-in/paired/approval/fresh',
-      'chromium:other-computer/signed-in/paired/approval/fresh',
-      'chromium:phone/signed-in/paired/approval/fresh',
-    ],
-  },
 ];
 
 /** The filed defect that covers one failing cell, or undefined. */
@@ -1066,6 +1057,24 @@ async function runCells(engine, built, boardCells, report, ineffective) {
   await revokedRun;
   return failures;
 }
+
+test('a board awaiting a phone approval is mentioned on a non-phone paired browser [H5]', {
+  timeout: 180_000,
+}, async (t) => {
+  if (!hostedEngines().some((engine) => engine.name === 'chromium' && engine.available)) return t.skip('Chrome is not installed; set PULLBOARD_CHROME');
+  const engine = await openEngine('chromium');
+  t.after(() => engine.close());
+  const built = await buildBoards(t, 'approval', [engine]);
+  const keys = Object.fromEntries(built.linked.map(({ id, key }) => [id, key]));
+  const boards = built.linked.map(({ id }) => id);
+  const context = await engine.newContext();
+  t.after(() => context.close());
+  const seen = await visit(context, {
+    route: built.front.route(built.pairedSession, null), phone: false,
+    bootstrap: storedScript('fresh', { keys, boards }),
+  }, true);
+  assert.equal(judge({ where: 'other-computer', account: 'signed-in', browser: 'paired', boards: 'approval', stored: 'fresh' }, seen), null, seen.words);
+});
 
 test('every listed cause is a filed item covering real cells, each cell once [H5,C7]', () => {
   const all = new Set(cells().flatMap((cell) => ['chromium', 'webkit'].map((engine) => `${engine}:${cell.id}`)));
