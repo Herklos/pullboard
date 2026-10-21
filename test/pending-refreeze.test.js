@@ -1,3 +1,4 @@
+/** @pullboard-test-loads src/board.js src/engine.js src/exchange.js src/machine.js */
 /** Pending coordinator corrections keep a live claim until its frozen bar is adopted [V2,H16]. */
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';

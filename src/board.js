@@ -44,6 +44,7 @@ import {
   storeTriggers,
 } from './machine.js';
 import { Refused } from './refused.js';
+import { refuseMaskedExit } from './check-mask.js';
 import {
   ROUTES,
   canTake,
@@ -693,6 +694,7 @@ function checkRouted({ brief, route, criterion, check }) {
   if (brief.length > BRIEF_LIMIT) {
     throw new Refused('BRIEF_TOO_LONG', `the brief is ${brief.length} characters; keep it under ${BRIEF_LIMIT} and point to longer docs by path`);
   }
+  refuseMaskedExit(check);
   if (route === 'strong') return;
   const sections = briefSections(brief);
   const missing = [
@@ -1685,7 +1687,7 @@ export function reopen(board, id, { agentId, note = '', conflict, cause }) {
   });
 }
 
-/** Read test and merge-commit evidence from a Studio/manual landing note without checking Git. */
+/** Read test and merge-commit evidence from a hand-written landing note without checking Git. */
 function manualLandingFailure(note) {
   const generatedPrefix = /^Landing batch [a-z0-9_-]{1,80} failed /iu.exec(note);
   const body = generatedPrefix ? note.slice(generatedPrefix[0].length) : note;

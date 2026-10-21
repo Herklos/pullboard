@@ -192,6 +192,7 @@ Receipts
                                         commit pullboard.json to apply; a passing diagnostic never turns the original red green
   pullboard rigor                       failure causes that repeated: on 2 items, or 1 item at 2 commits;
                                         each with its items and whether it reads as work, product or both
+  pullboard rigor --draft-splits        coordinator on main: draft review-gated split proposals for files colliding on 2 items in 14 days; only the person approves
   pullboard rigor draft <key> "<rule>" --check "<command>" --red <commit> --green <commit> [--section <letter>]
                                         --red is a noticed failure commit; prove its check red, then green at --green
                                         draft Doctrine (work), spec (product) or both; only the person approves

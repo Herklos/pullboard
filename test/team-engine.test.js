@@ -1,3 +1,4 @@
+/** @pullboard-test-loads src/board.js src/engine.js src/exchange.js src/machine.js */
 /** Sealed re-reviews bind the original work without changing released receipts [E8,H16,V8]. */
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';

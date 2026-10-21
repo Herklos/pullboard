@@ -1,6 +1,8 @@
 /** Select committed Node test files through import edges; uncertainty requires the full gate [V4,C7]. */
 import { spawnSync } from 'node:child_process';
 import { posix } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { pathToFileURL } from 'node:url';
 import { cleanGitEnvironment } from './git.js';
 import {
   commonJsIn,
@@ -14,7 +16,90 @@ const DOC = /^docs\/.+\.md$/u;
 const TEST_TREE_INPUT = '/** @pullboard-test-input test-tree */';
 const SOURCE_TREE_INPUT = '/** @pullboard-test-input source-tree */';
 const DOCS_TREE_INPUT = '/** @pullboard-test-input docs-tree */';
+// A computed-import test may declare the repository modules it can load, in its leading comment header only.
+const LOADS = /^\/\*\* @pullboard-test-loads (.+?) \*\/$/u;
 const GLOBAL = new Set(['bin/run-tests.js', 'package.json', 'package-lock.json', 'npm-shrinkwrap.json', 'yarn.lock', 'pnpm-lock.yaml', 'src/gate.js', 'src/cli.js', 'src/hooks.js', 'src/trusted-policy.js', 'src/affected-tests.js', 'src/module-imports.js']);
+
+/**
+ * The file's leading comment header: its lines before the first line of code. A declaration counts only here, so
+ * declaration-looking text inside a string or template later in the file is never read as one (#803).
+ */
+function headerLines(source) {
+  const lines = [];
+  let inBlock = false;
+  for (const [index, line] of source.split(/\r?\n/u).entries()) {
+    const text = line.trim();
+    if (inBlock) { lines.push(line); if (text.includes('*/')) inBlock = false; continue; }
+    if (!text || (index === 0 && text.startsWith('#!')) || text.startsWith('//')) { lines.push(line); continue; }
+    if (!text.startsWith('/*')) break;
+    lines.push(line);
+    inBlock = !text.slice(2).includes('*/');
+  }
+  return lines;
+}
+
+/** Match a declared path glob: * and ? stay within one folder, ** crosses folders; null for other glob syntax. */
+function globPattern(glob) {
+  if (/[[\]{}]/u.test(glob)) return null;
+  const source = glob.split(/(\*\*\/|\*\*|\*|\?)/u).map(part => part === '**/' ? '(?:.*/)?' : part === '**' ? '.*'
+    : part === '*' ? '[^/]*' : part === '?' ? '[^/]' : part.replace(/[.+^$()|\\]/gu, '\\$&')).join('');
+  return new RegExp(`^${source}$`, 'u');
+}
+
+/**
+ * The repository modules a computed-import test declares in its header that it can load, normalized, with globs
+ * expanded over the committed modules; anything outside the repository is ignored. A glob form this cannot expand
+ * makes the whole declaration unusable (null), so the caller falls back to the whole suite (#803).
+ *
+ * @returns {string[] | null}
+ */
+function declaredLoads(source, modulePaths) {
+  const declared = headerLines(source).map(line => LOADS.exec(line)).filter(Boolean)
+    .flatMap(match => match[1].trim().split(/\s+/u)).map(path => posix.normalize(path))
+    .filter(path => !path.startsWith('../') && !path.startsWith('/'));
+  const loads = [];
+  for (const path of declared) {
+    if (!/[*?[\]{}]/u.test(path)) { if (MODULE.test(path)) loads.push(path); continue; }
+    const pattern = globPattern(path);
+    if (!pattern) return null;
+    loads.push(...modulePaths.filter(module => pattern.test(module)));
+  }
+  return loads;
+}
+
+/** The one computed form the selector resolves (#803): new URL('<literal relative path>', import.meta.url), with or without .href. */
+const URL_LITERAL = /^\s*new\s+URL\(\s*(['"])([^'"\\\r\n]+)\1\s*,\s*import\.meta\.url\s*\)(?:\s*\.\s*href)?\s*$/u;
+
+/**
+ * The repository modules a test file's computed imports read, when every one of them is new URL('<literal relative
+ * path>', import.meta.url). Any other computed specifier (a variable, a call, an environment value, any expression)
+ * cannot be resolved safely, so the file must declare what it loads; without that this returns null and the caller
+ * falls back to the whole suite (#803).
+ *
+ * @param {string} source the test file's text
+ * @param {string} path the test file's repository path
+ * @param {string[]} modulePaths every module path in the committed tree
+ * @returns {string[] | null} the modules it reads, or null when some computed import is not that literal form
+ */
+function literalLoads(source, path, modulePaths) {
+  const targets = new Set();
+  for (const call of source.matchAll(/\bimport\s*\(/gu)) {
+    const start = call.index + call[0].length;
+    if (/^\s*(?:'[^'\\\r\n]*'|"[^"\\\r\n]*")\s*\)/u.test(source.slice(start))) continue;
+    let depth = 1, end = start;
+    for (; end < source.length && depth; end += 1) depth += source[end] === '(' ? 1 : source[end] === ')' ? -1 : 0;
+    const literal = URL_LITERAL.exec(source.slice(start, end - 1));
+    if (!literal) return null;
+    // Resolve as the runtime does: a file URL against this file, percent-escapes decoded; anything else is unresolved.
+    let target;
+    try { target = posix.relative('/repo', fileURLToPath(new URL(literal[2], pathToFileURL(posix.join('/repo', path))))); }
+    catch { return null; }
+    if (target.startsWith('../') || posix.isAbsolute(target)) return null;
+    if (!MODULE.test(target) || !modulePaths.includes(target)) return null;
+    targets.add(target);
+  }
+  return [...targets];
+}
 
 /** Read exact objects from this checkout, ignoring ambient Git selectors and replacement refs. */
 function selectionGit(root, args) {
@@ -166,7 +251,7 @@ function graphAt(root, commit, changedDocs = []) {
   const synchronizers = knownBuiltinSynchronizers(sources, imports);
   const reverse = new Map();
   const unknown = new Map();
-  const always = new Set();
+  const undeclared = new Map();
   const testTreeReaders = new Set();
   const sourceTreeReaders = new Set();
   const docInputs = new Map();
@@ -186,7 +271,16 @@ function graphAt(root, commit, changedDocs = []) {
         continue;
       }
       if (target.startsWith('node:')) continue;
-      if (target === '(computed)' && TEST.test(path)) { always.add(path); continue; }
+      if (target === '(computed)' && TEST.test(path)) {
+        const declared = declaredLoads(modules.get(path), paths);
+        const loads = declared === null ? [] : declared.length ? declared : literalLoads(modules.get(path), path, paths) ?? [];
+        if (!loads.length) undeclared.set(path, 'a computed import declares no @pullboard-test-loads and names no module it can read');
+        for (const load of loads) {
+          if (!reverse.has(load)) reverse.set(load, new Set());
+          reverse.get(load).add(path);
+        }
+        continue;
+      }
       if (!target.startsWith('.')) {
         unknown.set(path, target === '(computed)' ? 'non-literal dynamic import' : 'unresolved package import');
         continue;
@@ -203,7 +297,7 @@ function graphAt(root, commit, changedDocs = []) {
       reverse.get('bin/pullboard.js').add(path);
     }
   });
-  return { paths, reverse, unknown, always, testTreeReaders, sourceTreeReaders, docInputs };
+  return { paths, reverse, unknown, undeclared, testTreeReaders, sourceTreeReaders, docInputs };
 }
 
 /**
@@ -238,6 +332,8 @@ export function selectAffectedTests(root, { base, trunk, commit = 'HEAD', change
     const unsupported = changed.find(path => !MODULE.test(path) && !DOC.test(path));
     if (unsupported) return { full: true, reason: `import selection cannot compute the effect of ${unsupported}`, files };
     const before = graphAt(root, base, changedDocs);
+    const [unreadable] = [...before.undeclared, ...after.undeclared];
+    if (unreadable) return { full: true, reason: `${unreadable[0]}: ${unreadable[1]}`, files };
     const reached = new Set(changed);
     const queue = [...changed];
     for (const doc of changed.filter(path => DOC.test(path))) {
@@ -260,7 +356,7 @@ export function selectAffectedTests(root, { base, trunk, commit = 'HEAD', change
     }
     const changedTestInput = changed.some(path => path.startsWith('test/') || TEST.test(path) || /^test\.[cm]?js$/u.test(path));
     const changedSourceInput = changed.some(path => path.startsWith('src/') || path.startsWith('bin/'));
-    const selected = files.filter(path => reached.has(path) || before.always.has(path) || after.always.has(path)
+    const selected = files.filter(path => reached.has(path)
       || (changedTestInput && (before.testTreeReaders.has(path) || after.testTreeReaders.has(path)))
       || (changedSourceInput && (before.sourceTreeReaders.has(path) || after.sourceTreeReaders.has(path))));
     if (selected.length === files.length) return { full: true, reason: 'the change reaches every test file', files };

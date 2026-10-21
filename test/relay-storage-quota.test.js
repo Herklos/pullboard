@@ -1,7 +1,9 @@
 /** Real account attribution and a shared lifecycle lock protect storage across boards [H15,H17,H18]. */
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { once } from 'node:events';
 import { mkdtempSync, rmSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -10,7 +12,11 @@ import { createRelayAuth } from '../relay/auth.js';
 import { createGitHubClient } from '../relay/github.js';
 import { createRelayJournal } from '../relay/journal.js';
 import { createRelayPages } from '../relay/page-store.js';
+import { createRelayHandler } from '../relay/service.js';
+import { noticeLines } from '../relay/browser-notice.js';
 import { boardStorageBytes, createStorageQuota } from '../relay/storage-quota.js';
+import { ENGINE_VERSION } from '../src/machine.js';
+import { request as relayRequest } from '../src/relay.js';
 import { githubFixture } from './relay-fixture.js';
 
 const A = 'a'.repeat(32);
@@ -72,6 +78,61 @@ test('one account quota includes legacy bytes and unfinished pages across its bo
   const reopened = createStorageQuota({ directory: box.directory, auth: box.auth, limitBytes: 300 });
   try { assert.equal(reopened.notice(B).code, 'ACCOUNT_STORAGE_LIMIT', 'the warning survives a service restart'); }
   finally { reopened.close(); }
+});
+
+test('an account nearing its storage quota is warned before any write is refused [H5,H15,H17]', async t => {
+  const box = await fixture(t, 300);
+  const actor = { kind: 'agent', userId: box.signed.user.id, agent: 'fixture' };
+  box.journal(A, journal => journal.appendNext(Buffer.alloc(120), 'move', actor));
+  box.journal(B, journal => journal.appendNext(Buffer.alloc(120), 'move', actor));
+  assert.equal(box.quota.usage(A).usedBytes, 240);
+  assert.equal(box.quota.notice(A), null, 'exactly 80 percent does not cross the warning threshold');
+  box.journal(B, journal => journal.appendNext(Buffer.alloc(1), 'move', actor));
+
+  const warning = box.quota.notice(A);
+  assert.equal(warning.code, 'ACCOUNT_STORAGE_WARNING');
+  assert.equal(warning.storage.usedBytes, 241);
+  assert.equal(warning.storage.limitBytes, 300);
+  assert.match(warning.message, /241 of 300 bytes/u);
+  assert.match(warning.message, /Remove unneeded relay copies/u);
+
+  let handler;
+  const server = createServer((req, res) => handler(req, res));
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const origin = 'http://127.0.0.1:' + server.address().port;
+  handler = createRelayHandler({ directory: box.directory, auth: box.auth, publicOrigin: origin, maintenanceMs: 0, accountStorageBytes: 300 });
+  try {
+    /** Read a relay document without returning the signed-in test credential in diagnostics. */
+    async function call(path) {
+      const response = await fetch(origin + path, { headers: { authorization: 'Bearer ' + box.signed.token, 'x-pullboard-engine': String(ENGINE_VERSION) } });
+      return { status: response.status, document: await response.json() };
+    }
+    const listing = await call('/api/v1/boards');
+    assert.equal(listing.status, 200);
+    const listedWarnings = listing.document.warnings.filter(value => value.code === 'ACCOUNT_STORAGE_WARNING');
+    assert.equal(listedWarnings.length, 1, 'the phone inventory names an account warning once across its linked boards');
+    assert.equal(listedWarnings[0].storage.usedBytes, 241);
+
+    const events = await call('/api/v1/boards/' + A + '/events?after=0');
+    assert.equal(events.document.warning.code, 'ACCOUNT_STORAGE_WARNING', 'the sync/status event read carries the same warning');
+    const messages = [];
+    const io = { ignoreRelayEnvironmentToken: true, err: value => messages.push(value) };
+    const state = { url: origin, board: A, token: box.signed.token };
+    await relayRequest(state, '/api/v1/boards/' + A + '/events?after=0', {}, io);
+    await relayRequest(state, '/api/v1/boards/' + A + '/events?after=0', {}, io);
+    assert.equal(messages.length, 1, 'one command surfaces one account warning even when it reads more than once');
+    assert.match(messages[0], /ACCOUNT_STORAGE_WARNING.*241 of 300 bytes/u);
+
+    const duplicateInventory = [listedWarnings[0], { ...listedWarnings[0], board: B }];
+    const lines = noticeLines({ available: [{ id: A, repository: 'fixture/repository' }, { id: B, repository: 'fixture/repository' }],
+      paired: new Map([[A, { state: {} }], [B, { state: {} }]]), warnings: duplicateInventory });
+    assert.equal(lines.filter(value => value.includes('241 of 300 bytes')).length, 1, 'the phone page shows one warning for the shared account');
+  } finally {
+    server.closeAllConnections();
+    await new Promise(resolve => server.close(resolve));
+    handler.close();
+  }
 });
 
 test('an existing storage account is stable across a second authorized link and another account has its own budget [H15,H17]', async t => {

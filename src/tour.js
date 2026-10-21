@@ -12,12 +12,27 @@ import {
   realpathSync,
   writeFileSync,
 } from 'node:fs';
+import { performance } from 'node:perf_hooks';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import {
+  basename,
+  join,
+} from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { CHECKOUT_SESSION_TOKEN_ENV } from './agent-session.js';
 import { displayAgentName } from './agent-names.js';
 import { loadConfig } from './config.js';
+import {
+  AGENT_SESSION_IDS,
+  AGENT_SHELL_MARKERS,
+} from './person.js';
 import { registerProjectAndLink } from './projects.js';
+
+/**
+ * The caller's agent-session identity and checkout lease. A scripted seat must never inherit them: a seat that did
+ * would be recorded under the caller's session, and its verify would then be refused as self-verification (#952).
+ */
+const CALLER_SESSION_NAMES = new Set([...AGENT_SHELL_MARKERS, ...AGENT_SESSION_IDS, CHECKOUT_SESSION_TOKEN_ENV]);
 
 const BIN = fileURLToPath(new URL('../bin/pullboard.js', import.meta.url));
 
@@ -74,6 +89,17 @@ const typed = (args) => args.map((arg) => (/[\s"'$|()]/.test(arg) ? JSON.stringi
 class TourStopped extends Error {}
 
 /**
+ * The three slowest commands the tour ran, with their times, so a slow tour says where its time went (N10).
+ *
+ * @param {{ label: string, ms: number }[]} timings
+ * @returns {string}
+ */
+function slowestSteps(timings) {
+  const slowest = [...timings].sort((a, b) => b.ms - a.ms).slice(0, 3);
+  return `slowest steps: ${slowest.map(({ label, ms }) => `${label} ${Math.round(ms)} ms`).join('; ')}`;
+}
+
+/**
  * Block for a moment, so a person can read along.
  *
  * @param {number} ms
@@ -97,13 +123,23 @@ export async function tour(io) {
   writeFileSync(join(shims, 'pullboard'), `#!/bin/sh\nexec "${process.execPath}" "${BIN}" "$@"\n`);
   chmodSync(join(shims, 'pullboard'), 0o755);
   // Nothing of the person's git setup reaches the tour: no config files, and no GIT_ variable, such
-  // as GIT_DIR from a hook or GIT_CONFIG_COUNT pairs, which git reads as config too.
-  const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith('GIT_') && name !== 'NODE_TEST_CONTEXT'));
-  Object.assign(env, { PATH: `${shims}:${process.env.PATH}`, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', PULLBOARD_HOME: join(dir, '.pullboard') });
+  // as GIT_DIR from a hook or GIT_CONFIG_COUNT pairs, which git reads as config too. The caller's agent session
+  // stays out as well, so each seat is judged as its own session below (#952).
+  const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith('GIT_') && name !== 'NODE_TEST_CONTEXT' && !CALLER_SESSION_NAMES.has(name)));
+  Object.assign(env, { PATH: `${shims}:${process.env.PATH}`, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', PULLBOARD_HOME: join(dir, '.pullboard'), PULLBOARD_MACHINE_HOME: join(dir, '.pullboard-machine') });
   const repo = join(dir, 'greeter');
   const app = `${repo}-app-1`;
   const review = `${repo}-review-1`;
   const where = { coordinator: repo, 'app-1': app, 'review-1': review };
+  /**
+   * The agent session a scripted seat runs as (#952). Each seat has its own session identifier, derived from this
+   * run's unique folder, so the builder and the reviewer are two sessions and neither is the caller's.
+   *
+   * @param {string} who
+   * @returns {Record<string, string>}
+   */
+  const seatSession = (who) => ({ CLAUDECODE: '1', CLAUDE_CODE_SESSION_ID: `${basename(dir)}-${who}` });
+  const timings = [];
 
   /**
    * Run one command as an agent, show it and the lines of its output worth reading.
@@ -111,11 +147,13 @@ export async function tour(io) {
   const run = (who, file, args, { label = `${file} ${typed(args)}`, show = /./, fails = false, tone } = {}) => {
     pause(400 * pace);
     if (label) io.say(`   ${paint(displayAgentName({ agent_id: who, agent_model: who === 'coordinator' ? null : 'Scripted' }), PROMPT_COLOR[who], color)} $ ${label}`);
+    const started = performance.now();
     const result = spawnSync(file, args, {
       cwd: where[who],
       encoding: 'utf8',
-      env: { ...env, GIT_AUTHOR_NAME: who, GIT_AUTHOR_EMAIL: `${who}@tour.invalid`, GIT_COMMITTER_NAME: who, GIT_COMMITTER_EMAIL: `${who}@tour.invalid` },
+      env: { ...env, ...seatSession(who), GIT_AUTHOR_NAME: who, GIT_AUTHOR_EMAIL: `${who}@tour.invalid`, GIT_COMMITTER_NAME: who, GIT_COMMITTER_EMAIL: `${who}@tour.invalid` },
     });
+    timings.push({ label: label || `${file} ${typed(args)}`, ms: performance.now() - started });
     if ((result.status === 0) === fails) {
       const said = `${result.stdout ?? ''}${result.stderr ?? ''}${result.error?.message ?? ''}`;
       throw new TourStopped(`${label || `${file} ${typed(args)}`} ${fails ? 'passed, and should have failed' : `exited ${result.status}`}\n${said}`);
@@ -193,11 +231,13 @@ export async function tour(io) {
     if (!(error instanceof TourStopped)) throw error;
     io.say(`\nThe tour stopped: ${error.message.trimEnd()}`);
     io.say(`The repo is at ${repo}`);
+    io.err(slowestSteps(timings));
     return 1;
   }
   await registerProjectAndLink(repo, new Date(), loadConfig(repo), io);
   io.say('\nNothing shipped until a second agent verified it.');
   io.say(`Look around: cd ${repo} && pullboard log`);
   io.say('see it: pullboard view');
+  io.err(slowestSteps(timings));
   return 0;
 }
