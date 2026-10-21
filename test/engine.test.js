@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { test } from 'node:test';
 import * as store from '../src/board.js';
+import { submitFixture } from './board-submit-fixture.js';
 import { exportBoard, importBoard, restoreRelaySnapshot } from '../src/exchange.js';
 import { applyEngineMove, applyRelayMove, prepareEngineMove, appliedSequence, engineReceipt, refuseRelayMove, startRelayEpoch, checkpointSequence, ENGINE_OPERATIONS } from '../src/engine.js';
 import { ENGINE_VERSION } from '../src/machine.js';
@@ -622,4 +623,34 @@ test('a failed durable receipt rolls back an otherwise successful move and its c
   assert.throws(() => applyEngineMove(board, claimMove(board, item, 'web-1'), { sequence: 1, at: CLAIM_AT }), /receipt rollback probe/);
   assert.deepEqual(exportBoard(board), before, 'receipt failure cannot leave a committed claim without its replay position');
   assert.equal(replayCursor(board), 0);
+});
+
+
+test('engine 65 keeps an ordinary claim available without a return window [B13,H16]', t => {
+  const { copies: [board], item } = engineCopies(t);
+  const move = { ...claimMove(board, item, 'web-2'), engine: 65 };
+  const result = applyEngineMove(board, move, { sequence: 1, at: CLAIM_AT });
+  assert.equal(result.error, undefined);
+  assert.equal(store.getItem(board, item).item_owner, 'web-2');
+});
+
+test('return-window engine admission uses the receipt time rather than replica clocks [B13,H16]', t => {
+  const { copies: [insideClock, expiredClock], item } = engineCopies(t, board => {
+    board.clock = { now: () => new Date('2026-10-07T16:00:00.000Z') };
+    const id = store.listItems(board)[0].item_id;
+    store.claim(board, id, { agentId: 'web-1', lane: 'web', leaseMs: 2 * HOUR,
+      freeze: () => ({ text: '{"rows":[]}', digest: 'f'.repeat(64) }) });
+    submitFixture(board, id, { agentId: 'web-1', commit: 'a'.repeat(40), tree: 'a'.repeat(40) });
+    store.verify(board, id, { agentId: 'web-2', decision: 'REJECT', reason: 'OTHER', note: 'proof',
+      head: 'a'.repeat(40), digest: 'f'.repeat(64), policy: 'any', reopenFirstRefusalMinutes: 30 });
+  });
+  const before = boardRows(expiredClock, item);
+  const old = { ...claimMove(expiredClock, item, 'web-2'), engine: 65 };
+  assert.throws(() => applyEngineMove(expiredClock, old, { sequence: 1, at: '2026-10-07T16:05:00.000Z' }), /engine/);
+  assert.deepEqual(boardRows(expiredClock, item), before);
+  assert.equal(appliedSequence(expiredClock), 0);
+  const atExpiry = { ...claimMove(insideClock, item, 'web-2'), engine: 65 };
+  const result = applyEngineMove(insideClock, atExpiry, { sequence: 1, at: '2026-10-07T16:30:00.000Z' });
+  assert.equal(result.error, undefined);
+  assert.equal(store.getItem(insideClock, item).item_owner, 'web-2');
 });

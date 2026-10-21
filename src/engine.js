@@ -74,9 +74,9 @@ const OPERATION_ENGINE = Object.freeze({ draftSpecRow: ROW_DRAFT_ENGINE, orderMi
   shipMilestone: MILESTONE_SHIP_ENGINE });
 
 /** Dependency edits, causes, sealed reviews, submission proofs, trunk conflicts, health observations and milestone targets retain distinct recorded engine meanings. */
-function minimumOperationEngine(operation, args, board) {
+function minimumOperationEngine(operation, args, board, at) {
   if (['verify', 'reopen'].includes(operation) && args[1]?.reopenFirstRefusalMinutes !== undefined
-    || ['claim', 'release'].includes(operation) && board && firstRefusal(board, args[0])) return REOPEN_FIRST_REFUSAL_ENGINE;
+    || ['claim', 'release'].includes(operation) && board && firstRefusal(board, args[0], at)) return REOPEN_FIRST_REFUSAL_ENGINE;
   if (operation === 'recordFlakeObservation') return NATIVE_FLAKE_ENGINE;
   if (operation === 'recordLandingBatch' && carriesFlakeDiagnostics(args[0]?.batch)) return NATIVE_FLAKE_ENGINE;
   if (['proposeSentinel', 'decideSentinel', 'beginSentinelRun', 'finishSentinelRun'].includes(operation) || typeof args[1]?.cause === 'string' && args[1].cause.startsWith('sentinel:')) return BOARD_SENTINEL_ENGINE;
@@ -325,7 +325,7 @@ export function applyEngineMove(board, move, { sequence, at, standing = null, en
     let outcome = previous?.outcome;
     if (!outcome) {
       // Existing receipts replay before consulting newer snapshot semantics.
-      const minimumEngine = minimumOperationEngine(move.operation, move.args, board);
+      const minimumEngine = minimumOperationEngine(move.operation, move.args, board, new Date(at));
       if (move.engine < minimumEngine) throw new Refused('RELAY_MOVE', `${move.operation} cannot act on a checked-composition snapshot from engine ${move.engine}; use engine ${minimumEngine} or newer`);
       const clock = board.clock;
       const engineVersion = board.executionEngineVersion;

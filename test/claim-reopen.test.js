@@ -176,6 +176,7 @@ test('[B13,B5,D1] a builder notice preserves the reopen cause that triggers rigo
   returned(f, 'landing', 30, 'refusal:CHECK_RED');
   returned(f, 'landing', 30, 'refusal:CHECK_RED');
   const notices = store.recentShouts(f.board);
-  assert.equal(notices.filter(row => row.shout_from === 'rigor' && row.shout_to === 'coordinator').length, 1);
+  assert.equal(notices.filter(row => row.shout_from === 'rigor' && row.shout_to === 'coordinator' && row.shout_text.includes('CHECK_RED')).length, 1);
+  assert.equal(store.events(f.board).filter(row => row.event_kind === 'rigor-notice' && JSON.parse(row.event_detail).cause === 'refusal:CHECK_RED').length, 1);
   assert.equal(notices.filter(row => row.shout_to === f.builder && row.shout_text.includes('waits for you')).length, 2);
 });
