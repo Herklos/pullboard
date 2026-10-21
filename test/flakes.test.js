@@ -13,6 +13,7 @@ import { land } from '../src/land.js';
 
 const BIN = resolve(import.meta.dirname, '../bin/pullboard.js');
 const TITLE = 'a controlled intermittent assertion [C7]';
+const CI_ROOT = join(tmpdir(), 'pullboard-ci-runner', 'repo');
 
 /** Initialize a real private board and Git history; all gate commands use only this synthetic project. */
 function flakyProject(t, { rerun = true, reporter = 'tap', alwaysPass = false } = {}) {
@@ -95,12 +96,15 @@ function privateBuilder(box) {
   return { root, cli, git };
 }
 
-/** Set an exact repo-gate check, which the normal baseline shortcut records without a background command. */
+/** Await the real baseline, then start each later controlled assertion with a fresh execution counter. */
 function checkedItem(box) {
   const check = JSON.parse(readFileSync(join(box.root, 'pullboard.json'), 'utf8')).gate;
   const added = box.cli('add', box.lane, 'Controlled Native check', '--criterion', 'The controlled target passes without accepting retries.',
     '--route', 'light', '--brief', 'Files: test/alternating.test.mjs\nTest: run its configured Node TAP check. Preserve the original failed verdict while retaining exact diagnostic receipts.', '--check', check, '--wait');
   assert.equal(added.code, 0, JSON.stringify(added.document));
+  assert.ok(['red', 'green'].includes(added.document.item.item_check_baseline.result), 'baseline setup finished before the measured check');
+  assert.equal(targetRuns(box), 1, 'the baseline really executed the controlled command once');
+  writeFileSync(box.counter, '');
   return added.document.item.item_id;
 }
 
@@ -493,14 +497,14 @@ function ciAttempt(folder, name, manifest, tap) {
   const directory = join(folder, name);
   mkdirSync(directory, { recursive: true });
   writeFileSync(join(directory, 'run.tap'), tap);
-  writeFileSync(join(directory, 'ci-result.json'), JSON.stringify({ provider: 'github', root: '/home/runner/work/repo/repo', tap: 'run.tap', ...manifest }));
+  writeFileSync(join(directory, 'ci-result.json'), JSON.stringify({ provider: 'github', root: CI_ROOT, tap: 'run.tap', ...manifest }));
 }
 
 test('a CI job red then green on its rerun is one flake, and a CI failure with no test names stays unclassified [C7,H16]', t => {
   const box = flakyProject(t);
   const commit = box.git('rev-parse', 'HEAD').trim();
   const ci = join(box.scratch, 'ci-results');
-  const location = "  location: '/home/runner/work/repo/repo/test/alternating.test.mjs:3:1'\n";
+  const location = `  location: '${CI_ROOT}/test/alternating.test.mjs:3:1'\n`;
   const job = { job: 'linux (22.13.1) 1/2', runner: 'ubuntu-24.04', node: 'v22.13.1', commit, at: '2026-10-20T10:00:00.000Z' };
   ciAttempt(ci, 'run-111-1', { ...job, run: '111', attempt: 1, conclusion: 'failure' }, `TAP version 13\nnot ok 1 - ${TITLE}\n  ---\n${location}  ...\n1..1\n`);
   ciAttempt(ci, 'run-111-2', { ...job, run: '111', attempt: 2, conclusion: 'success' }, `TAP version 13\nok 1 - ${TITLE}\n  ---\n${location}  ...\n1..1\n`);
@@ -540,7 +544,7 @@ test('a CI rerun that names its passing test without a location still pairs, and
   const commit = box.git('rev-parse', 'HEAD').trim();
   const ci = join(box.scratch, 'ci-results');
   const job = { job: 'linux (24) 2/2', runner: 'ubuntu-24.04', node: 'v24.11.0', commit, run: '444', at: '2026-10-20T12:00:00.000Z' };
-  const red = `TAP version 13\nnot ok 1 - ${TITLE}\n  ---\n  location: '/home/runner/work/repo/repo/test/alternating.test.mjs:3:1'\n  ...\n1..1\n`;
+  const red = `TAP version 13\nnot ok 1 - ${TITLE}\n  ---\n  location: '${CI_ROOT}/test/alternating.test.mjs:3:1'\n  ...\n1..1\n`;
   ciAttempt(ci, 'run-444-1', { ...job, attempt: 1, conclusion: 'failure' }, red);
   // As Node's TAP reporter writes it: a passing test carries no location.
   ciAttempt(ci, 'run-444-2', { ...job, attempt: 2, conclusion: 'success' }, `TAP version 13\nok 1 - ${TITLE}\n  ---\n  duration_ms: 1.2\n  ...\n1..1\n`);
@@ -599,7 +603,7 @@ test('a CI rerun matches an explicit file before considering anonymous same-titl
   const commit = box.git('rev-parse', 'HEAD');
   const ci = join(box.scratch, 'ci-results');
   const job = { job: 'explicit and anonymous', runner: 'private-tap-fixture', node: process.version, commit, run: '666', at: '2026-10-20T12:00:00.000Z' };
-  const row = (status, number, file) => `${status} ${number} - shared title [C7]\n  ---\n${file ? `  location: '/home/runner/work/repo/repo/${file}:3:1'\n` : ''}  ...\n`;
+  const row = (status, number, file) => `${status} ${number} - shared title [C7]\n  ---\n${file ? `  location: '${CI_ROOT}/${file}:3:1'\n` : ''}  ...\n`;
   ciAttempt(ci, 'red', { ...job, attempt: 1, conclusion: 'failure' }, `TAP version 13\n${row('not ok', 1, 'test/a.test.mjs')}${row('not ok', 2, 'test/b.test.mjs')}1..2\n`);
   ciAttempt(ci, 'rerun', { ...job, attempt: 2, conclusion: 'success' }, `TAP version 13\n${row('ok', 1, 'test/a.test.mjs')}${row('ok', 2, null)}1..2\n`);
   const imported = box.cli('flakes', 'import', ci);
@@ -615,7 +619,7 @@ test('a same-title skipped original does not lend its identity to an anonymous C
   const commit = box.git('rev-parse', 'HEAD');
   const ci = join(box.scratch, 'ci-results');
   const job = { job: 'original ambiguity', runner: 'private-tap-fixture', node: process.version, commit, run: '777', at: '2026-10-20T12:00:00.000Z' };
-  ciAttempt(ci, 'red', { ...job, attempt: 1, conclusion: 'failure' }, "TAP version 13\nnot ok 1 - shared title [C7]\n  ---\n  location: '/home/runner/work/repo/repo/test/a.test.mjs:3:1'\n  ...\nok 2 - shared title [C7] # SKIP\n1..2\n");
+  ciAttempt(ci, 'red', { ...job, attempt: 1, conclusion: 'failure' }, `TAP version 13\nnot ok 1 - shared title [C7]\n  ---\n  location: '${CI_ROOT}/test/a.test.mjs:3:1'\n  ...\nok 2 - shared title [C7] # SKIP\n1..2\n`);
   ciAttempt(ci, 'rerun', { ...job, attempt: 2, conclusion: 'success' }, 'TAP version 13\nok 1 - shared title [C7]\n1..1\n');
   const imported = box.cli('flakes', 'import', ci);
   assert.equal(imported.code, 0, JSON.stringify(imported.document));
@@ -629,7 +633,7 @@ test('a duplicate original CI file and title cannot share one located passing oc
   const commit = box.git('rev-parse', 'HEAD');
   const ci = join(box.scratch, 'ci-results');
   const job = { job: 'duplicate original identity', runner: 'private-tap-fixture', node: process.version, commit, run: '888', at: '2026-10-20T12:00:00.000Z' };
-  const row = (status, number) => `${status} ${number} - shared title [C7]\n  ---\n  location: '/home/runner/work/repo/repo/test/shared.test.mjs:3:1'\n  ...\n`;
+  const row = (status, number) => `${status} ${number} - shared title [C7]\n  ---\n  location: '${CI_ROOT}/test/shared.test.mjs:3:1'\n  ...\n`;
   ciAttempt(ci, 'red', { ...job, attempt: 1, conclusion: 'failure' }, `TAP version 13\n${row('not ok', 1)}${row('not ok', 2)}1..2\n`);
   ciAttempt(ci, 'rerun', { ...job, attempt: 2, conclusion: 'success' }, `TAP version 13\n${row('ok', 1)}1..1\n`);
   const imported = box.cli('flakes', 'import', ci);
