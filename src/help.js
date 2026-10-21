@@ -149,6 +149,7 @@ Coordinator
                                         file one item per file a linter, type checker or test reporter flags
   pullboard land [--max N] [--dry-run] [--adopt]  gate and push a durable batch of verified items
   pullboard land --waive <test> --until <date> --reason \"why\"  the person records an expiring test waiver
+  pullboard publish                     coordinator: run the whole suite on the trunk head; push it only when every test passes
   pullboard merged <id> <commit>        record where verified work landed
   pullboard withdraw <id> <reason>      drop an item nobody should build
   pullboard refreeze <id>               adopt a corrected criterion or changed spec rows
@@ -279,6 +280,7 @@ const HELP_EXAMPLES = {
   runner: 'pullboard runner add studio --slots 2 --browser 1', 'runner add': 'pullboard runner add studio --slots 2 --browser 1',
   edit: 'pullboard edit 12 --brief "Add the upload page"', release: 'pullboard release 12',
   land: 'pullboard land --max 4',
+  publish: 'pullboard publish',
   health: 'pullboard health',
   reopen: 'pullboard reopen 12 --note "correct the frozen criterion"',
   escalate: 'pullboard escalate 12 --note "needs a manual step"', next: 'pullboard next',

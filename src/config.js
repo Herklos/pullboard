@@ -182,6 +182,9 @@ export function configProblems(config) {
     problems.push('"landingShards" is a whole number from 1 to 64: how many shards the landing gate splits its test files into');
   }
   if (typeof config.staticChecks !== 'string') problems.push('"staticChecks" is an optional project static-check command');
+  if (config.landing !== undefined && (typeof config.landing !== 'object' || config.landing === null || Object.keys(config.landing).some(key => key !== 'publish') || ![undefined, 'separate'].includes(config.landing.publish))) {
+    problems.push('"landing" is optional; { "publish": "separate" } lands on the local trunk and pushes only through pullboard publish');
+  }
   if (config.positiveControl !== undefined && (typeof config.positiveControl !== 'string' || !config.positiveControl.trim())) {
     problems.push('"positiveControl" is a nonempty command for a known-good case the gate must pass, like "node --test test/known-good.test.js"');
   }

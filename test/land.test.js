@@ -1371,3 +1371,61 @@ test('an item with no spec rows lands under a header its commit hook accepts [B3
   const [subject] = mergeSubjects(box, base, result.batch.tip);
   assert.equal(subject, 'docs(merge): docs fixture with no rows', 'a docs-lane item with no rows lands under docs(merge)');
 });
+
+test('publish pushes only a head the whole suite passed and names every red [B3,R3]', () => {
+  const box = landProject();
+  const entries = verifiedFour(box, { red: 1 });
+  const before = box.git(box.remote, 'rev-parse', 'main');
+  // Tier 1 by hand: each verified item lands on the local trunk only, as pullboard merged records it.
+  for (const entry of entries) {
+    box.git(box.repo, 'merge', '-q', '--no-ff', '-m', `chore(merge): land fixture ${entry.item} [G1]`, entry.commit);
+    const merged = box.run(box.repo, 'merged', String(entry.item), box.git(box.repo, 'rev-parse', 'HEAD'));
+    assert.equal(merged.code, 0, merged.err);
+  }
+  const head = box.git(box.repo, 'rev-parse', 'main');
+  const start = calls(box).length;
+  const red = box.run(box.repo, 'publish', '--json');
+  assert.equal(red.code, 1, 'a red head fails publish');
+  const report = JSON.parse(red.out);
+  assert.equal(report.published, false);
+  assert.equal(box.git(box.remote, 'rev-parse', 'main'), before, 'a red head is never pushed');
+  assert.deepEqual(report.red.map((entry) => entry.file), [FILES[1]], 'every failing test is named from the one run');
+  assert.deepEqual(report.red[0].items, [entries[1].item], 'the failing file names the landed item whose merge touched it');
+  assert.equal(calls(box).length - start, 1, 'one whole-suite run');
+  const again = box.run(box.repo, 'publish', '--json');
+  assert.equal(again.code, 0);
+  assert.equal(JSON.parse(again.out).waiting, true, 'the same red head waits for a new head');
+  assert.equal(calls(box).length - start, 1, 'waiting runs no tests');
+  // A fix lands on the trunk; the new head passes the whole suite and is pushed exactly.
+  assert.equal(commitFile(box, box.repo, FILES[1], 'PASS\n', 'fix(web): land fixture 2 passes again [G1]').status, 0);
+  const fixed = box.git(box.repo, 'rev-parse', 'main');
+  assert.notEqual(fixed, head);
+  const green = json(box, box.repo, 'publish');
+  assert.equal(green.published, true);
+  assert.equal(box.git(box.remote, 'rev-parse', 'main'), fixed, 'only the head the whole suite passed reaches the remote');
+});
+
+test('an accepted item lands on the local trunk before the whole suite runs [B3,R3]', () => {
+  const box = landProject();
+  const path = join(box.repo, 'pullboard.json');
+  const config = JSON.parse(readFileSync(path, 'utf8'));
+  writeFileSync(path, JSON.stringify({ ...config, landing: { publish: 'separate' } }, null, 2));
+  box.git(box.repo, 'add', 'pullboard.json');
+  box.git(box.repo, 'commit', '-q', '-m', 'chore: land on the local trunk first');
+  const entries = verifiedFour(box);
+  const remoteBefore = box.git(box.remote, 'rev-parse', 'main');
+  const start = calls(box).length;
+  const result = json(box, box.repo, 'land', '--max', '4');
+  assert.deepEqual(result.landed.sort((a, b) => a - b), entries.map((entry) => entry.item).sort((a, b) => a - b));
+  assert.equal(result.batch.state, 'landed');
+  assert.equal(box.git(box.repo, 'rev-parse', 'main'), result.batch.tip, 'the local trunk holds the landed batch');
+  assert.equal(box.git(box.remote, 'rev-parse', 'main'), remoteBefore, 'tier 1 pushes nothing');
+  assert.deepEqual(calls(box).slice(start), [], 'no whole-suite run before the items land');
+  const merges = box.git(box.repo, 'rev-list', '--first-parent', `${result.batch.base}..${result.batch.tip}`).split('\n');
+  for (const entry of entries) assert.ok(merges.includes(json(box, box.repo, 'show', String(entry.item)).item_merged_commit), `#${entry.item} has its merged receipt on the local trunk`);
+  // Tier 2 then runs the whole suite once on that exact head and pushes it.
+  const published = json(box, box.repo, 'publish');
+  assert.equal(published.published, true);
+  assert.equal(box.git(box.remote, 'rev-parse', 'main'), result.batch.tip);
+  assert.equal(calls(box).length - start, 1, 'publish ran the whole suite once');
+});
