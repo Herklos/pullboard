@@ -4,6 +4,7 @@
  * per-attempt manifests (ci-result.json beside its TAP file), so it needs no network and no CI credentials.
  */
 import { createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { mkdirSync } from 'node:fs';
 import { readFileSync } from 'node:fs';
 import { readdirSync } from 'node:fs';
@@ -66,12 +67,21 @@ function ciTests(output, root) {
   return rows.filter(row => !row.skip);
 }
 
-/** Keep one attempt's TAP under the board's flake evidence, by digest, and describe it as a receipt. */
+/**
+ * Keep one attempt's TAP under the board's flake evidence, by digest, and describe it as a receipt. Kept evidence is
+ * never replaced: a re-import whose report differs is refused before anything is written (#918 review).
+ */
 function keepReceipt(evidence, id, label, attempt) {
   const folder = join(evidence, id);
-  mkdirSync(folder, { recursive: true, mode: 0o700 });
   const file = join(folder, label + '.log');
-  writeFileSync(file, attempt.output, { mode: 0o600 });
+  if (existsSync(file)) {
+    if (digest(readFileSync(file, 'utf8')) !== digest(attempt.output)) {
+      throw new Refused('FLAKE_OBSERVATION_CHANGED', `the kept ${label} report for ${id} differs from this CI result; the original evidence stays as recorded`);
+    }
+  } else {
+    mkdirSync(folder, { recursive: true, mode: 0o700 });
+    writeFileSync(file, attempt.output, { flag: 'wx', mode: 0o600 });
+  }
   return { green: attempt.conclusion === 'success', sha256: digest(attempt.output), bytes: statSync(file).size,
     artifact: `flake-evidence/${id}/${label}.log`, profileSha256: null };
 }
@@ -112,7 +122,9 @@ export function ciObservations(root, folder) {
       const targets = named.length ? named : [{ file: null, name: null }];
       for (const target of targets) {
         const id = `ci-${red.run}-${red.attempt}-${digest(JSON.stringify([red.job, target.file, target.name])).slice(0, 16)}`;
-        const again = target.file === null ? undefined : after.find(row => row.file === target.file && row.name === target.name);
+        // Node's TAP names a passing test without its location, so a rerun row matches by name alone when exactly one does.
+        const same = target.file === null ? [] : after.filter(row => row.name === target.name && (row.file === target.file || row.file === null));
+        const again = same.length === 1 ? same[0] : undefined;
         // A flake needs a green pair: a rerun that passed this test but failed elsewhere proves nothing either way.
         const classification = again === undefined ? 'unclassified' : !again.passed ? 'stable-red' : rerun.conclusion === 'success' ? 'flake' : 'unclassified';
         const reason = classification === 'flake' ? `GitHub run ${red.run} failed this test in attempt ${red.attempt} and passed it in attempt ${rerun.attempt} at the same commit; original red retained.`

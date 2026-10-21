@@ -534,3 +534,26 @@ test('a CI job red then green on its rerun is one flake, and a CI failure with n
   assert.ok(again.document.imported.every(entry => entry.duplicate), 'importing the same CI results again records nothing new');
   assert.equal(box.cli('flakes').document.flakes[0].count, 1);
 });
+
+test('a CI rerun that names its passing test without a location still pairs, and kept CI evidence is never replaced [C7,H16]', t => {
+  const box = flakyProject(t);
+  const commit = box.git('rev-parse', 'HEAD').trim();
+  const ci = join(box.scratch, 'ci-results');
+  const job = { job: 'linux (24) 2/2', runner: 'ubuntu-24.04', node: 'v24.11.0', commit, run: '444', at: '2026-10-20T12:00:00.000Z' };
+  const red = `TAP version 13\nnot ok 1 - ${TITLE}\n  ---\n  location: '/home/runner/work/repo/repo/test/alternating.test.mjs:3:1'\n  ...\n1..1\n`;
+  ciAttempt(ci, 'run-444-1', { ...job, attempt: 1, conclusion: 'failure' }, red);
+  // As Node's TAP reporter writes it: a passing test carries no location.
+  ciAttempt(ci, 'run-444-2', { ...job, attempt: 2, conclusion: 'success' }, `TAP version 13\nok 1 - ${TITLE}\n  ---\n  duration_ms: 1.2\n  ...\n1..1\n`);
+  assert.equal(box.cli('flakes', 'import', ci).code, 0);
+  const flake = box.cli('flakes').document.flakes[0]?.observations[0];
+  assert.equal(flake?.classification, 'flake', 'the rerun row matches by its name when it carries no location');
+  const kept = join(box.root, '.git/pullboard', flake.original.artifact);
+  const before = readFileSync(kept);
+  // The downloaded red report changes by one comment line; the ledger refuses it, and the kept original is untouched.
+  writeFileSync(join(ci, 'run-444-1', 'run.tap'), red + '# re-downloaded\n');
+  const changed = box.cli('flakes', 'import', ci);
+  assert.equal(changed.code, 1);
+  assert.equal(changed.document.error.code, 'FLAKE_OBSERVATION_CHANGED');
+  assert.deepEqual(readFileSync(kept), before, 'the original red evidence keeps its recorded bytes');
+  assertReceipts(box, flake);
+});
