@@ -210,6 +210,8 @@ export function reportInitSetup(io, info, notes, landed, { verbose = false } = {
   const staging = notes.at(-1)?.startsWith('git add -f -- ') ? notes.at(-1) : null;
   if (!verbose) {
     io.say('Set up Pullboard: board, project rules, Git hooks and agent instructions.');
+    const missingGate = notes.find(note => note.startsWith('gate command "'));
+    if (missingGate) io.say(missingGate.split(';')[0] + '.');
     if (landed.length) io.say(`Blueprints: ${landed.length}; ${waiting.length} rows waiting for a decision.`);
     return { result, staging };
   }
