@@ -513,15 +513,16 @@ export function atomic(board, work) {
  * @param {string} kind
  * @param {number | null} itemId
  * @param {object} [detail]
+ * @param {Date} [at] An enabled move may share one instant with its deadline.
  */
-export function logEvent(board, by, kind, itemId, detail = {}) {
+export function logEvent(board, by, kind, itemId, detail = {}, at) {
   const model = agentModel(board, by);
   const isAgent = Boolean(board.db.prepare('SELECT 1 FROM agent WHERE agent_id = ?').get(by));
   const recorded = (board.executionEngineVersion ?? ENGINE_VERSION) >= 8 && isAgent
     ? { ...detail, model: model ?? 'unknown' } : detail;
   const inserted = board.db
     .prepare('INSERT INTO event (event_at, event_by, event_kind, item_id, event_detail) VALUES (?, ?, ?, ?, ?)')
-    .run(now(board), by, kind, itemId, JSON.stringify(recorded));
+    .run(at ? at.toISOString() : now(board), by, kind, itemId, JSON.stringify(recorded));
   board.lastEvent = board.db.prepare('SELECT * FROM event WHERE event_id = ?').get(inserted.lastInsertRowid);
   (board.emittedEvents ??= []).push(board.lastEvent);
 }
@@ -1609,11 +1610,12 @@ export function verify(board, id, { agentId, decision, reason, note = '', cause,
       },
       set: (found) => ({ item_verdict: decision, item_verified_by: isAccept ? agentId : null, item_owner: isAccept ? found.item_owner : null }),
     });
-    const reservation = !isAccept && engine >= REOPEN_FIRST_REFUSAL_ENGINE ? firstRefusalDetail(board, item, reopenFirstRefusalMinutes) : {};
+    const returnedAt = !isAccept && engine >= REOPEN_FIRST_REFUSAL_ENGINE && reopenFirstRefusalMinutes > 0 && item.item_built_by ? board.clock.now() : undefined;
+    const reservation = !isAccept && engine >= REOPEN_FIRST_REFUSAL_ENGINE ? firstRefusalDetail(board, item, reopenFirstRefusalMinutes, returnedAt) : {};
     const detail = { ...reservation, reason: code, commit: item.item_commit, ...(!isAccept && cause !== undefined && cause !== null ? { cause } : {}) };
     if (isAccept && check !== undefined) detail.check = check;
     if (newReview) detail.review = { commit: review.commit, ...(Object.hasOwn(review, 'head') ? { head: review.head } : {}), trunk: review.trunk, paths: [...review.paths] };
-    logEvent(board, agentId, verb, id, implies?.length ? { ...detail, implies } : detail);
+    logEvent(board, agentId, verb, id, implies?.length ? { ...detail, implies } : detail, returnedAt);
     const trigger = board.lastEvent;
     tellFirstRefusal(board, item, reservation, persistShout);
     if (!isAccept) recordRejectedItemRoute(board, id, engine, item, { escalate, shout, logEvent });
@@ -1687,10 +1689,11 @@ export function reopen(board, id, { agentId, note = '', conflict, cause, reopenF
         };
       },
     });
-    const reservation = (forMerge || landingFailure) && currentEngine >= REOPEN_FIRST_REFUSAL_ENGINE ? firstRefusalDetail(board, item, reopenFirstRefusalMinutes) : {};
+    const returnedAt = (forMerge || landingFailure) && currentEngine >= REOPEN_FIRST_REFUSAL_ENGINE && reopenFirstRefusalMinutes > 0 && item.item_built_by ? board.clock.now() : undefined;
+    const reservation = (forMerge || landingFailure) && currentEngine >= REOPEN_FIRST_REFUSAL_ENGINE ? firstRefusalDetail(board, item, reopenFirstRefusalMinutes, returnedAt) : {};
     const returned = forMerge ? { supersedes, ...conflictDetail(conflict) } : supersedes ? { supersedes, landingFailure } : {};
     logEvent(board, agentId, 'reopen', id, { commit: submittedCommit, note: note.trim() || conflictNote(conflict), judgment: null, ...reservation,
-      ...(cause !== undefined && cause !== null ? { cause } : {}), ...returned });
+      ...(cause !== undefined && cause !== null ? { cause } : {}), ...returned }, returnedAt);
     const trigger = board.lastEvent;
     tellFirstRefusal(board, item, reservation, persistShout);
     if (!reservation.reopenFirstRefusal && forMerge && supersedes === undefined && item.item_built_by) persistShout(board, { from: agentId, to: item.item_built_by, text: returnedHeadNotice(id, submittedCommit, conflict) });

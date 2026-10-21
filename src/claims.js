@@ -32,9 +32,9 @@ export function firstRefusalReason(board, id, agentId) {
 }
 
 /** Freeze an enabled reservation into the return event so replicas need no local configuration. */
-export function firstRefusalDetail(board, item, minutes) {
+export function firstRefusalDetail(board, item, minutes, at) {
   if (minutes === undefined || minutes === 0 || !item.item_built_by) return {};
-  const until = board.clock.now().getTime() + minutes * 60_000;
+  const until = (at ?? board.clock.now()).getTime() + minutes * 60_000;
   if (!Number.isSafeInteger(minutes) || minutes < 0 || !Number.isFinite(until) || Math.abs(until) > 8_640_000_000_000_000) {
     throw new Refused('BAD_CONFIG', 'claim.reopenFirstRefusalMinutes must be a non-negative whole number within the supported date range; set it to 0 to disable');
   }
