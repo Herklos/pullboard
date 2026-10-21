@@ -109,6 +109,7 @@ import {
   landingWaiverKind,
 } from './landing-exceptions.js';
 import { parseSpec } from './spec.js';
+import { quarantineWaivers } from './quarantine.js';
 import { invariantEvidence } from './submit-invariants.js';
 import { landingBatches } from './landing-batch-history.js';
 import {
@@ -125,6 +126,7 @@ export { acceptCheck } from './check-accept.js';
 export { declareJob, recordJobRun } from './recurring-jobs.js';
 export { proposeSentinel, decideSentinel, beginSentinelRun, finishSentinelRun } from './sentinels.js';
 export { flakeLedger, recordFlakeObservation } from './flakes.js';
+export { flakeQuarantines, gateRuns, recordGateRun } from './quarantine.js';
 
 /** The seat readers live in seats.js; the board re-exports them so `store.*` callers keep one import. */
 export { agentAt, agentCreator, listAgents, nextSeatId, seatEnrolled, seatLineage, withVerifierStanding } from './seats.js';
@@ -2723,7 +2725,7 @@ export function recordLandingWaiver(board, { agentId, channel, id, test, until, 
 export function landingWaivers(board) {
   return board.db.prepare("SELECT event_by,event_detail FROM event WHERE event_kind = 'landing_waiver' ORDER BY event_id").all()
     .filter((row) => row.event_by === PERSON)
-    .map((row) => JSON.parse(row.event_detail).waiver);
+    .map((row) => JSON.parse(row.event_detail).waiver).concat(quarantineWaivers(board)); // A proven flake's quarantine, when on [C7,D1].
 }
 
 /** Find a live person's waiver and derive its match kind without rewriting history [B3,R3,H16]. */

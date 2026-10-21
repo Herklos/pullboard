@@ -140,6 +140,9 @@ test('[B13,B5] releasing another review cannot cancel the builder reservation', 
 
 test('[B13,B5,H16] a sealed return persists one window and notice across replay and snapshots', async (t) => {
   const { REOPEN_FIRST_REFUSAL_ENGINE } = await import('../src/machine.js');
+  // A sealed move carries the current engine, which a later feature may raise past this one.
+  const { ENGINE_VERSION } = await import('../src/machine.js');
+  assert.ok(ENGINE_VERSION >= REOPEN_FIRST_REFUSAL_ENGINE);
   const { firstRefusalArgs } = await import('../src/claims.js');
   const f = fixture(t);
   const id = store.addItem(f.board, { by: 'coordinator', lane: 'core', title: 'replay', route: 'mid',
@@ -149,7 +152,7 @@ test('[B13,B5,H16] a sealed return persists one window and notice across replay 
   const args = firstRefusalArgs('verify', [id, { agentId: f.other, decision: 'REJECT', reason: 'OTHER',
     note: 'proof', head: COMMIT, digest: 'digest:bar', policy: 'any' }], configFromSource('{"claim":{"reopenFirstRefusalMinutes":30}}'));
   const move = prepareEngineMove(f.board, 'verify', args);
-  assert.equal(move.engine, REOPEN_FIRST_REFUSAL_ENGINE);
+  assert.equal(move.engine, ENGINE_VERSION);
   assert.throws(() => applyEngineMove(f.board, { ...move, engine: REOPEN_FIRST_REFUSAL_ENGINE - 1 },
     { sequence: 1, at: '2026-01-01T00:00:00Z' }), /engine/);
   const receipt = { sequence: 1, at: '2026-01-01T00:00:00Z' };
@@ -165,7 +168,7 @@ test('[B13,B5,H16] a sealed return persists one window and notice across replay 
   const claimMove = prepareEngineMove(replica, 'claim', [id, { agentId: f.other, lane: 'core', leaseMs: 7_200_000, freeze: () => null }]);
   assert.throws(() => applyEngineMove(replica, { ...claimMove, engine: REOPEN_FIRST_REFUSAL_ENGINE - 1 }, { sequence: 2, at: '2026-01-01T00:05:00Z' }), /engine/);
   assert.equal(store.getItem(replica, id).item_owner, null);
-  assert.equal(prepareEngineMove(replica, 'release', [id, f.builder]).engine, REOPEN_FIRST_REFUSAL_ENGINE);
+  assert.equal(prepareEngineMove(replica, 'release', [id, f.builder]).engine, ENGINE_VERSION);
   store.release(replica, id, f.builder);
   store.claim(replica, id, { agentId: f.other, lane: 'core', leaseMs: 7_200_000, freeze: () => null });
 });
