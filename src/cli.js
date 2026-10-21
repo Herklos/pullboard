@@ -60,6 +60,7 @@ import {
   DOCTRINE_FILE,
   LEGACY_DOCTRINE_FILE,
   loadConfig,
+  configFromSource,
 } from './config.js';
 import { displayAgentName } from './agent-names.js';
 import {
@@ -288,6 +289,7 @@ import {
   reportView,
 } from './background-view.js';
 import { nextReview } from './next-review.js';
+import { firstRefusalArgs } from './claims.js';
 import { serveApi } from './api.js';
 import { serveMcp } from './mcp.js';
 import { scanHealthSentinel } from './health-sentinel.js';
@@ -364,12 +366,10 @@ import {
 } from './land.js';
 import { installStep } from './worktree.js';
 import * as infraNotes from './infra-note.js';
-
 export { gateWaitReporter };
 export const CHECKOUT_LEASES = new WeakMap();
 const CHECKOUT_BOARD_ONLY = new WeakMap();
 let startupMainTraced = false;
-
 /**
  * Read the collision baseline from the primary branch, retained trunk, or detached HEAD default.
  *
@@ -407,7 +407,6 @@ export function coordinatorFile(root, path, revision) {
     ...(detachedHeadDefault ? { baseline: 'collision baseline default: detached HEAD' } : {}),
   };
 }
-
 /** Find the nearest declared command for a useful typo hint. */
 function closestHelpCommand(input) {
   const needle = input.toLowerCase();
@@ -863,11 +862,11 @@ export async function reserveRow(ctx, row, written) {
   return withBoard(ctx, async (board) => ordered(ctx, board, 'draftSpecRow', [{ agentId: store.agentAt(board, ctx.info.root)?.agent_id ?? whoAmI(ctx, board).id, row, written }]));
 }
 
-/** Dispatch a board mutation locally, or seal it before any linked replica applies it. */
 /** Note the session behind a claim or submit (#921): its ledger must be writable before the move, and record after it. */
 async function withItemSession(info, operation, args, move) { const noted = operation === 'claim' || operation === 'submit'; if (noted) itemSessions.requireLedger(info); const result = await move(); if (noted) itemSessions.recordItemSession(info, args[0], operation); return result; }
 
 export async function ordered(ctx, board, operation, args) {
+  if (['verify', 'reopen'].includes(operation)) args = firstRefusalArgs(operation, args, configFromSource(coordinatorFile(ctx.info.root, CONFIG_FILE).stdout));
   // Every engine-27 registration records the seat that made it: the coordinator from the main
   // checkout, the joined agent from its worktree, or `machine` for a join no seat made (#579).
   if (operation === 'register' && args[0] && args[0].createdBy === undefined) {
