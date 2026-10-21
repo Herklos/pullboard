@@ -159,7 +159,7 @@ const FIRST_ITEM = ['editItem', 'completeCheckBaseline', 'escalate', 'recordAtte
 export const ITEM_SLOTS = Object.freeze({
   register: [], ensureCoordinator: [], shout: [], passDecision: [], holdLane: [], releaseLane: [],
   moveMilestone: [], editMilestone: [], removeMilestone: [], shipMilestone: [],
-  recordRowDecisions: [], applyRowDecisions: [], draftSpecRow: [],
+  recordRowDecisions: [], applyRowDecisions: [], draftSpecRow: [], recordSpecApprovalBaseline: [],
   recordLandingBatch: [], recordLandingWaiver: [], recordLandingFlake: [], finishLandingBatch: [],
   recordHealthFindings: [], decideSentinel: [], beginSentinelRun: [], finishSentinelRun: [],
   recordFlakeObservation: [], recordGateRun: [], declareJob: [], recordJobRun: [],
