@@ -832,6 +832,9 @@ function configHere(info) {
  */
 export function withBoard(ctx, work) {
   const board = store.openBoard(ctx.file, ctx.clock, { isMain: ctx.allowSchemaUpgrade });
+  // Whether a proven flake stops blocking a landing is the coordinator's setting, read from accepted main on first use.
+  let quarantine;
+  board.quarantineEnabled = () => quarantine ??= mainPolicy(ctx.info.root).config.flakes?.quarantine === true;
   const firstEvent = board.emittedEvents?.length ?? 0;
   /** Forward committed events before releasing either synchronous or asynchronous work. */
   const finish = () => {

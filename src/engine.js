@@ -22,6 +22,8 @@ import { CHECK_ACCEPT_ENGINE } from './check-accept.js';
 import { HEALTH_SENTINEL_ENGINE } from './health-receipts.js';
 import { BOARD_SENTINEL_ENGINE } from './sentinels.js';
 import { RECURRING_JOB_ENGINE } from './job-engine.js';
+import { GATE_RUN_ENGINE } from './gate-run-engine.js';
+import { requireBound } from './quarantine.js';
 import {
   REOPEN_FIRST_REFUSAL_ENGINE,
   CAUSE_ENGINE,
@@ -70,7 +72,7 @@ export const ENGINE_OPERATIONS = Object.freeze([
   'recordRowDecisions', 'applyRowDecisions', 'draftSpecRow', 'appendFact',
   'recordLandingBatch', 'recordLandingWaiver', 'recordLandingFlake', 'finishLandingBatch', 'acceptCheck',
   'recordHealthFindings', 'proposeSentinel', 'decideSentinel', 'beginSentinelRun', 'finishSentinelRun',
-  'recordFlakeObservation', 'declareJob', 'recordJobRun',
+  'recordFlakeObservation', 'recordGateRun', 'declareJob', 'recordJobRun',
 ]);
 
 /** Engine version at which each ordered operation first has stable replay semantics. */
@@ -88,6 +90,7 @@ function minimumOperationEngine(operation, args, board, at) {
   if (operation === 'recordLandingBatch' && carriesFlakeDiagnostics(args[0]?.batch)) return NATIVE_FLAKE_ENGINE;
   if (['proposeSentinel', 'decideSentinel', 'beginSentinelRun', 'finishSentinelRun'].includes(operation) || typeof args[1]?.cause === 'string' && args[1].cause.startsWith('sentinel:')) return BOARD_SENTINEL_ENGINE;
   if (['declareJob', 'recordJobRun'].includes(operation)) return RECURRING_JOB_ENGINE;
+  if (operation === 'recordGateRun') return GATE_RUN_ENGINE;
   if (operation === 'recordHealthFindings') return HEALTH_SENTINEL_ENGINE;
   if (operation === 'reserveNextReview' && Array.isArray(args[0]?.skipIds) && args[0].skipIds.length) return REVIEW_SKIP_ENGINE;
   const options = args[1];
@@ -151,6 +154,8 @@ export function prepareEngineMove(board, operation, args, { id = randomUUID(), a
   if (operation === 'submit' && ENGINE_VERSION >= SUBMISSION_PROOF_ENGINE) submissionProof(args[1]?.submissionProof);
   const minimumEngine = minimumOperationEngine(operation, args, board);
   if (ENGINE_VERSION < minimumEngine) throw new Refused('ENGINE_VERSION', `${operation} requires engine version ${minimumEngine}; this pullboard uses engine ${ENGINE_VERSION}; upgrade before sending it`);
+  // A gate run is sealed only as its gate's own receipt; a run made up by hand is refused before it reaches any replica.
+  if (operation === 'recordGateRun') requireBound(board, args[0]?.receipt);
   const values = args.map((value) => value && typeof value === 'object' ? { ...value } : value);
   if (operation === 'release') {
     const problem = store.reviewReleaseNoteProblem(board, values[0], values[1], values[2]);
