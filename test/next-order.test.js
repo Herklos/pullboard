@@ -487,3 +487,27 @@ test('a cross-checkout claim leads with its seat and other checkouts cannot act 
   assert.doesNotMatch(again.out, /you hold #/u, 'a checkout is never told it holds an item another seat holds');
   assert.notEqual(web.agent, api.agent);
 });
+
+test('next --verify skips an item whose builder seat shares the reviewer\'s session [N2,B13]', (t) => {
+  const box = crossLaneFixture(t);
+  const mine = box.seat('own-builder', 'web', box.session);
+  const other = box.seat('other-builder', 'web', 'unrelated-session');
+  const reviewer = box.seat('own-reviewer', 'api', box.session);
+  const own = box.add('web', 'Built by the reviewer\'s own session');
+  const outside = box.add('web', 'Built by another session');
+  box.milestone('first', own);
+  box.milestone('later', outside);
+  const commit = box.git(box.repo, 'rev-parse', 'HEAD').trim(), tree = box.git(box.repo, 'rev-parse', 'HEAD^{tree}').trim();
+  const board = store.openBoard(join(box.repo, '.git', 'pullboard', 'board.sqlite'));
+  try {
+    for (const [id, builder] of [[own, mine.agent], [outside, other.agent]]) {
+      store.claim(board, id, { agentId: builder, lane: 'web', leaseMs: HOUR, freeze: FREEZE });
+      submitFixture(board, id, { agentId: builder, commit, tree });
+    }
+  } finally { store.closeBoard(board); }
+  const next = box.json(box.runAs(box.session, reviewer.root, 'next', '--verify', '--json'));
+  assert.equal(next.item.item_id, outside, 'the review goes to an item this session did not build');
+  const after = store.openBoard(join(box.repo, '.git', 'pullboard', 'board.sqlite'));
+  try { assert.equal(store.getItem(after, own).item_review_by, null, 'the session\'s own item is never reserved'); }
+  finally { store.closeBoard(after); }
+});
