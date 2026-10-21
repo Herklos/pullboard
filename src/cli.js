@@ -113,6 +113,7 @@ import {
   timingDigest,
   withGateSlot,
 } from './gate.js';
+import { guardRevertNote } from './guard-revert.js';
 import { draftRow } from './spec-draft.js';
 import {
   clashingRowDrafts,
@@ -155,6 +156,7 @@ import {
   commitMsgProblems,
   commitCitationWarnings,
   installHooks,
+  machineNameProblems,
   preCommitProblems,
   prePushProblems,
   pushesTrunk,
@@ -473,6 +475,7 @@ import {
   waiverLine,
 } from './land.js';
 import { installStep } from './worktree.js';
+import * as infraNotes from './infra-note.js';
 
 export { gateWaitReporter };
 const CHECKOUT_LEASES = new WeakMap();
@@ -613,6 +616,7 @@ const OPTIONS = {
   'no-open': { type: 'boolean' },
   'no-permissions': { type: 'boolean' },
   note: { type: 'string' },
+  infra: { type: 'string' },
   'note-file': { type: 'string' },
   by: { type: 'string' },
   key: { type: 'string' },
@@ -2474,14 +2478,14 @@ function readCommands(io, { first, second, rest, values }) {
     show: () => {
       const ctx = context(io);
       const id = idArg(first);
-      const { item, verdicts, moves, thread, related, reviewer, agents, mainMerge } = withBoard(ctx, (board) => ({
+      const { item, verdicts, moves, thread, related, reviewer, agents, mainMerge, infra } = withBoard(ctx, (board) => ({
         item: verdictProjector(ctx.info.root, board).project(store.getItem(board, id)),
         verdicts: store.verdictsFor(board, id),
         moves: store.events(board, { itemId: id }).filter((event) => ['attempt', 'escalate'].includes(event.event_kind)),
         thread: store.itemThread(board, id),
         related: store.relatedItems(board, store.getItem(board, id)),
         reviewer: store.reviewHolder(board, store.getItem(board, id)),
-        agents: store.listAgents(board), mainMerge: mainMergeFor(board, id),
+        agents: store.listAgents(board), mainMerge: mainMergeFor(board, id), infra: infraNotes.infraNoteOf(store.events(board, { itemId: id })),
       }));
       const agentName = (id) => displayAgentName(agents.find((agent) => agent.agent_id === id) ?? { agent_id: id }, ctx.config.agents.names);
       if (values.json) {
@@ -2509,6 +2513,7 @@ function readCommands(io, { first, second, rest, values }) {
         frozen.rows.forEach((row) => io.say(`  ${row.id}: ${row.text}${row.gate ? `  | gate: ${row.gate}` : ''}`));
       }
       if (item.item_commit) io.say(`submitted by ${agentName(item.item_built_by)}${item.item_builder_family ? ` [family ${item.item_builder_family}]` : ''} at ${item.item_commit}`);
+      if (infra) io.say(`infra note: ${infra.note} (files: ${infra.files.join(', ') || 'none'})`);
       if (reviewer) io.say(`under review by ${agentName(reviewer)} until ${item.item_review_until}`);
       // Earlier verdicts as one line each, so an item sent back several times stays short to read
       // (N30); --history prints every note in full.
@@ -2691,7 +2696,7 @@ function readCommands(io, { first, second, rest, values }) {
  * @param {number} id
  * @returns {Promise<number>}
  */
-async function submitHere(ctx, id) {
+async function submitHere(ctx, id, infra) {
   const { root } = ctx.info;
   const recovered = relayRecovered(root);
   if (recovered?.operation === 'submit' && recovered.args[0] === id) {
@@ -2759,6 +2764,8 @@ async function submitHere(ctx, id) {
   withBoard(ctx, (board) => submitPreflight(board, id, { agentId: me.id, commit, tree: headTree(root) ?? '' }));
   const trunk = requireTrunkMerge(root, commit);
   withBoard(ctx, (board) => refuseUnverifiedStack(root, board, held, commit, trunk));
+  machineNameProblems(root, `${acceptedMain.commit}..${commit}`, { refuse: acceptedMain.config.commits.noHostName === true, say: (line) => ctx.io.say(line) });
+  const infraRecord = infraNotes.infraNote({ root, claimHead, files: filesSince(root, id, claimHead, commit), gates: [ctx.config.gate, acceptedMain.config.gate], infra });
   // Doctrine counts only fall: accepted main's rules, at this exact commit (D1). No rule, no change.
   const doctrine = hasSubmitRules(root, acceptedMain.commit, acceptedMain.config.practice)
     ? await withGateSlot(root, () => holdDoctrine(root, { mainCommit: acceptedMain.commit, commit, practice: acceptedMain.config.practice, timeoutMs: acceptedMain.config.check?.timeoutMs }),
@@ -2797,7 +2804,7 @@ async function submitHere(ctx, id) {
     refuseUnverifiedStack(root, board, store.getItem(board, id), commit, currentTrunk);
     // The waived run is written to the item's thread before the submission, so no waived proof reads as green.
     if (waived) await ordered(ctx, board, 'appendFact', [id, { agentId: me.id, kind: 'measurement', text: `submission proof at ${commit.slice(0, 12)} was red and is recorded as waived, not green; every failure is covered by a live person waiver:\n${waivedLines.join('\n')}` }]);
-    return await ordered(ctx, board, 'submit', [id, { agentId: me.id, commit, tree: headTree(root) ?? '', files: filesSince(root, id, claimHead, commit), policyCommit: acceptedMain.commit,
+    return await ordered(ctx, board, 'submit', [id, { agentId: me.id, commit, tree: headTree(root) ?? '', files: filesSince(root, id, claimHead, commit), policyCommit: acceptedMain.commit, ...(infraRecord ? { infra: infraRecord } : {}),
       submissionProof: { version: 1, files: gate.files, full: gate.full, deferred: gate.deferred, reason: gate.reason },
       ...(gate.deferred ? { note: 'full suite deferred to the landing gate' } : {}) }]);
   });
@@ -3028,7 +3035,7 @@ async function verifyHere(ctx, id, { second, values }) {
         const browser = !browserFreeChecksEnabled() || await checkNeedsBrowser(root, frozenCheck(item), { commit: checkedCommit, onFallback: browserAdmissionReporter(ctx.io, ctx.io.relayJson) });
         // A private checked composition needs this machine's live local gate markers [C7,V4].
         const shortEligible = Boolean(await explicitCheckFiles(root, frozenCheck(item), { commit: checkedCommit }));
-        check = await withGateSlot(root, async (lease) => { if (admitted) ({ trunk, review } = composeNow()); return nativeFlakes.verify(ctx, checkedItem, frozenCheck(item), { board, main: trunk.commit, commit: checkedCommit }, { ordered, withBoard, resourceAgent })(lease); }, { browser, remote: false, agent: me.id, item: String(id), kind: 'review', itemCheck: true, shortEligible, onWait: queuedItemLease(ctx, item, me.id, 'review') });
+        check = await withGateSlot(root, async (lease) => { if (admitted) ({ trunk, review } = composeNow()); const ran = await nativeFlakes.verify(ctx, checkedItem, frozenCheck(item), { board, main: trunk.commit, commit: checkedCommit }, { ordered, withBoard, resourceAgent })(lease); return ran.state === 'pass' ? { ...ran, guardNote: guardRevertNote(root, checkedItem, lease) } : ran; }, { browser, remote: false, agent: me.id, item: String(id), kind: 'review', itemCheck: true, shortEligible, onWait: queuedItemLease(ctx, item, me.id, 'review') });
       } else {
         check = checkAtCommit(root, checkedItem);
       }
@@ -3061,7 +3068,7 @@ async function verifyHere(ctx, id, { second, values }) {
       agentId: me.id,
       decision,
       reason: values.reason,
-      note: (textArg(ctx.io, values, 'note') ?? '') + unaffectedMove,
+      note: (textArg(ctx.io, values, 'note') ?? '') + unaffectedMove + (check?.guardNote ?? ''),
       ...(decision === 'REJECT' && values.cause !== undefined ? { cause: values.cause } : {}),
       head,
       digest,
@@ -3673,8 +3680,8 @@ function workCommands(io, args) {
       io.say(review ? `released the review of #${first}; the review is free again` : `released #${first}`);
       return 0;
     }),
-    submit: async () => submitHere(context(io), idArg(first)),
-    done: async () => submitHere(context(io), idArg(first)),
+    submit: async () => submitHere(context(io), idArg(first), values.infra),
+    done: async () => submitHere(context(io), idArg(first), values.infra),
     verify: () => verifyHere(context(io), idArg(first), args),
     land: () => act(async (ctx, board, me) => {
       if (me.id !== COORDINATOR || !ctx.info.isMain) throw new Refused('COORDINATOR_ONLY', 'only the coordinator lands verified batches; ask your coordinator to run pullboard land');

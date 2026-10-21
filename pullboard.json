@@ -83,7 +83,7 @@
       "starts": "now"
     }
   },
-  "shared": ["test/chrome-fixture.js"],
+  "shared": ["test/chrome-fixture.js", "test/cockpit/fixture.js"],
   "commits": {
     "requireIds": [
       "feat",
