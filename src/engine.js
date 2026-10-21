@@ -52,6 +52,7 @@ import {
   submissionProof,
 } from './submit-invariants.js';
 import {
+  CI_FLAKE_ENGINE,
   NATIVE_FLAKE_ENGINE,
   carriesFlakeDiagnostics,
 } from './flake-engine.js';
@@ -82,7 +83,7 @@ function minimumOperationEngine(operation, args, board, at) {
   // A batch landed on the local trunk before it is published (#801).
   if (operation === 'recordLandingBatch' && args[0]?.batch?.state === 'trunk'
     || operation === 'finishLandingBatch' && board && store.landingBatches(board).find(batch => batch.id === args[0]?.id)?.state === 'trunk') return LOCAL_LANDING_ENGINE;
-  if (operation === 'recordFlakeObservation') return NATIVE_FLAKE_ENGINE;
+  if (operation === 'recordFlakeObservation') return args[0]?.observation?.kind === 'ci' ? CI_FLAKE_ENGINE : NATIVE_FLAKE_ENGINE;
   if (operation === 'recordLandingBatch' && carriesFlakeDiagnostics(args[0]?.batch)) return NATIVE_FLAKE_ENGINE;
   if (['proposeSentinel', 'decideSentinel', 'beginSentinelRun', 'finishSentinelRun'].includes(operation) || typeof args[1]?.cause === 'string' && args[1].cause.startsWith('sentinel:')) return BOARD_SENTINEL_ENGINE;
   if (['declareJob', 'recordJobRun'].includes(operation)) return RECURRING_JOB_ENGINE;

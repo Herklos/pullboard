@@ -180,7 +180,9 @@ Engine 63 (`RECURRING_JOB_ENGINE`) records recurring jobs. `declareJob` is the c
 
 Engine 64 (`LOCAL_LANDING_ENGINE`) lets a landing batch reach the state `trunk`: merged onto the local trunk after its quick guards (the static checks and submit invariants), with each item's merged receipt recorded before anything is pushed. Only a board whose `pullboard.json` sets `landing: { "publish": "separate" }` lands this way; `pullboard publish` then runs the whole suite on the exact trunk head and pushes only a green head. A batch recorded at an older engine still needs `pushed` before its receipts.
 
-Engine 66 (`REOPEN_FIRST_REFUSAL_ENGINE`; engine 65 is #918's) holds a reopened item for its builder. With `claim.reopenFirstRefusalMinutes` above zero, a reject, a landing failure or a trunk conflict records when the item came back, and for that many minutes only its builder may claim it; another seat's claim is refused with `REOPEN_HELD_FOR_BUILDER`. Older engines replay those moves without the window.
+Engine 65 (`CI_FLAKE_ENGINE`) records flake observations imported from CI with `pullboard flakes import <folder>`. Such an observation has kind `ci`, a `ci` record (provider, run id, the failed attempt and its rerun attempt, job, runner and Node version) and a `load` of null, because a hosted runner reports no host load. A failed attempt whose rerun at the same commit passes the test is a flake; one whose TAP names no test by file stays unclassified. Observations of the other kinds replay as at engine 61.
+
+Engine 66 (`REOPEN_FIRST_REFUSAL_ENGINE`) holds a reopened item for its builder. With `claim.reopenFirstRefusalMinutes` above zero, a reject, a landing failure or a trunk conflict records when the item came back, and for that many minutes only its builder may claim it; another seat's claim is refused with `REOPEN_HELD_FOR_BUILDER`. Older engines replay those moves without the window.
 
 The CLI declares its engine in every relay request's `X-Pullboard-Engine` header.
 A linked board requires at least engine 48 after issuing any agent token or machine credential, including
