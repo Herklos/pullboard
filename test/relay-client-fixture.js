@@ -233,6 +233,8 @@ globalThis.fetch = function tracedFetch(input, init) {
   let stateReadStarted = 0;
   let refuseSnapshotWrites = false;
   let stallApi = false;
+  let loseSnapshotReply = null;
+  const lostSnapshotReplies = [];
   let rejectSnapshotWrites = null;
   let rejectedStateReads = null;
   let legacySnapshotApi = false;
@@ -344,7 +346,16 @@ globalThis.fetch = function tracedFetch(input, init) {
       return writeHead(acceptedApprovalCompletionReturnedAsRefusal ? 403 : status, ...args);
     };
     const end = res.end.bind(res);
+    const loseThisReply = snapshotWrite && loseSnapshotReply;
+    if (loseThisReply) loseSnapshotReply = null;
     res.end = (chunk, ...args) => {
+      if (loseThisReply && res.statusCode === 200) {
+        // The real service stored the snapshot; only its acknowledgement is lost on the wire (#919).
+        lostSnapshotReplies.push(snapshotRecord.ciphertext);
+        if (loseThisReply.thenStateReads) rejectedStateReads = { ...loseThisReply.thenStateReads };
+        req.socket.destroy();
+        return res;
+      }
       if (acceptedApprovalCompletionReturnedAsRefusal) {
         chunk = JSON.stringify({ version: 1, error: { code: 'REVIEWER_COMPLETE_REFUSED',
           message: 'The completion response was refused after sealed delivery.',
@@ -744,6 +755,13 @@ globalThis.fetch = function tracedFetch(input, init) {
     refuseSnapshotWrites(value) { refuseSnapshotWrites = value; },
     /** Leave every board API request unanswered until its client times out, like an overloaded relay. */
     stallApi(value = true) { stallApi = value; },
+    /**
+     * Let the real relay accept the next API1 snapshot PUT, then drop its reply by closing the socket,
+     * optionally answering later state reads with a chosen refusal, as the #919 lost-ACK review did.
+     */
+    loseNextSnapshotReply(options = {}) { loseSnapshotReply = { thenStateReads: options.thenStateReads ?? null }; },
+    /** SHA-256 digests of the snapshots the relay accepted while their replies were lost. */
+    lostSnapshotReplies() { return [...lostSnapshotReplies]; },
     /** Restart only the private service with a changed operator quota, retaining real journals and credentials. */
     setStorageQuota(bytes) {
       assert.ok(Number.isSafeInteger(bytes) && bytes > 0);

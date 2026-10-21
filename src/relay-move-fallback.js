@@ -1,9 +1,12 @@
 /** When a relay failure may let a local board move commit without the relay (#919, #341). */
 import { Refused } from './refused.js';
 
-/** Whether the relay has not yet accepted this board's first snapshot, so no ordered history exists to protect. */
+/**
+ * Whether the relay has definitely not accepted this board's first snapshot, so no ordered history exists to protect.
+ * Why: an upload whose reply was lost may already be the relay's baseline, so it never counts as unaccepted (#919).
+ */
 export function baselineNotAccepted(state) {
-  return state.mode === 'ordered' && state.baselineAccepted === false && !state.baselineConflict;
+  return state.mode === 'ordered' && state.baselineAccepted === false && !state.baselineConflict && !state.baselineUncertain;
 }
 
 /**

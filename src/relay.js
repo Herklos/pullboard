@@ -85,6 +85,11 @@ import {
 import { terminalQr } from './qr.js';
 import { locked } from './relay-lock.js';
 import {
+  remoteBoardMissing,
+  settleUncertainBaseline,
+  uncertainUploadFailure,
+} from './relay-baseline-settle.js';
+import {
   baselineNotAccepted,
   transientRelayFailure,
 } from './relay-move-fallback.js';
@@ -596,7 +601,7 @@ function rememberBaselineFailure(io, file, error) {
 async function remoteBaselineAbsent(state, io) {
   try { await request(state, '/api/v1/boards/' + state.board + '/state', {}, io); }
   catch (error) {
-    if (error.httpStatus === 404 && error.relayVersion === 1 && ['NO_BOARD', 'NO_SNAPSHOT'].includes(error.code)) return true;
+    if (remoteBoardMissing(error)) return true;
     throw error;
   }
   return false;
@@ -618,6 +623,7 @@ function fenceBaseline(file, state) {
   state.baselineAccepted = true;
   state.baselineConflict = true;
   delete state.baselinePause;
+  delete state.baselineUncertain;
   saveLink(file, state);
   requireUnconflictedBaseline(state);
 }
@@ -629,28 +635,67 @@ async function requireAbsentBaseline(file, state, io) {
   }
 }
 
+/** Record that the relay holds the pending sequence-zero snapshot, from its ACK or an authenticated read of it. */
+function acceptBaseline(root, file, state) {
+  state.baselineAccepted = true;
+  state.cursor = Number.isSafeInteger(state.baselineCursor) ? state.baselineCursor : localRecords(root, (board) => board.db.prepare('SELECT COALESCE(MAX(event_id), 0) AS id FROM event').get().id);
+  delete state.baselineCursor;
+  const resumed = Boolean(state.baselinePause);
+  delete state.baselinePause;
+  delete state.baselineStale;
+  delete state.baselineUncertain;
+  delete state.snapshot;
+  state.presentationDigest = state.snapshotPresentationDigest ?? state.presentationDigest;
+  delete state.snapshotPresentationDigest;
+  state.needsPresentation = false;
+  saveLink(file, state);
+  if (resumed) clearUploadPauseNotices(state);
+}
+
+/**
+ * Decide, under the link lock, whether the relay kept a first upload whose reply was lost: true when it holds
+ * that exact snapshot, false when it holds no board; another board fences, and no answer refuses once.
+ * Why: a client that only saw no reply cannot know the relay has no ordered history, so no move may commit
+ * locally until this says so (#919).
+ */
+async function decideUncertainBaseline(root, file, state, io) {
+  try {
+    const verdict = await settleUncertainBaseline(state, io, () => request(state, '/api/v1/boards/' + state.board + '/state', {}, io));
+    if (verdict === 'other') fenceBaseline(file, state);
+    if (verdict === 'accepted') { acceptBaseline(root, file, state); return true; }
+    delete state.baselineUncertain;
+    saveLink(file, state);
+    return false;
+  } catch (error) {
+    rememberBaselineFailure(io, file, error);
+    throw error;
+  }
+}
+
 /** Send the sequence-zero board image; only its first permanent HTTP refusal pauses relay sends. */
 async function uploadInitialBaseline(root, file, state, io) {
   attemptedBaselineThisCommand(io, file);
+  let sent = false;
   try {
     await requireAbsentBaseline(file, state, io);
     const pending = state.snapshot;
+    // Written ahead: from here until a definite answer, the relay may hold this snapshot (#919).
+    state.baselineUncertain = true;
+    saveLink(file, state);
+    sent = true;
     const reply = await request(state, '/api/v1/boards/' + state.board + '/state', { method: 'PUT', body: pending, initialBaseline: true }, io);
     if (reply.state?.sequence !== pending.sequence || reply.state.sealed !== pending.sealed) throw new Refused('RELAY_RESPONSE', 'the relay did not acknowledge the initial snapshot; retry the configured relay');
-    state.baselineAccepted = true;
-    state.cursor = Number.isSafeInteger(state.baselineCursor) ? state.baselineCursor : localRecords(root, (board) => board.db.prepare('SELECT COALESCE(MAX(event_id), 0) AS id FROM event').get().id);
-    delete state.baselineCursor;
-    const resumed = Boolean(state.baselinePause);
-    delete state.baselinePause;
-    delete state.baselineStale;
-    delete state.snapshot;
-    state.presentationDigest = state.snapshotPresentationDigest ?? state.presentationDigest;
-    delete state.snapshotPresentationDigest;
-    state.needsPresentation = false;
-    saveLink(file, state);
-    if (resumed) clearUploadPauseNotices(state);
+    acceptBaseline(root, file, state);
     return true;
   } catch (error) {
+    if (sent && state.baselineUncertain) {
+      if (uncertainUploadFailure(error)) {
+        if (await decideUncertainBaseline(root, file, state, io)) return true;
+      } else {
+        delete state.baselineUncertain;
+        saveLink(file, state);
+      }
+    }
     if (error.relayVersion === 1 && error.code === 'BASELINE_EXISTS') fenceBaseline(file, state);
     if (!permanentUploadRefusal(error) || state.baselineAccepted) {
       rememberBaselineFailure(io, file, error);
@@ -886,6 +931,8 @@ async function ensureOrdered(root, file, state, io) {
     if (state.baselineAccepted === undefined) {
       state.baselineAccepted = !(state.snapshot?.sequence === 0);
     }
+    // An earlier command lost the reply to its first upload: decide it before re-sealing or sending anything.
+    if (state.baselineUncertain && !state.baselineAccepted) await decideUncertainBaseline(root, file, state, io);
     if (state.baselinePause || state.baselineStale) {
       if (!await retryPausedBaseline(root, file, state, io)) return false;
     }
