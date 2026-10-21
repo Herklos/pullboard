@@ -363,6 +363,7 @@ import { watchCommand } from './watch.js';
 import { serveMcp } from './mcp.js';
 import { scanHealthSentinel } from './health-sentinel.js';
 import { SENTINEL_OPTIONS } from './sentinel-command.js';
+import { loopCommand } from './loop-command.js';
 import { resumeSentinels } from './sentinel-command.js';
 import { sentinelCommand } from './sentinel-command.js';
 import { sentinelListCommand } from './sentinel-command.js';
@@ -4353,6 +4354,7 @@ async function runCommand(argv, io) {
       throw new Refused('USAGE', '--as person works only with pullboard answer, decisions, or fact --never-again');
     }
     if (command === 'sentinel') return await sentinelCommand({ ctx: context(io), words: [first, second, ...rest].filter(value => value !== undefined), values, withBoard, whoAmI, ordered });
+    if (command === 'loop') return await loopCommand({ ctx: context(io), words: [first, second, ...rest].filter(value => value !== undefined), values, withBoard, whoAmI, ordered });
     if (command === 'sentinels') return sentinelListCommand(first, () => context(io), withBoard);
     if (command === 'tour') return tour(io);
     if (command === 'lifecycle') {
@@ -4668,7 +4670,7 @@ export function resultCommands() {
     ...Object.keys(setupCommands({}, args)),
     ...Object.keys(readCommands({}, args)),
     ...Object.keys(workCommands({}, args)),
-    'help', 'version', 'tour', 'lifecycle', 'view', 'serve', 'watch', 'forget', 'spec', 'prompt', 'hook', 'gate', 'settings', 'runner', 'relay', 'sentinel', 'sentinels',
+    'help', 'version', 'tour', 'lifecycle', 'view', 'serve', 'watch', 'forget', 'spec', 'prompt', 'hook', 'gate', 'settings', 'runner', 'relay', 'sentinel', 'sentinels', 'loop',
   ])].sort();
 }
 
