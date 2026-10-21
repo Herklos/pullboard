@@ -9,6 +9,7 @@ import {
 } from '../products.js';
 import * as relayOutput from '../relay-output.js';
 import {
+  originRepository,
   relayStatus,
 } from '../relay.js';
 import {
@@ -45,6 +46,9 @@ export function run(io, { values }) {
   io.say(`verdicts: ${accepted} accepted, ${rejected} rejected`);
   io.say(reviewQueueLine(ctx, summary.reviewQueue, span));
   for (const proposal of summary.submitInvariantProposals) io.say(submitInvariantLine(proposal));
+  if (!summary.relay.linked && !originRepository(ctx.info.root, { optional: true })) {
+    io.say('optional: add a GitHub origin and run pullboard relay on to link this board');
+  }
   if (Object.keys(ctx.config.products).length) {
     const all = withBoard(ctx, (board) => store.listItems(board, { all: true }));
     productSummaries(ctx.config, loadSpec(ctx.info.root, ctx.config), all).forEach((product) => io.say(productLine(product)));

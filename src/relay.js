@@ -163,10 +163,10 @@ export function relayOrigin(address) {
   }
   return url.origin;
 }
-
-/** Resolve the GitHub owner/repository named by the actual origin remote, never a guessed repo. */
-export function originRepository(root) {
+/** Resolve the actual GitHub origin; optional discovery leaves ineligible local projects alone. */
+export function originRepository(root, { optional = false } = {}) {
   const remote = tryGit(root, ['remote', 'get-url', 'origin']);
+  if (remote.status !== 0 && optional) return null;
   if (remote.status !== 0) throw new Refused('RELAY_ORIGIN', 'add a GitHub origin remote before running pullboard relay on');
   let repository;
   const ssh = /^git@github\.com:([^\s?#]+)$/.exec(remote.stdout);
@@ -180,11 +180,11 @@ export function originRepository(root) {
   }
   repository = repository?.replace(/\.git$/, '');
   if (!repository || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository) || repository.split('/').some((part) => ['.', '..'].includes(part))) {
+    if (optional) return null;
     throw new Refused('RELAY_ORIGIN', 'origin must name a GitHub owner/repository using HTTPS or git SSH; fix origin and run pullboard relay on');
   }
   return repository;
 }
-
 /** Find the shared local link metadata without opening a board or connecting for an unlinked repo. */
 function linkFile(root) { return join(repoInfo(root).commonDir, 'pullboard', 'relay.json'); }
 
