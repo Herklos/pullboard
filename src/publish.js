@@ -61,10 +61,10 @@ function touchedBy(root, board, published, head, files) {
  * green; otherwise report every failing test with the landed items that touched its file, and remember the head so
  * the next publish waits for a new one.
  *
- * @param {{ root: string, board: any, config: any, say: (line: string) => void, onWait?: Function }} options
+ * @param {{ root: string, board: any, config: any, say: (line: string) => void, onWait?: Function, onFailure?: Function }} options
  * @returns {Promise<{ head: string, published: boolean, red: Array<{ file: string|null, name: string, items: number[] }>, waiting?: boolean }>}
  */
-export async function publishTrunk({ root, board, config, say, onWait }) {
+export async function publishTrunk({ root, board, config, say, onWait, onFailure }) {
   const trunk = mainCheckout(root);
   if (!trunk?.commit) throw new Refused('LAND_TRUNK', 'publish needs the coordinator’s primary branch; return its checkout to the trunk');
   const branch = trunk.branch.replace(/^refs\/heads\//u, '');
@@ -85,7 +85,7 @@ export async function publishTrunk({ root, board, config, say, onWait }) {
   git(root, ['worktree', 'add', '--detach', directory, head]);
   let gate;
   try {
-    gate = await runGate(directory, config, { trustStamp: false, landing: true, agent: 'coordinator', onWait });
+    gate = await runGate(directory, config, { trustStamp: false, landing: true, agent: 'coordinator', onWait, onFailure });
     // Push from the worktree that ran the suite, so the pre-push hook reads that run's green stamp instead of rerunning it.
     if (gate.isGreen) {
       const pushed = tryGit(directory, ['push', remote, `HEAD:refs/heads/${branch}`]);
