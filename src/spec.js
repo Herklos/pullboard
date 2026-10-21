@@ -7,6 +7,7 @@
  * Also here: the frozen criterion an item is verified against (V2), and sign-offs, a person's word
  * that a row is met, kept with the text they read (S5).
  */
+import { posix } from 'node:path';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import {
@@ -248,6 +249,60 @@ export function checkFieldFindings(row) {
   if (row.mode !== undefined && !['hold', 'watch'].includes(row.mode)) problems.push(`mode "${row.mode}" is hold or watch`);
   if (row.files !== undefined && !row.files.trim()) problems.push('files names the repo paths the rule covers; leave it out to cover the whole repo');
   return problems;
+}
+
+/** A repo path with a known extension, as a whole word in a gate (#809). */
+const GATE_FILE_RE = /(?:^|\s)((?:[\w.-]+\/)*[\w.-]+\.(?:js|mjs|cjs|sh|md|json|yml))(?=\s|$)/gu;
+
+/**
+ * The repo files a row's gate names, such as `test/board.test.js` or `bin/checks/file-size.js`. A gate
+ * word without a path, such as `review` or `true`, names no file to check. Each path is normalized, so
+ * ./test/a.test.js and test/x/../a.test.js name test/a.test.js, the spelling Git reports for a deletion (#809).
+ *
+ * @param {string | undefined} gate
+ * @returns {string[]}
+ */
+export function gateFiles(gate) {
+  return [...String(gate ?? '').matchAll(GATE_FILE_RE)].map((match) => posix.normalize(match[1]));
+}
+
+/**
+ * The commit that last held a file anywhere in the repository's history, or '' when no commit ever did (#809).
+ * A file that was committed and is gone now is a lost test; one never committed is a test not written yet.
+ *
+ * @param {string} root
+ * @param {string} file
+ * @returns {string}
+ */
+function lastCommitOf(root, file) {
+  const result = spawnSync('git', ['log', '--all', '-n', '1', '--format=%h', '--', file], { cwd: root, encoding: 'utf8', env: cleanGitEnvironment() });
+  return result.status === 0 ? result.stdout.trim() : '';
+}
+
+/**
+ * Findings for each row whose gate names a file the repo does not have (#809). An approved must-row whose file
+ * was committed and is gone is an error that names the removal, so spec check fails; a file never committed is
+ * a warning that the test is not written yet, so a new project's README example still fits. Every other row
+ * only warns.
+ *
+ * @param {any} spec - a parsed spec
+ * @param {string} root - the repo root the gate paths resolve against
+ * @returns {{ level: string, line: number, id: string, message: string }[]}
+ */
+export function missingGateFindings(spec, root) {
+  const findings = [];
+  for (const row of spec.rows) {
+    for (const file of gateFiles(row.gate)) {
+      if (existsSync(join(root, file))) continue;
+      const lost = lastCommitOf(root, file);
+      if (row.status === 'approved' && row.tier === 'must' && lost) {
+        findings.push({ level: 'error', line: row.line, id: row.id, message: `gate file ${file} was removed from the repository (last in ${lost}); restore it or point the row at its new home` });
+      } else {
+        findings.push({ level: 'warning', line: row.line, id: row.id, message: `gate file ${file} does not exist yet; write the test it names` });
+      }
+    }
+  }
+  return findings;
 }
 
 /**
