@@ -453,11 +453,12 @@ function paintWithinBudget(first) {
  * after the open, stays under half its core count. Otherwise a dev machine is not the phone the budget is for, so the
  * page must still have painted within the test's wait, and the paint is logged with both load samples (#953).
  */
-function assertFirstPaint(t, first, label) {
-  const after = loadavg()[0];
-  const bound = availableParallelism() / 2;
+function assertFirstPaint(t, first, label, { after = loadavg()[0], cores = availableParallelism() } = {}) {
+  const bound = cores / 2;
   const loads = `load ${first.loadBefore.toFixed(1)} before, ${after.toFixed(1)} after`;
-  assert.ok(Number.isFinite(first.firstBoardPaint), `${label}: the page painted its board within the wait`);
+  // The busy-machine fallback is still a page-clock bound: the page paints within 30 s by its own measure, while the
+  // harness may wait longer to observe it (#953 review).
+  assert.ok(Number.isFinite(first.firstBoardPaint) && first.firstBoardPaint < 30_000, `${label}: the page painted its board within 30 s by its own clock: ${first.firstBoardPaint} ms`);
   if (first.loadBefore < bound && after < bound) assert.ok(paintWithinBudget(first), `${label}: page-measured first paint ${first.firstBoardPaint} ms is under 3000 ms at ${loads}`);
   else t.diagnostic(`${label}: page-measured first paint ${Math.round(first.firstBoardPaint)} ms; budget not asserted at ${loads}, bound ${bound}`);
 }
@@ -484,6 +485,13 @@ function cpuStandIn(t) {
 test("the phone's first-paint budget is judged by the page, not by a loaded test runner [H5]", {
   skip: !findChromeExecutable() && 'Chrome is not installed',
 }, async t => {
+  // The judgement itself, at its boundaries: 3 s on a quiet machine, the 30 s page-clock fallback on a busy one.
+  const quiet = { after: 1, cores: 14 };
+  const busy = { after: 99, cores: 14 };
+  assertFirstPaint(t, { firstBoardPaint: 2_999, loadBefore: 1 }, 'quiet boundary', quiet);
+  assert.throws(() => assertFirstPaint(t, { firstBoardPaint: 3_001, loadBefore: 1 }, 'quiet boundary', quiet));
+  assertFirstPaint(t, { firstBoardPaint: 29_999, loadBefore: 99 }, 'busy boundary', busy);
+  assert.throws(() => assertFirstPaint(t, { firstBoardPaint: 30_001, loadBefore: 99 }, 'busy boundary', busy));
   const board = await thirtyThousandBoard(t);
   const load = cpuStandIn(t);
   const paints = [];
