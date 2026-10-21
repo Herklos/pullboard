@@ -226,14 +226,36 @@ test('an agent pulls the top item in any of its lanes [N2,B13]', (t) => {
   assert.equal(next.review, false);
   assert.equal(next.held, false);
   assert.deepEqual(box.binding(peer.root), peerBinding, 'another session’s seat is never borrowed or rebound');
-  const resumed = box.json(box.runAs(box.session, box.web, 'next', '--build', '--json'));
-  assert.equal(resumed.item.item_id, first, 'next resumes the claim in its named seat rather than starting a second item');
+  const resumed = box.json(box.runAs(box.session, api.root, 'next', '--build', '--json'));
+  assert.equal(resumed.item.item_id, first, 'next resumes the claim in the seat that holds it rather than starting a second item');
   assert.equal(resumed.held, true);
   assert.equal(resumed.seat.agent, api.agent);
+  const sibling = box.json(box.runAs(box.session, box.web, 'next', '--build', '--json'));
+  assert.equal(sibling.held, false, 'a sibling seat answers from its own claims, not the api seat\'s (#958)');
+  assert.notEqual(sibling.item.item_id, first);
   const wrongLane = box.runAs(box.session, api.root, 'claim', String(later), '--json');
   assert.equal(wrongLane.code, 1);
   assert.equal(JSON.parse(wrongLane.out).error.code, 'WRONG_LANE', 'cross-lane routing does not widen a seat’s write authority');
   assert.notEqual(web.agent, api.agent);
+});
+
+test('a seat that holds nothing is never told it holds another seat\'s claim [N2,B13]', (t) => {
+  const box = crossLaneFixture(t);
+  const holder = box.seat('claim-holder', 'web', box.session);
+  const idle = box.seat('claim-idle', 'web', box.session);
+  const bystander = box.seat('claim-bystander', 'api', box.session);
+  const held = box.add('web', 'Held by the first seat');
+  box.json(box.runAs(box.session, holder.root, 'claim', String(held), '--json'));
+  for (const seat of [idle, bystander]) {
+    const next = box.runAs(box.session, seat.root, 'next', '--build', '--json');
+    const text = `${next.out}\n${next.err}`;
+    assert.doesNotMatch(text, /you hold #/u, `${seat.agent} is never told it holds the claim of ${holder.agent}`);
+    assert.equal(text.includes(holder.root), false, `${seat.agent} is never sent to ${holder.agent}'s checkout`);
+    if (next.code === 0) assert.notEqual(JSON.parse(next.out).item.item_id, held, 'the held item is not offered again');
+  }
+  const own = box.json(box.runAs(box.session, holder.root, 'next', '--build', '--json'));
+  assert.equal(own.item.item_id, held, 'the holding seat is still told it holds its item');
+  assert.equal(own.held, true);
 });
 
 test('next names the seat to open for a lane the agent lacks [N2,B13]', (t) => {
