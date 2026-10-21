@@ -143,7 +143,9 @@ function repositorySettings(rows, board) {
   const supported = new Map([...leaves(defaults()), ...Object.entries(OPTIONAL_REPO_DEFAULTS), ['testConcurrency.files', performanceCores()]]);
   for (const [key, fallback] of supported) {
     const value = key === 'testConcurrency.browser' ? Math.min(effective.testConcurrency?.files ?? supported.get('testConcurrency.files'), effective.testConcurrency?.browser ?? 2) : at(effective, key);
-    add(rows, context, key, fallback, { value });
+    // Legacy scalar verify configures only policy; its synthesized siblings retain default provenance.
+    const origin = key === 'verify.policy' && typeof raw.verify === 'string' ? 'configured' : undefined;
+    add(rows, context, key, fallback, { value, origin });
   }
   resourceSettings(rows, context, join(info.commonDir, 'pullboard', 'resources.sqlite'));
   const relayFile = join(info.commonDir, 'pullboard', 'relay.json');

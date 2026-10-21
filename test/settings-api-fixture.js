@@ -145,6 +145,29 @@ export async function proveSettingsApi() {
     assert.equal(falseAdmission.origin, 'configured');
     assert.equal(falseAdmission.source, join(repo, 'pullboard.json'));
     assert.deepEqual(snapshot(root), falseSnapshot);
+    for (const [verify, policy, origin] of [
+      ['coordinator', 'coordinator', 'configured'],
+      [{ policy: 'coordinator' }, 'coordinator', 'configured'],
+      [{ policy: 'any' }, 'any', 'configured'],
+      [undefined, 'any', 'default'],
+    ]) {
+      writeFileSync(join(repo, 'pullboard.json'), JSON.stringify({ ...config, verify }));
+      const saved = snapshot(root);
+      const provenanceResponse = await fetch(address + '?board=' + id, { headers: { 'x-pullboard-key': 'api-fixture' } });
+      assert.equal(provenanceResponse.status, 200);
+      const provenanceText = await provenanceResponse.text();
+      assert.ok(!provenanceText.includes(canary));
+      const verification = JSON.parse(provenanceText).settings.filter(row => row.scope === 'repo' && row.key.startsWith('verify.'));
+      const policyRow = verification.find(row => row.key === 'verify.policy');
+      assert.equal(policyRow.value, policy);
+      assert.equal(policyRow.default, 'any');
+      assert.equal(policyRow.origin, origin, `verify ${JSON.stringify(verify)} preserves policy provenance`);
+      for (const row of verification) {
+        assert.equal(row.source, join(repo, 'pullboard.json'));
+        if (row.key !== 'verify.policy') assert.equal(row.origin, 'default', `${row.key} was not configured`);
+      }
+      assert.deepEqual(snapshot(root), saved, 'reading legacy or default verification settings changes no durable bytes');
+    }
     writeFileSync(join(repo, 'pullboard.json'), JSON.stringify(config));
     // Supported fields containing nested canary objects must refuse safely, not become raw JSON.
     for (const invalid of [
