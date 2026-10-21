@@ -147,26 +147,94 @@ export function refusalLine(kept) {
   return `[RELAY_OUTBOX_REFUSED] the queued move ${kept.move} (made ${kept.queuedAt}) was refused when it replayed: [${kept.code}] ${kept.message}${first}`;
 }
 
-/** Moves whose first argument is an item number; a decision's answer names a shout instead. */
-const ITEM_MOVES = new Set(['claim', 'release', 'submit', 'verify', 'reopen', 'refreeze', 'merged', 'withdraw', 'editItem', 'holdItem', 'releaseItemHold', 'escalate', 'appendFact']);
+/** The ordered operations whose first argument is an item number; a decision's answer names a shout instead. */
+const FIRST_ITEM = ['editItem', 'completeCheckBaseline', 'escalate', 'recordAttempt', 'claim', 'release', 'submit', 'reserveReview', 'verify',
+  'merged', 'withdraw', 'refreeze', 'reopen', 'holdItem', 'releaseItemHold', 'appendFact', 'acceptCheck'];
 
-/** Where a move names an item: its first argument for item moves, and an add's or edit's parent and after list. */
-function itemSlots(move) {
-  const slots = ITEM_MOVES.has(move.operation) && Number.isSafeInteger(move.args[0]) ? [[0]] : [];
-  const at = move.operation === 'addItem' ? 0 : move.operation === 'editItem' ? 1 : null;
-  const options = at === null ? null : move.args[at];
-  if (options && typeof options === 'object') {
-    if (Number.isSafeInteger(options.parentId)) slots.push([at, 'parentId']);
-    if (Array.isArray(options.after)) options.after.forEach((id, index) => { if (Number.isSafeInteger(id)) slots.push([at, 'after', index]); });
-  }
-  return slots;
+/**
+ * Where each ordered operation names an item, as paths into its arguments: `*` is every element of a list. Every
+ * engine operation is listed, most with no item field, so a new operation must say where its items sit
+ * (test/relay-outbox.test.js walks them all) (#922).
+ */
+export const ITEM_SLOTS = Object.freeze({
+  register: [], ensureCoordinator: [], shout: [], passDecision: [], holdLane: [], releaseLane: [],
+  moveMilestone: [], editMilestone: [], removeMilestone: [], shipMilestone: [],
+  recordRowDecisions: [], applyRowDecisions: [], draftSpecRow: [],
+  recordLandingBatch: [], recordLandingWaiver: [], recordLandingFlake: [], finishLandingBatch: [],
+  recordHealthFindings: [], decideSentinel: [], beginSentinelRun: [], finishSentinelRun: [],
+  recordFlakeObservation: [], recordGateRun: [], declareJob: [], recordJobRun: [],
+  ...Object.fromEntries(FIRST_ITEM.map((operation) => [operation, [[0]]])),
+  addItem: [[0, 'parentId'], [0, 'after', '*']],
+  editItem: [[0], [1, 'after', '*']],
+  verify: [[0], [1, 'implies', '*']],
+  appendFact: [[0], [1, 'implies', '*']],
+  answerDecision: [[1, 'implies', '*']],
+  reserveNextReview: [[0, 'skipIds', '*']],
+  addMilestone: [[0, 'items', '*']],
+  editMilestoneItems: [[1, 'add', '*'], [1, 'remove', '*']],
+  orderMilestoneItems: [[1, 'items', '*']],
+  proposeSentinel: [[0, 'evidence', 'items', '*', 'id']],
+});
+
+/** An item number as a move holds it: a whole number, or the CLI's "12" or "#12". */
+function itemNumber(value) {
+  if (Number.isSafeInteger(value)) return value;
+  const match = typeof value === 'string' ? /^#?(\d{1,15})$/u.exec(value.trim()) : null;
+  return match ? Number(match[1]) : null;
 }
 
-/** Read or write the item number at one slot of a move's arguments. */
+/** Write a number back in the form the move held it, so a string stays a string. */
+function sameForm(old, value) {
+  return typeof old === 'string' ? `${old.trim().startsWith('#') ? '#' : ''}${value}` : value;
+}
+
+/** Every concrete path in a move's arguments that one declared slot pattern reaches. */
+function expand(args, pattern) {
+  let paths = [[]];
+  for (const key of pattern) {
+    paths = paths.flatMap((path) => {
+      const at = path.reduce((value, step) => value?.[step], args);
+      if (key !== '*') return at !== null && typeof at === 'object' && Object.hasOwn(at, key) ? [[...path, key]] : [];
+      return Array.isArray(at) ? at.map((_, index) => [...path, index]) : [];
+    });
+  }
+  return paths;
+}
+
+/** Where a move names an item, as concrete paths into its arguments. */
+function itemSlots(move) {
+  return (ITEM_SLOTS[move.operation] ?? []).flatMap((pattern) => expand(move.args, pattern))
+    .filter((path) => itemNumber(slot(move, path)) !== null);
+}
+
+/** Read or write the value at one slot of a move's arguments. */
 function slot(move, path, value) {
   const holder = path.slice(0, -1).reduce((at, key) => at[key], move.args);
   if (value !== undefined) holder[path.at(-1)] = value;
   return holder[path.at(-1)];
+}
+
+/** Keys under which a move might name an item that no declared slot reaches. */
+const ITEM_KEYS = /^(id|ids|item|items|itemId|parentId|after|implies|add|remove|skipIds)$/u;
+
+/**
+ * Item numbers of offline adds that a move names outside its declared slots. Such a move is refused rather than
+ * queued, because the outbox could not follow the item if the relay renumbers it (#922).
+ */
+export function strayItemRefs(outbox, move) {
+  const pending = new Set(outbox.moves.filter((entry) => Number.isSafeInteger(entry.visible)).map((entry) => entry.visible));
+  if (!pending.size) return [];
+  const declared = new Set(itemSlots(move).map((path) => JSON.stringify(path)));
+  const found = [];
+  const walk = (value, path, itemish) => {
+    if (Array.isArray(value)) { value.forEach((element, index) => walk(element, [...path, index], itemish)); return; }
+    if (value !== null && typeof value === 'object') { for (const [key, inner] of Object.entries(value)) walk(inner, [...path, key], ITEM_KEYS.test(key)); return; }
+    const number = itemNumber(value);
+    if (itemish && number !== null && pending.has(number) && !declared.has(JSON.stringify(path))) found.push(number);
+  };
+  // A bare top-level number is an item only through a declared slot; a decision's first argument names a shout.
+  move.args.forEach((value, index) => walk(value, [index], false));
+  return found;
 }
 
 /**
@@ -176,7 +244,7 @@ function slot(move, path, value) {
  */
 export function bindRefs(outbox, move) {
   const pending = new Map(outbox.moves.filter((entry) => Number.isSafeInteger(entry.visible)).map((entry) => [entry.visible, entry.move.id]));
-  return itemSlots(move).filter((path) => pending.has(slot(move, path))).map((path) => ({ path, add: pending.get(slot(move, path)) }));
+  return itemSlots(move).filter((path) => pending.has(itemNumber(slot(move, path)))).map((path) => ({ path, add: pending.get(itemNumber(slot(move, path))) }));
 }
 
 /**
@@ -189,8 +257,8 @@ export function resolveMove(entry, outbox, { local = false } = {}) {
   for (const { path, add } of entry.refs ?? []) {
     const waiting = local ? outbox.moves.find((other) => other.move.id === add) : null;
     const value = waiting ? waiting.visible : outbox.results?.[add];
-    if (value === null) lost.push(slot(entry.move, path));
-    else if (Number.isSafeInteger(value)) slot(move, path, value);
+    if (value === null) lost.push(itemNumber(slot(entry.move, path)));
+    else if (Number.isSafeInteger(value)) slot(move, path, sameForm(slot(entry.move, path), value));
   }
   return { move, lost };
 }
@@ -255,6 +323,10 @@ export async function queueMove(link, { operation, args, command, move, error, a
     const sent = withSeatName(root, operation, args);
     move = localRecords(root, (board) => prepareEngineMove(board, operation, sent));
     move.actor = relayMoveActor(move) ?? credentialActor(move);
+  }
+  const stray = strayItemRefs(outbox, move);
+  if (stray.length) {
+    throw new Refused('RELAY_OUTBOX_UNBOUND', `this move names #${stray[0]}, which this machine added while the relay was down, in a field the outbox cannot follow if the relay renumbers it; run it again once the relay answers`);
   }
   // `after` is the relay sequence this machine had seen: a refusal at replay names the moves ordered since.
   const entry = { move, refs: bindRefs(outbox, move), intent: operationIntent(operation, args), queuedAt: new Date().toISOString(), after: state.sequence,
