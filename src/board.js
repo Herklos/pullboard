@@ -45,6 +45,7 @@ import {
   effectiveGuards,
   storeTriggers,
 } from './machine.js';
+import { LOCAL_LANDING_ENGINE } from './land-engine.js';
 import { Refused } from './refused.js';
 import { refuseMaskedExit } from './check-mask.js';
 import {
@@ -2671,6 +2672,7 @@ export function recordLandingBatch(board, { agentId, batch, revision = 0 }) {
   if (carriesFlakeDiagnostics(batch) && (board.executionEngineVersion ?? ENGINE_VERSION) < NATIVE_FLAKE_ENGINE) {
     throw new Refused('ENGINE_VERSION', `typed landing diagnostics require engine ${NATIVE_FLAKE_ENGINE}; upgrade Pullboard`);
   }
+  if (batch?.state === 'trunk' && (board.executionEngineVersion ?? ENGINE_VERSION) < LOCAL_LANDING_ENGINE) throw new Refused('ENGINE_VERSION', `landing on the local trunk requires engine ${LOCAL_LANDING_ENGINE}; upgrade Pullboard`);
   const evidence = (board.executionEngineVersion ?? ENGINE_VERSION) >= SUBMISSION_PROOF_ENGINE ? invariantEvidence(batch?.invariantEvidence) : undefined;
   validateLandingBatch(batch, revision);
   if ((board.executionEngineVersion ?? ENGINE_VERSION) >= VERDICT_REVIEW_ENGINE
@@ -2756,7 +2758,7 @@ export function finishLandingBatch(board, { agentId, id, tip }) {
     const batch = landingBatches(board).find((entry) => entry.id === id);
     if (!batch || batch.tip !== tip) throw new Refused('LAND_BATCH', 'the pushed tip must match its recorded batch; run pullboard land --adopt');
     if (batch.state === 'landed') return batch;
-    if (batch.state !== 'pushed') throw new Refused('LAND_NOT_PUSHED', 'record a successful push before landing receipts; run pullboard land --adopt');
+    if (batch.state !== 'pushed' && !(batch.state === 'trunk' && (board.executionEngineVersion ?? ENGINE_VERSION) >= LOCAL_LANDING_ENGINE)) throw new Refused('LAND_NOT_PUSHED', 'record a successful push before landing receipts; run pullboard land --adopt');
     for (const entry of batch.items) {
       const item = itemById(board, entry.id);
       if (item.item_commit !== entry.commit || item.item_status !== 'verified') {

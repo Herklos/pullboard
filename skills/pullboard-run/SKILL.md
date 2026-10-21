@@ -101,6 +101,8 @@ A red batch reopens only the item a paired control proves. Before you reopen a c
 
 Publish a release at least once a day while landed work waits. `pullboard health` reports `release <tag> overdue` when landed items have waited longer than `health.release` since the newest version tag.
 
+When the board lands in two tiers (`landing.publish` set to `"separate"` in pullboard.json), an accepted item lands on the local trunk after quick guards, and the coordinator runs `pullboard publish` to run the whole suite on that trunk head and push it only when every test passes. A red head is not pushed: fix the failing tests it names, then publish again.
+
 ## What can go wrong, and what watches it
 
 | What goes wrong | What catches it | Where its finding arrives |

@@ -55,6 +55,7 @@ import {
   NATIVE_FLAKE_ENGINE,
   carriesFlakeDiagnostics,
 } from './flake-engine.js';
+import { LOCAL_LANDING_ENGINE } from './land-engine.js';
 
 const ITEM_ID_FIRST_ARGUMENT = new Set(['acceptCheck', 'editItem', 'escalate', 'recordAttempt', 'claim', 'release', 'submit', 'reserveReview', 'verify', 'merged', 'withdraw', 'refreeze', 'reopen', 'appendFact']);
 
@@ -78,6 +79,9 @@ const OPERATION_ENGINE = Object.freeze({ draftSpecRow: ROW_DRAFT_ENGINE, orderMi
 function minimumOperationEngine(operation, args, board, at) {
   if (['verify', 'reopen'].includes(operation) && args[1]?.reopenFirstRefusalMinutes !== undefined
     || ['claim', 'release'].includes(operation) && board && firstRefusal(board, args[0], at)) return REOPEN_FIRST_REFUSAL_ENGINE;
+  // A batch landed on the local trunk before it is published (#801).
+  if (operation === 'recordLandingBatch' && args[0]?.batch?.state === 'trunk'
+    || operation === 'finishLandingBatch' && board && store.landingBatches(board).find(batch => batch.id === args[0]?.id)?.state === 'trunk') return LOCAL_LANDING_ENGINE;
   if (operation === 'recordFlakeObservation') return NATIVE_FLAKE_ENGINE;
   if (operation === 'recordLandingBatch' && carriesFlakeDiagnostics(args[0]?.batch)) return NATIVE_FLAKE_ENGINE;
   if (['proposeSentinel', 'decideSentinel', 'beginSentinelRun', 'finishSentinelRun'].includes(operation) || typeof args[1]?.cause === 'string' && args[1].cause.startsWith('sentinel:')) return BOARD_SENTINEL_ENGINE;
