@@ -7,6 +7,7 @@ import { test } from 'node:test';
 import { createE2eHelpers } from './e2e-helpers.js';
 import { runFixtureChild } from './fixture-child.js';
 import { configFromSource } from '../src/config.js';
+import { gitReadSignature } from '../src/git.js';
 import * as store from '../src/board.js';
 import { captureSpecApprovalBaseline, specApprovalState } from '../src/spec-approval.js';
 import { SPEC_APPROVAL_ENGINE } from '../src/spec-approval-engine.js';
@@ -548,4 +549,66 @@ test('an authenticated first baseline cannot grandfather an absent future row [H
   const projected = specApprovalState(root, { board, config });
   assert.ok(projected.rows.some(row => row.id === 'G99'),
     'a later approved row absent from the captured source must remain agent-approved until a person confirms it');
+});
+
+
+test('cached origins follow dirty lines and changed history while person decisions stay live [S1,B26,N26]', t => {
+  const helpers = createE2eHelpers();
+  t.after(helpers.cleanup);
+  const box = helpers.project('true');
+  const board = store.openBoard(join(box.repo, '.git', 'pullboard', 'board.sqlite'));
+  t.after(() => store.closeBoard(board));
+  const config = configFromSource(readFileSync(join(box.repo, 'pullboard.json'), 'utf8'));
+  const read = (root = box.repo) => specApprovalState(root, { board, config }).rows.find(row => row.id === 'G1');
+  const original = readFileSync(join(box.repo, 'SPEC.md'), 'utf8');
+  const first = read();
+  assert.equal(first.commit, box.git(box.repo, 'rev-parse', 'HEAD'));
+  assert.deepEqual(read(), first, 'a stable origin map preserves the full attribution');
+  assert.deepEqual(read(box.web), first, 'a linked worktree starts with the same historical attribution');
+  writeFileSync(join(box.repo, 'SPEC.md'), '\n' + original.replace('The page renders.', 'The changed page renders.'));
+  const dirty = read();
+  assert.equal(dirty.commit, null, 'dirty moved lines cannot reuse the old committed attribution');
+  assert.equal(dirty.text, 'The changed page renders.');
+  writeFileSync(join(box.repo, 'SPEC.md'), original);
+  box.git(box.repo, 'commit', '-q', '--amend', '--no-edit', '--author', 'Replacement Author <replacement@example.test>');
+  const rewritten = read();
+  assert.notEqual(rewritten.commit, first.commit, 'identical spec bytes under a new history require new origins');
+  assert.equal(rewritten.agent, 'Replacement Author');
+  assert.deepEqual(read(box.web), first, 'a linked worktree keeps its own unchanged revision after main moves');
+  assert.deepEqual(read(), rewritten);
+  document(box, box.repo, 'spec', 'approve', 'G1');
+  assert.equal(read(), undefined, 'a person decision is re-evaluated independently of cached Git origins');
+});
+
+
+test('attribution signatures bypass namespaced refs and external blame configuration [S1,N26,C7]', t => {
+  for (const [name, value] of [['GIT_CONFIG_GLOBAL', '/dev/null'], ['GIT_CONFIG_NOSYSTEM', '1']]) {
+    const previous = process.env[name];
+    process.env[name] = value;
+    t.after(() => {
+      if (previous === undefined) delete process.env[name];
+      else process.env[name] = previous;
+    });
+  }
+  const helpers = createE2eHelpers();
+  t.after(helpers.cleanup);
+  const box = helpers.project('true');
+  const signature = () => gitReadSignature(box.repo, ['SPEC.md', '.mailmap'], { attribution: true });
+  assert.match(signature(), /^[a-f0-9]{64}$/u);
+  const previousNamespace = process.env.GIT_NAMESPACE;
+  try {
+    process.env.GIT_NAMESPACE = 'private-attribution-fixture';
+    assert.equal(signature(), null, 'namespaced refs need a real Git read');
+  } finally {
+    if (previousNamespace === undefined) delete process.env.GIT_NAMESPACE;
+    else process.env.GIT_NAMESPACE = previousNamespace;
+  }
+  const beforeAttributes = signature();
+  writeFileSync(join(box.repo, '.gitattributes'), 'SPEC.md ident\n');
+  assert.notEqual(signature(), beforeAttributes, 'working-tree conversion attributes invalidate cached origins');
+  const beforeMailmap = signature();
+  writeFileSync(join(box.repo, '.mailmap'), 'Other Name <other@example.test> <agent@example.com>\n');
+  assert.notEqual(signature(), beforeMailmap, 'mailmap contents belong to the attribution signature');
+  box.git(box.repo, 'config', 'blame.ignoreRevsFile', join(box.dir, 'external-ignore-list'));
+  assert.equal(signature(), null, 'external revision lists are unsupported rather than cached incompletely');
 });

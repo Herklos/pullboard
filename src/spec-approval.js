@@ -2,7 +2,10 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import * as store from './board.js';
-import { tryGit } from './git.js';
+import {
+  gitReadSignature,
+  tryGit,
+} from './git.js';
 import { personNeeds } from './needs.js';
 import { Refused } from './refused.js';
 import {
@@ -14,8 +17,20 @@ import {
   verifyRowDecision,
 } from './signature.js';
 
+const ORIGIN_CACHE_LIMIT = 32;
+const originCache = new Map();
+
 /** Read each line's actual commit and Git author; neither identifies a person approval. */
 function rowOrigins(root, file) {
+  const signature = () => gitReadSignature(root, [file, '.mailmap'], { attribution: true });
+  const before = signature();
+  const key = before === null ? null : JSON.stringify([root, file, before]);
+  if (key !== null && originCache.has(key)) {
+    const cached = originCache.get(key);
+    originCache.delete(key);
+    originCache.set(key, cached);
+    return cached;
+  }
   const result = tryGit(root, ['blame', '--line-porcelain', '--', file]);
   const origins = new Map();
   let line;
@@ -26,6 +41,11 @@ function rowOrigins(root, file) {
     if (header) { commit = /^0+$/u.test(header[1]) ? null : header[1]; line = Number(header[2]); author = ''; }
     else if (text.startsWith('author ')) author = text.slice(7);
     else if (text.startsWith('\t') && line) origins.set(line, { commit, agent: author || 'unknown', attribution: 'Git author, seat unknown' });
+  }
+  // Only origins are reused: live board decisions and signature trust are checked on every projection.
+  if (key !== null && result.status === 0 && before === signature()) {
+    originCache.set(key, origins);
+    while (originCache.size > ORIGIN_CACHE_LIMIT) originCache.delete(originCache.keys().next().value);
   }
   return origins;
 }
