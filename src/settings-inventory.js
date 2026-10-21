@@ -157,7 +157,7 @@ function repositorySettings(rows, board) {
   const environmentToken = process.env.PULLBOARD_RELAY_TOKEN;
   add(rows, relayContext, 'relay.token', 'not set', { secret: true, value: environmentToken ?? relay.token,
     source: environmentToken === undefined ? relayFile : 'environment:PULLBOARD_RELAY_TOKEN', origin: environmentToken === undefined && !relay.token ? 'default' : 'configured' });
-  add(rows, relayContext, 'relay.agentTokens', 'not set', { secret: true, value: Object.values(relay.agentTokens ?? {}).some(value => Boolean(value?.token ?? value)) });
+  add(rows, relayContext, 'relay.agentTokens', 'not set', { secret: true, value: Object.values(relay.agentTokens ?? {}).some(value => typeof value?.token === 'string' && value.token.length > 0) });
   const keyFile = join(process.env.PULLBOARD_HOME || join(homedir(), '.pullboard'), 'relay-keys', board.id + '.key');
   const keyEnvironment = process.env.PULLBOARD_RELAY_KEY;
   add(rows, { ...relayContext, file: keyFile }, 'relay.key', 'not set', { secret: true,

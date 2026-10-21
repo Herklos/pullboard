@@ -136,6 +136,32 @@ export async function proveSettingsApi() {
     assert.equal((await fetch(address)).status, 401);
     assert.equal((await fetch(address, { method: 'POST', headers: { 'x-pullboard-key': 'api-fixture' } })).status, 400);
     assert.deepEqual(snapshot(root), before, 'GET neither migrates credentials nor changes settings, registry, resources or board bytes');
+    const relayFile = join(privateDir, 'relay.json');
+    const relaySaved = readFileSync(relayFile);
+    const relayConfig = JSON.parse(relaySaved);
+    const metadata = { id: 'metadata-only', expires: 1, createdBy: 'coordinator' };
+    for (const [agentTokens, expected] of [
+      [{ fixture: metadata }, 'not set'],
+      [{}, 'not set'],
+      [undefined, 'not set'],
+      [{ fixture: {}, empty: { token: '' }, missing: null }, 'not set'],
+      [{ fixture: canary }, 'not set'],
+      [{ old: metadata, empty: { token: '' }, current: { ...metadata, token: canary } }, 'set'],
+    ]) {
+      writeFileSync(relayFile, JSON.stringify({ ...relayConfig, agentTokens }));
+      const saved = snapshot(root);
+      const credentialResponse = await fetch(address + '?board=' + id, { headers: { 'x-pullboard-key': 'api-fixture' } });
+      assert.equal(credentialResponse.status, 200);
+      const credentialText = await credentialResponse.text();
+      assert.ok(!credentialText.includes(canary), 'cached credential bytes never escape');
+      const credential = JSON.parse(credentialText).settings.find(row => row.scope === 'board' && row.key === 'relay.agentTokens');
+      assert.equal(credential.value, expected, 'only a cached token, not seat metadata, counts as a credential');
+      assert.equal(credential.default, 'not set');
+      assert.equal(credential.secret, true);
+      assert.equal(credential.source, relayFile);
+      assert.deepEqual(snapshot(root), saved, 'credential presence inspection changes no durable bytes');
+    }
+    writeFileSync(relayFile, relaySaved);
     writeFileSync(join(repo, 'pullboard.json'), JSON.stringify({ ...config, verify: { ...config.verify, composeAtAdmission: false } }));
     const falseSnapshot = snapshot(root);
     const falseDocument = await (await fetch(address + '?board=' + id, { headers: { 'x-pullboard-key': 'api-fixture' } })).json();
