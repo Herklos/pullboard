@@ -295,6 +295,7 @@ export const NEXT_STEPS = Object.freeze({
   GIT_GRAFTS: 'ask the coordinator to remove the git graft file: pullboard shout coordinator "please remove .git/info/grafts"',
   HEAD_NOT_NEW: 'commit the rework, then pullboard submit <id>',
   HELD: 'take another item: pullboard next',
+  REOPEN_HELD_FOR_BUILDER: 'wait until the named deadline, or ask the builder to run pullboard release <id>',
   HOST_NAME: 'reword the named commit\'s message without this machine\'s name (git rebase -i, then reword), then run pullboard submit <id> again',
   HUMAN_REQUIRED: 'send it from the paired phone, or run pullboard relay on --all from the person\'s terminal',
   IMPORT_FORMAT: 'make an export with pullboard export > board.json, then import that file',
