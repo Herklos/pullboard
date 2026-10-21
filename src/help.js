@@ -93,6 +93,9 @@ Work
   pullboard sentinel approve <name>     person: approve this command, directory and schedule
   pullboard sentinel decline <name> --reason "<why>"   person: prevent future runs
   pullboard sentinels                   approvals, owners and the last result; does not run checks
+  pullboard loop declare <name> --every 10m --owner <seat or lane>   coordinator: declare a recurring job's cadence
+  pullboard loop ran <name>             record that a recurring job just ran; health flags one silent for 1.5 cadences
+  pullboard loop                        list the recurring jobs and their last runs
                                         reads the board and changes nothing; exits 1 when something is stuck
                                         pullboard.json health.stuck (default 1h), health.holds (1d), health.release (1d)
   pullboard skills --update            refresh unchanged Claude Code skills from shipped versions
@@ -146,6 +149,7 @@ Coordinator
                                         file one item per file a linter, type checker or test reporter flags
   pullboard land [--max N] [--dry-run] [--adopt]  gate and push a durable batch of verified items
   pullboard land --waive <test> --until <date> --reason \"why\"  the person records an expiring test waiver
+  pullboard publish                     coordinator: run the whole suite on the trunk head; push it only when every test passes
   pullboard merged <id> <commit>        record where verified work landed
   pullboard withdraw <id> <reason>      drop an item nobody should build
   pullboard refreeze <id>               adopt a corrected criterion or changed spec rows
@@ -276,6 +280,7 @@ const HELP_EXAMPLES = {
   runner: 'pullboard runner add studio --slots 2 --browser 1', 'runner add': 'pullboard runner add studio --slots 2 --browser 1',
   edit: 'pullboard edit 12 --brief "Add the upload page"', release: 'pullboard release 12',
   land: 'pullboard land --max 4',
+  publish: 'pullboard publish',
   health: 'pullboard health',
   reopen: 'pullboard reopen 12 --note "correct the frozen criterion"',
   escalate: 'pullboard escalate 12 --note "needs a manual step"', next: 'pullboard next',
