@@ -22,6 +22,7 @@ import { CHECK_ACCEPT_ENGINE } from './check-accept.js';
 import { HEALTH_SENTINEL_ENGINE } from './health-receipts.js';
 import { BOARD_SENTINEL_ENGINE } from './sentinels.js';
 import {
+  REOPEN_FIRST_REFUSAL_ENGINE,
   CAUSE_ENGINE,
   ENGINE_VERSION,
   VERIFIER_STANDING_ENGINE,
@@ -35,6 +36,7 @@ import {
   canonicalMilestoneTarget,
 } from './milestones.js';
 import { Refused } from './refused.js';
+import { firstRefusal } from './claims.js';
 import {
   requestMoveProblem,
   recordRequestMove,
@@ -73,6 +75,8 @@ const OPERATION_ENGINE = Object.freeze({ draftSpecRow: ROW_DRAFT_ENGINE, orderMi
 
 /** Dependency edits, causes, sealed reviews, submission proofs, trunk conflicts, health observations and milestone targets retain distinct recorded engine meanings. */
 function minimumOperationEngine(operation, args, board) {
+  if (['verify', 'reopen'].includes(operation) && args[1]?.reopenFirstRefusalMinutes !== undefined
+    || ['claim', 'release'].includes(operation) && board && firstRefusal(board, args[0])) return REOPEN_FIRST_REFUSAL_ENGINE;
   if (operation === 'recordFlakeObservation') return NATIVE_FLAKE_ENGINE;
   if (operation === 'recordLandingBatch' && carriesFlakeDiagnostics(args[0]?.batch)) return NATIVE_FLAKE_ENGINE;
   if (['proposeSentinel', 'decideSentinel', 'beginSentinelRun', 'finishSentinelRun'].includes(operation) || typeof args[1]?.cause === 'string' && args[1].cause.startsWith('sentinel:')) return BOARD_SENTINEL_ENGINE;

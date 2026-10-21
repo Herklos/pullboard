@@ -914,6 +914,8 @@ test('claim refuses in the declared order, one failure peeled at a time, on a re
     const strong = store.register(board, { lane: 'web', path: '/repo-web-strong' });
     const claimAs = (id, agentId, lane, freezer = retiredFreeze) => outcome(() => store.claim(board, id, { agentId, lane, leaseMs: 7_200_000, freeze: freezer }));
     const done = submittedItem(board);
+    const returned = submittedItem(board);
+    store.verify(board, returned, { agentId: 'web-2', decision: 'REJECT', reason: 'TEST_FAILURE', head: SHA_A, digest: 'digest:Page', policy: 'any', note: 'the check fails', reopenFirstRefusalMinutes: 30 });
     const dependency = store.addItem(board, { by: 'coordinator', lane: 'web', title: 'Page' });
     const target = store.addItem(board, { by: 'coordinator', lane: 'web', title: 'Page', after: [dependency] });
     const spare = store.addItem(board, { by: 'coordinator', lane: 'web', title: 'Page' });
@@ -928,7 +930,7 @@ test('claim refuses in the declared order, one failure peeled at a time, on a re
     store.releaseItemHold(board, target, { agentId: 'coordinator' });
     fired.push(claimAs(target, light, 'api'), claimAs(target, light, 'web'), claimAs(target, strong, 'web'));
     verdictOn(board, dependency, 'web-2', 'ACCEPT');
-    fired.push(claimAs(target, strong, 'web'));
+    fired.push(claimAs(target, strong, 'web'), claimAs(returned, strong, 'web'));
     store.editItem(board, target, { agentId: 'coordinator', criterion: 'Pending correction before the lane guard.' });
     store.release(board, target, 'web-2');
     fired.push(claimAs(target, strong, 'web'));
@@ -940,7 +942,7 @@ test('claim refuses in the declared order, one failure peeled at a time, on a re
     store.release(board, spare, strong);
     fired.push(claimAs(target, strong, 'web'), claimAs(target, strong, 'web', freeze));
     assert.deepEqual(fired, [...declaredBoardOrder('claim'), 'ok']);
-    assert.deepEqual(fired, ['NO_ITEM', 'NOT_CLAIMABLE', 'ITEM_HELD', 'WRONG_LANE', 'ROUTE', 'BLOCKED', 'HELD', 'PENDING_REFREEZE', 'LANE_HELD', 'ONE_CLAIM', 'UNKNOWN_SPEC', 'ok']);
+    assert.deepEqual(fired, ['NO_ITEM', 'NOT_CLAIMABLE', 'ITEM_HELD', 'WRONG_LANE', 'ROUTE', 'BLOCKED', 'HELD', 'REOPEN_HELD_FOR_BUILDER', 'PENDING_REFREEZE', 'LANE_HELD', 'ONE_CLAIM', 'UNKNOWN_SPEC', 'ok']);
   } finally {
     lab.done();
   }
