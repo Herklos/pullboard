@@ -3,7 +3,10 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { remapMove } from '../src/relay-outbox.js';
+import {
+  bindRefs,
+  resolveMove,
+} from '../src/relay-outbox.js';
 import { runFixtureGit } from './fixture-child.js';
 import { relayClientFixture } from './relay-client-fixture.js';
 
@@ -108,14 +111,51 @@ test('an item added while the relay is down keeps its queued moves when another 
   }
 });
 
-test('a queued move maps each item it names once, from the number it was made with [B26,H16]', () => {
-  const remap = { 2: 3, 3: 4 };
-  const withdraw = { id: 'w', operation: 'withdraw', args: [2, { agentId: 'coordinator', reason: 'r' }] };
-  assert.equal(remapMove(withdraw, remap, []).move.args[0], 3, 'local #2 is #3 on the board, not #4');
-  assert.equal(withdraw.args[0], 2, 'the move as it was made is kept, so a retry maps it again from #2');
-  const child = { id: 'c', operation: 'addItem', args: [{ by: 'coordinator', lane: 'app', title: 't', parentId: 3, after: [2, 9] }] };
-  assert.deepEqual(remapMove(child, remap, []).move.args[0], { by: 'coordinator', lane: 'app', title: 't', parentId: 4, after: [3, 9] });
-  const answer = { id: 'a', operation: 'answerDecision', args: [2, { agentId: 'coordinator', answer: 'yes' }] };
-  assert.equal(remapMove(answer, remap, []).move.args[0], 2, 'a decision number is a shout, never an item');
-  assert.deepEqual(remapMove(withdraw, {}, [2]).lost, [2], 'a move on an item whose add was refused is named');
+test('an offline item stays bound to its queued moves through a replay that stops part way and new work after it [B26,H16,H17]', async (t) => {
+  const { box, other } = await twoMachines(t, 'Added before the outage');
+  await box.stopRelay();
+  const first = (await box.cli('add', box.lane, 'First item added here offline')).document.item.item_id;
+  const second = (await box.cli('add', box.lane, 'Second item added here offline')).document.item.item_id;
+  await box.restartRelay();
+  assert.equal((await other.cli('add', box.lane, 'Remote item takes the first number')).document.item.item_id, first);
+  // The relay takes the first replayed add, then stops answering reads, so the replay stops part way.
+  box.beforeNextMove(() => { box.refuseReads(true); });
+  await box.cli('status');
+  const shown = (await box.cli('export')).document.tables.item.find((row) => row.item_title === 'Second item added here offline').item_id;
+  assert.notEqual(shown, second, 'the part-way replay shows the second item under a new number here');
+  const withdrawn = await box.cli('withdraw', String(shown), 'withdrawn here at the number this machine shows');
+  assert.equal(withdrawn.code, 0, withdrawn.failure);
+  box.refuseReads(false);
+  assert.equal((await other.cli('add', box.lane, 'Remote item takes the shown number')).document.item.item_id, shown,
+    'the other machine takes the number this machine showed');
+
+  const replayed = await box.cli('status');
+  assert.equal(replayed.code, 0, replayed.failure);
+  assert.equal(replayed.document.relay.outbox, undefined, 'the outbox is empty once it replays');
+  for (const machine of [box, other]) {
+    const items = new Map((await machine.cli('export')).document.tables.item.map((row) => [row.item_title, row.item_status]));
+    assert.equal(items.get('Remote item takes the shown number'), 'open', 'the other machine\'s item is untouched');
+    assert.equal(items.get('Remote item takes the first number'), 'open');
+    assert.equal(items.get('Second item added here offline'), 'withdrawn', 'the withdraw acts on the item it was made for');
+  }
+});
+
+test('a queued move names an offline item by the add that made it, never by a number [B26,H16]', () => {
+  const add = (id, visible) => ({ move: { id, operation: 'addItem', args: [{ by: 'coordinator', lane: 'app', title: id }] }, visible });
+  const outbox = { moves: [add('a', 2), add('b', 3)], results: {} };
+  const withdraw = { id: 'w', operation: 'withdraw', args: [3, { agentId: 'coordinator', reason: 'r' }] };
+  const child = { id: 'c', operation: 'addItem', args: [{ by: 'coordinator', lane: 'app', title: 't', parentId: 2, after: [3, 9] }] };
+  const queued = { move: withdraw, refs: bindRefs(outbox, withdraw) };
+  const nested = { move: child, refs: bindRefs(outbox, child) };
+  assert.deepEqual(queued.refs, [{ path: [0], add: 'b' }], 'the number is bound to the add that made it; #9 is a board item');
+  outbox.moves[1].visible = 4;
+  assert.equal(resolveMove(queued, outbox, { local: true }).move.args[0], 4, 'here it follows the number this machine shows now');
+  outbox.results = { a: 3, b: 5 };
+  assert.equal(resolveMove(queued, outbox).move.args[0], 5, 'at replay it takes the number the relay gave');
+  assert.equal(queued.move.args[0], 3, 'the queued move itself is never rewritten');
+  assert.deepEqual(resolveMove(nested, outbox).move.args[0], { by: 'coordinator', lane: 'app', title: 't', parentId: 3, after: [5, 9] });
+  const answer = { id: 'q', operation: 'answerDecision', args: [3, { agentId: 'coordinator', answer: 'yes' }] };
+  assert.deepEqual(bindRefs(outbox, answer), [], 'a decision number is a shout, never an item');
+  outbox.results = { a: 3, b: null };
+  assert.deepEqual(resolveMove(queued, outbox).lost, [3], 'a move on an item whose add was refused is named, not sent');
 });

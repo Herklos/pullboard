@@ -150,34 +150,49 @@ export function refusalLine(kept) {
 /** Moves whose first argument is an item number; a decision's answer names a shout instead. */
 const ITEM_MOVES = new Set(['claim', 'release', 'submit', 'verify', 'reopen', 'refreeze', 'merged', 'withdraw', 'editItem', 'holdItem', 'releaseItemHold', 'escalate', 'appendFact']);
 
-/**
- * Rewrite the item numbers a queued move names through `remap` (first local number to the number it has now), and
- * list any it names whose add was refused at replay.
- * Why: another machine may add an item while this one is offline, so an item added here can get another number from
- * the relay; a later queued move must follow it rather than act on the other machine's item (#922).
- */
-export function remapMove(move, remap, lost) {
-  const next = structuredClone(move);
-  const touched = [];
-  const follow = (id) => {
-    if (!Number.isSafeInteger(id)) return id;
-    if (lost.includes(id)) touched.push(id);
-    return Object.hasOwn(remap, id) ? remap[id] : id;
-  };
-  if (ITEM_MOVES.has(next.operation)) next.args[0] = follow(next.args[0]);
-  const options = next.operation === 'addItem' ? next.args[0] : next.operation === 'editItem' ? next.args[1] : null;
+/** Where a move names an item: its first argument for item moves, and an add's or edit's parent and after list. */
+function itemSlots(move) {
+  const slots = ITEM_MOVES.has(move.operation) && Number.isSafeInteger(move.args[0]) ? [[0]] : [];
+  const at = move.operation === 'addItem' ? 0 : move.operation === 'editItem' ? 1 : null;
+  const options = at === null ? null : move.args[at];
   if (options && typeof options === 'object') {
-    if (options.parentId !== undefined) options.parentId = follow(options.parentId);
-    if (Array.isArray(options.after)) options.after = options.after.map(follow);
+    if (Number.isSafeInteger(options.parentId)) slots.push([at, 'parentId']);
+    if (Array.isArray(options.after)) options.after.forEach((id, index) => { if (Number.isSafeInteger(id)) slots.push([at, 'after', index]); });
   }
-  return { move: next, lost: touched };
+  return slots;
 }
 
-/** Record that the item first added here as `was` is now `is`; true when its number changed. */
-function followItem(remap, was, is) {
-  if (!Number.isSafeInteger(is) || is === was) { delete remap[was]; return false; }
-  remap[was] = is;
-  return true;
+/** Read or write the item number at one slot of a move's arguments. */
+function slot(move, path, value) {
+  const holder = path.slice(0, -1).reduce((at, key) => at[key], move.args);
+  if (value !== undefined) holder[path.at(-1)] = value;
+  return holder[path.at(-1)];
+}
+
+/**
+ * Bind the item numbers a new move names to the queued adds that made those items here, by the add's move id.
+ * Why: a number shown on this machine for an item it added offline is temporary; the relay may give another machine
+ * that number, and a replay part way through renumbers it here, so only the add itself names the item (#922).
+ */
+export function bindRefs(outbox, move) {
+  const pending = new Map(outbox.moves.filter((entry) => Number.isSafeInteger(entry.visible)).map((entry) => [entry.visible, entry.move.id]));
+  return itemSlots(move).filter((path) => pending.has(slot(move, path))).map((path) => ({ path, add: pending.get(slot(move, path)) }));
+}
+
+/**
+ * The move to send or apply: each bound number becomes its add's item, as the relay numbered it, or as this machine
+ * shows it now when `local` and the add still waits. `lost` names the slots whose add was refused at replay.
+ */
+export function resolveMove(entry, outbox, { local = false } = {}) {
+  const move = structuredClone(entry.move);
+  const lost = [];
+  for (const { path, add } of entry.refs ?? []) {
+    const waiting = local ? outbox.moves.find((other) => other.move.id === add) : null;
+    const value = waiting ? waiting.visible : outbox.results?.[add];
+    if (value === null) lost.push(slot(entry.move, path));
+    else if (Number.isSafeInteger(value)) slot(move, path, value);
+  }
+  return { move, lost };
 }
 
 /** Drop the replayed move from the outbox and save what is left. */
@@ -242,7 +257,7 @@ export async function queueMove(link, { operation, args, command, move, error, a
     move.actor = relayMoveActor(move) ?? credentialActor(move);
   }
   // `after` is the relay sequence this machine had seen: a refusal at replay names the moves ordered since.
-  const entry = { move, intent: operationIntent(operation, args), queuedAt: new Date().toISOString(), after: state.sequence,
+  const entry = { move, refs: bindRefs(outbox, move), intent: operationIntent(operation, args), queuedAt: new Date().toISOString(), after: state.sequence,
     ...(command ? { command, commandIntent: operationIntent('cli:' + command.cliOperation, command) } : {}) };
   outbox.moves.push(entry);
   await writeOutbox(where, key, state.board, outbox);
@@ -258,7 +273,7 @@ export async function queueMove(link, { operation, args, command, move, error, a
     throw refusal;
   }
   if (move.operation === 'addItem' && Number.isSafeInteger(result)) {
-    entry.localItem = result;
+    entry.visible = result;
     await writeOutbox(where, key, state.board, outbox);
   }
   if (!OUTBOX_NOTICES.has(io)) {
@@ -279,15 +294,16 @@ async function rebaseOutbox(link, outbox, key) {
   outbox.restored = false;
   await writeOutbox(outboxFile(file), key, state.board, outbox);
   saveOutboxSummary(link, outbox);
-  const remap = outbox.remap ??= {};
   for (const entry of outbox.moves) {
-    const { move } = remapMove(entry.original ?? entry.move, remap, outbox.lost ?? []);
+    const { move, lost } = resolveMove(entry, outbox, { local: true });
+    // A move on an item whose add was refused stays queued for its own refusal; here it would hit another item.
+    if (lost.length) continue;
     const result = localRecords(root, (board) => {
       try { return store.atomic(board, () => store[move.operation](board, ...executableArgs(move, board))); }
       catch (error) { if (!(error instanceof Refused)) throw error; return null; }
     });
-    // A re-applied add may get another number here; later queued moves name it by its first local number.
-    if (Number.isSafeInteger(entry.localItem) && Number.isSafeInteger(result)) followItem(remap, entry.localItem, result);
+    // A re-applied add may get another number here; later moves reach it through their bound add, not the number.
+    if (move.operation === 'addItem' && Number.isSafeInteger(result)) entry.visible = result;
   }
   await writeOutbox(outboxFile(file), key, state.board, outbox);
 }
@@ -327,30 +343,25 @@ export async function flushOutbox(link) {
       saveOutboxSummary(link, outbox);
     }
     await catchUp(root, file, state, io);
-    outbox.remap ??= {};
-    outbox.lost ??= [];
+    outbox.results ??= {};
     while (outbox.moves.length) {
       const entry = outbox.moves[0];
       const receiptOf = () => localRecords(root, (board) => engineReceipt(board, entry.move.id));
       let receipt = receiptOf();
       let sequence = receipt?.sequence;
       if (!receipt) {
-        // Map from the move as it was made, never from an earlier mapped copy, so no number is mapped twice.
-        entry.original ??= entry.move;
-        const { move, lost } = remapMove(entry.original, outbox.remap, outbox.lost);
+        const { move, lost } = resolveMove(entry, outbox);
         if (lost.length) {
           io.err(`pullboard: ${keepRefusal(state, entry, { code: 'RELAY_OUTBOX_DEPENDS', message: `it acts on #${lost[0]}, which this machine added while the relay was down, and that add was refused` }, [])}`);
           await finishEntry(link, outbox, where, key);
           continue;
         }
-        // The renumbered move is saved before it is sent, so a lost reply is matched by these exact contents.
-        entry.move = move;
-        await writeOutbox(where, key, state.board, outbox);
-        await actorTransport(root, file, state, credentialActor(entry.move), io);
+        // The queued move keeps its bindings; the resolved copy is what goes up, under the same move id.
+        await actorTransport(root, file, state, credentialActor(move), io);
         sequence = state.sequence + 1;
-        const sealed = await sealedRecord(key, entry.move, state, 'move', sequence);
-        const registration = seatReceipt(entry.move, sequence, sealed);
-        state.pending = { move: entry.move, intent: entry.intent, ...(entry.command ? { command: entry.command, commandIntent: entry.commandIntent } : {}),
+        const sealed = await sealedRecord(key, move, state, 'move', sequence);
+        const registration = seatReceipt(move, sequence, sealed);
+        state.pending = { move, intent: entry.intent, ...(entry.command ? { command: entry.command, commandIntent: entry.commandIntent } : {}),
           sequence, sealed, ...(registration ? { registration } : {}) };
         saveLink(file, state);
         let failure;
@@ -366,12 +377,16 @@ export async function flushOutbox(link) {
       if (state.pending?.move?.id === entry.move.id) delete state.pending;
       if (state.recovered?.move?.id === entry.move.id) delete state.recovered;
       if (receipt.outcome.error) {
-        const earlier = localRecords(root, (board) => earlierMoves(board, entry, sequence));
+        const earlier = localRecords(root, (board) => earlierMoves(board, { ...entry, move: resolveMove(entry, outbox).move }, sequence));
         io.err(`pullboard: ${keepRefusal(state, entry, receipt.outcome.error, earlier)}`);
-        if (Number.isSafeInteger(entry.localItem)) outbox.lost.push(entry.localItem);
-      } else if (Number.isSafeInteger(entry.localItem) && followItem(outbox.remap, entry.localItem, receipt.outcome.result)) {
-        state.outboxRenumbered = [...(state.outboxRenumbered ?? []), { was: entry.localItem, is: receipt.outcome.result }].slice(-KEPT_REFUSALS);
-        io.err(`pullboard: the item this machine added as #${entry.localItem} while the relay was down is #${receipt.outcome.result} on the board; its queued moves follow it`);
+      }
+      if (entry.move.operation === 'addItem') {
+        outbox.results[entry.move.id] = receipt.outcome.error ? null : receipt.outcome.result;
+        const is = receipt.outcome.result;
+        if (!receipt.outcome.error && Number.isSafeInteger(entry.visible) && Number.isSafeInteger(is) && is !== entry.visible) {
+          state.outboxRenumbered = [...(state.outboxRenumbered ?? []), { was: entry.visible, is }].slice(-KEPT_REFUSALS);
+          io.err(`pullboard: the item this machine showed as #${entry.visible} while the relay was down is #${is} on the board; its queued moves follow it`);
+        }
       }
       await finishEntry(link, outbox, where, key);
     }
