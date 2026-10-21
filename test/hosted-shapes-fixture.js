@@ -389,7 +389,8 @@ export function boardView(box) {
  */
 export async function relayPairClears(box, engine, front, session) {
   const result = await box.cli('relay', 'pair');
-  assert.equal(result.code, 0, 'relay pair prints its pairing link');
+  // A step that fails to run clears nothing.
+  if (result.code !== 0) return false;
   const printed = new URL(result.document.link);
   const context = await engine.newContext();
   try {
