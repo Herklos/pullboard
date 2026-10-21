@@ -53,6 +53,8 @@ Every line it prints is something to act on. `pullboard inbox` marks what it pri
 
 Close each finding with its next step in the same cycle. When the step belongs to someone else, shout it to them with the line itself. The thresholds live in pullboard.json under `health`: `stuck` (default 1h), `holds` (1d) and `release` (1d). Item #772 adds a sentinel that posts each new finding to the feed once; until it lands, the listener's loop is where findings arrive.
 
+A recurring job that runs on a cadence, such as a listener loop or a sentinel, records each run with `pullboard loop ran <name>`, and `pullboard health` flags one that stays silent for 1.5 cadences. The coordinator declares the cadence with `pullboard loop declare <name> --every 10m --owner <seat or lane>`; `pullboard loop` lists the jobs and their last runs.
+
 ## Route by roadmap order
 
 `pullboard digest --out briefing.md` writes a short Markdown briefing of this board for a person or a chat assistant; hand it over when someone needs the board's state at a glance.

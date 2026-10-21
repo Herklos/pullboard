@@ -26,6 +26,8 @@ test('every current operation selects its native actor credential without a seco
     if (operation === 'reserveNextReview') args = [options];
     if (operation === 'recordHealthFindings') args = [{ agentId: actor, observedRevision: 0, findings: [] }];
     if (operation === 'recordFlakeObservation') args = [{ agentId: actor, lane: box.lane, observation: syntheticFlakeObservation('credential-fixture') }];
+    if (operation === 'declareJob') args = [{ agentId: actor, name: 'credential-job', every: '10m', owner: actor }];
+    if (operation === 'recordJobRun') args = [{ agentId: actor, name: 'credential-job' }];
     if (operation === 'proposeSentinel') args = [{ agentId: actor,
       row: { name: 'credential-watch', check: 'true', every: 'hourly', owner: actor } }];
     if (['beginSentinelRun', 'finishSentinelRun'].includes(operation)) {
