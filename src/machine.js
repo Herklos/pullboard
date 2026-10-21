@@ -9,49 +9,48 @@
  * broken copy, and checks the declaration against the refusals board.js and cli.js raise today.
  */
 
-import { RIGOR_NOTICE_ENGINE } from './rigor-source.js';
-import { HEALTH_CAP_ENGINE } from './health-receipts.js';
-import { NATIVE_FLAKE_ENGINE } from './flake-engine.js';
-import { RECURRING_JOB_ENGINE } from './job-engine.js';
-import { LOCAL_LANDING_ENGINE } from './land-engine.js';
+import {
+  ENGINE_CANDIDATE,
+  ENGINE_FILE,
+  discovered,
+} from './discovery.js';
+import {
+  readdirSync,
+  readFileSync,
+} from 'node:fs';
 
-/** First writer for withdraw-and-remove milestone behavior; shipment remains engine 45. */
-export const WITHDRAW_MILESTONE_ENGINE = 51;
+export { AUTO_ESCALATE_ENGINE } from './auto-escalate-engine.js';
+export { ROW_DRAFT_ENGINE } from './row-draft-engine.js';
+export { STRONG_REJECTION_NOTICE_ENGINE } from './strong-rejection-notice-engine.js';
+export { SUBMITTED_CONFLICT_ENGINE } from './submitted-conflict-engine.js';
+export { WITHDRAW_MILESTONE_ENGINE } from './withdraw-milestone-engine.js';
 
-/** First engine that automatically escalates an item's second rejection at its current route [B15]. */
-export const AUTO_ESCALATE_ENGINE = 50;
-
-/** The first engine that records a spec row a lane agent drafts on the board, not in SPEC.md (#878). */
-export const ROW_DRAFT_ENGINE = 55;
-
-/** First engine replacing an automatic ceiling escalation with a paired notice [B15,H16]. */
-export const STRONG_REJECTION_NOTICE_ENGINE = 54;
-
-/** Executable move semantics, carried by every sealed move and retained during replay [H16]. */
 /**
- * The engine at which a conflict reopen may return a submitted head, not only an accepted one, and any joined
- * seat may record it (#807; allocated by the coordinator, 19 Oct).
+ * Find every feature engine: each src/*-engine.js leaf declares exactly one `export const NAME_ENGINE = n;` line.
+ * A feature that raises the engine adds its own new file and no line of any shared one, so two items adding
+ * different engines never conflict [C7,V4]. The value is read as text because machine.js needs it synchronously.
+ *
+ * @param {URL} directory the folder holding the *-engine.js leaves
+ * @returns {Record<string, number>} engine number by file name, in name order
  */
-export const SUBMITTED_CONFLICT_ENGINE = 60;
+export function discoverEngines(directory = new URL('./', import.meta.url)) {
+  const found = {};
+  for (const file of discovered(readdirSync(directory), ENGINE_CANDIDATE, ENGINE_FILE, 'feature engine')) {
+    const lines = readFileSync(new URL(file, directory), 'utf8').split('\n').filter((line) => /^export const /u.test(line));
+    const match = lines.length === 1 ? /^export const [A-Z][A-Z0-9_]*_ENGINE = (\d+);$/u.exec(lines[0]) : null;
+    if (!match) throw new Error(`${file} must declare exactly one line \`export const NAME_ENGINE = <number>;\` so ENGINE_VERSION can read it`);
+    found[file.slice(0, -'-engine.js'.length)] = Number(match[1]);
+  }
+  return found;
+}
 
-/** First engine reserving opt-in reopened work for its builder (#954, coordinator allocation). */
-export const REOPEN_FIRST_REFUSAL_ENGINE = 66;
+export { REOPEN_FIRST_REFUSAL_ENGINE } from './reopen-first-refusal-engine.js';
 
-export const ENGINE_VERSION = Math.max(
-  REOPEN_FIRST_REFUSAL_ENGINE,
-  LOCAL_LANDING_ENGINE,
-  HEALTH_CAP_ENGINE,
-  SUBMITTED_CONFLICT_ENGINE,
-  NATIVE_FLAKE_ENGINE,
-  ROW_DRAFT_ENGINE,
-  AUTO_ESCALATE_ENGINE,
-  RIGOR_NOTICE_ENGINE,
-  WITHDRAW_MILESTONE_ENGINE,
-  STRONG_REJECTION_NOTICE_ENGINE,
-  52,
-  56,
-  RECURRING_JOB_ENGINE,
-);
+/** Every feature engine by name, discovered from the *-engine.js files beside this one. */
+export const ENGINE_REGISTRY = discoverEngines();
+
+/** The highest engine number any feature declares. */
+export const ENGINE_VERSION = Math.max(...Object.values(ENGINE_REGISTRY));
 
 /**
  * The engine whose relay moves carry seat provenance and verifier standing (#579). It is its own

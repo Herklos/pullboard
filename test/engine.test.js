@@ -1,7 +1,8 @@
+/** @pullboard-test-input source-tree */
 /** @pullboard-test-loads src/engine.js src/machine.js */
 /** Real-SQLite tests for the deterministic, sequence-ordered move engine [H3,H16]. */
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -10,7 +11,8 @@ import * as store from '../src/board.js';
 import { submitFixture } from './board-submit-fixture.js';
 import { exportBoard, importBoard, restoreRelaySnapshot } from '../src/exchange.js';
 import { applyEngineMove, applyRelayMove, prepareEngineMove, appliedSequence, engineReceipt, refuseRelayMove, startRelayEpoch, checkpointSequence, ENGINE_OPERATIONS } from '../src/engine.js';
-import { ENGINE_VERSION } from '../src/machine.js';
+import { COMMAND_CANDIDATE, COMMAND_FILE, discovered } from '../src/discovery.js';
+import { ENGINE_REGISTRY, ENGINE_VERSION, discoverEngines } from '../src/machine.js';
 import { Refused } from '../src/refused.js';
 import { unpackRelease } from './release-archive.js';
 
@@ -625,7 +627,6 @@ test('a failed durable receipt rolls back an otherwise successful move and its c
   assert.equal(replayCursor(board), 0);
 });
 
-
 test('engine 65 keeps an ordinary claim available without a return window [B13,H16]', t => {
   const { copies: [board], item } = engineCopies(t);
   const move = { ...claimMove(board, item, 'web-2'), engine: 65 };
@@ -653,4 +654,28 @@ test('return-window engine admission uses the receipt time rather than replica c
   const result = applyEngineMove(insideClock, atExpiry, { sequence: 1, at: '2026-10-07T16:30:00.000Z' });
   assert.equal(result.error, undefined);
   assert.equal(store.getItem(insideClock, item).item_owner, 'web-2');
+});
+
+test('the engine version is the highest feature engine [C7,V4]', () => {
+  const entries = Object.entries(ENGINE_REGISTRY);
+  assert.ok(entries.length > 0, 'the registry names at least one feature engine');
+  for (const [name, engine] of entries) assert.ok(Number.isSafeInteger(engine) && engine > 0, `feature ${name} declares a positive whole engine number`);
+  assert.equal(ENGINE_VERSION, Math.max(...entries.map(([, engine]) => engine)), 'the engine version is the highest number any feature declares');
+  const source = new URL('../src/', import.meta.url);
+  const files = readdirSync(source).filter((file) => /-engine\.js$/u.test(file));
+  assert.deepEqual(Object.keys(ENGINE_REGISTRY), files.map((file) => file.slice(0, -'-engine.js'.length)).sort(), 'every src/*-engine.js leaf is a feature engine, discovered by its file name');
+  for (const file of files) assert.match(readFileSync(new URL(file, source), 'utf8'), /^export const [A-Z][A-Z0-9_]*_ENGINE = \d+;$/mu, `${file} declares its one engine constant`);
+  assert.doesNotMatch(readFileSync(new URL('machine.js', source), 'utf8'), /Math\.max\([A-Z_]+ENGINE,/u, 'src/machine.js lists no engine by name');
+});
+
+test('a feature engine or command file name outside letters, digits, underscore and hyphen is refused by discovery [C7,V4]', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'pullboard-discovery-'));
+  try {
+    writeFileSync(join(directory, 'check-alpha-engine.js'), 'export const CHECK_ALPHA_ENGINE = 70;\n');
+    assert.deepEqual(discoverEngines(pathToFileURL(directory + '/')), { 'check-alpha': 70 }, 'a hyphenated engine file is discovered');
+    writeFileSync(join(directory, 'check.beta-engine.js'), 'export const CHECK_BETA_ENGINE = 71;\n');
+    assert.throws(() => discoverEngines(pathToFileURL(directory + '/')), /check\.beta-engine\.js cannot be a feature engine/u, 'a dotted engine file is refused by name');
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+  assert.deepEqual(discovered(['index.js', 'add.js', 'two-words.js'], COMMAND_CANDIDATE, COMMAND_FILE, 'command'), ['add.js', 'two-words.js']);
+  assert.throws(() => discovered(['index.js', 'add.js', 'a.b.js'], COMMAND_CANDIDATE, COMMAND_FILE, 'command'), /a\.b\.js cannot be a command/u, 'a dotted command file is refused by name');
 });

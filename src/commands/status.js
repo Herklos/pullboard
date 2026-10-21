@@ -1,0 +1,53 @@
+/** The pullboard status command, in its own module so an item adding another command never edits these lines. */
+import * as store from '../board.js';
+import {
+  reviewQueueLine,
+} from '../next-steps.js';
+import {
+  productLine,
+  productSummaries,
+} from '../products.js';
+import * as relayOutput from '../relay-output.js';
+import {
+  relayStatus,
+} from '../relay.js';
+import {
+  loadSpec,
+} from '../spec.js';
+import {
+  submitInvariantLine,
+  submitInvariantProposals,
+} from '../submit-invariants.js';
+import {
+  context,
+  span,
+  whoAmI,
+  withBoard,
+} from '../cli.js';
+
+/** Run `pullboard status` and return its exit code. */
+export function run(io, { values }) {
+  const ctx = context(io);
+  const summary = withBoard(ctx, (board) => {
+    const me = whoAmI(ctx, board);
+    const mine = store.listItems(board).filter((item) => item.item_status === 'claimed' && item.item_owner === me.id);
+    return { me, mine, stats: store.stats(board), reviewQueue: { ...store.reviewQueue(board), ...store.reviewQueueBreakdown(board) }, unread: store.unreadCount(board, me.id), relay: relayStatus(ctx.info.root),
+      submitInvariantProposals: submitInvariantProposals(store.events(board), ctx.config) };
+  });
+  if (values.json) {
+    io.result(summary);
+    return 0;
+  }
+  for (const line of relayOutput.briefLines(summary.relay)) io.say(line);
+  const { items, accepted, rejected } = summary.stats;
+  io.say(`${summary.me.displayName}: ${summary.unread} unread shouts; holding ${summary.mine.map((item) => `#${item.item_id}`).join(', ') || 'nothing'}`);
+  io.say(`board: ${items.open} open, ${items.claimed} claimed, ${items.submitted} awaiting verification, ${items.verified} verified, ${items.withdrawn} withdrawn`);
+  io.say(`verdicts: ${accepted} accepted, ${rejected} rejected`);
+  io.say(reviewQueueLine(ctx, summary.reviewQueue, span));
+  for (const proposal of summary.submitInvariantProposals) io.say(submitInvariantLine(proposal));
+  if (Object.keys(ctx.config.products).length) {
+    const all = withBoard(ctx, (board) => store.listItems(board, { all: true }));
+    productSummaries(ctx.config, loadSpec(ctx.info.root, ctx.config), all).forEach((product) => io.say(productLine(product)));
+  }
+  return 0;
+}
