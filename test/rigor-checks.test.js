@@ -616,3 +616,42 @@ test('rigor reports a catch whose log line alone is deleted [D1,D3]', () => {
     'src/settings.js:4: silent-catch: catch is silent: it neither throws nor logs a line that names its subject',
   ], 'a change that only deletes a catch log names that catch; the untouched logged catch is not named');
 });
+
+test('rigor matches a catch to its earlier self when a new one shares its header [D1,D3]', () => {
+  const start = [
+    'export function strict(read) {',
+    '  try {',
+    '    return read();',
+    '  } catch (error) {',
+    '    throw new Error(`strict read failed: ${error.message}`);',
+    '  }',
+    '}',
+    'export function old(read) {',
+    '  try {',
+    '    return read();',
+    '  } catch (error) {',
+    '    return null;',
+    '  }',
+    '}',
+    '',
+  ];
+  const repo = qualityRepo('quality-catch-shifted', { 'src/read.js': start.join('\n') });
+  const edited = [
+    'export function logged(read) {',
+    '  try {',
+    '    return read();',
+    '  } catch (error) {',
+    '    console.warn(`logged read failed: ${error.message}`);',
+    '    return null;',
+    '  }',
+    '}',
+    ...start.slice(0, 4),
+    '    return null;',
+    ...start.slice(5),
+  ];
+  repo.commit('fix(read): softer strict reads', { 'src/read.js': edited.join('\n') });
+  const breaches = qualityBreaches(repo.root, changeRange(repo.root), { rules: ['silent-catch'] });
+  assert.deepEqual(breaches.map((breach) => breachLine(breach)), [
+    'src/read.js:12: silent-catch: catch is silent: it neither throws nor logs a line that names its subject',
+  ], 'the strict catch made silent is named at its kept header; the new logged catch and the old silent catch are not');
+});

@@ -124,7 +124,7 @@ export function changeRange(root, { base, head = 'HEAD' } = {}) {
  * only between `diff --git` and the first hunk.
  *
  * @param {string} text
- * @returns {Map<string, { status: 'A' | 'M' | 'D', added: { line: number, text: string }[] }>}
+ * @returns {Map<string, { status: 'A' | 'M' | 'D', added: { line: number, text: string }[], hunks: { oldStart: number, oldCount: number, newStart: number, newCount: number }[] }>}
  */
 export function parseDiff(text) {
   const files = new Map();
@@ -140,22 +140,39 @@ export function parseDiff(text) {
       else if (line.startsWith('+++ ')) {
         const name = line.slice(4);
         current = name === '/dev/null' ? null : name.replace(/^b\//u, '');
-        if (current) files.set(current, { status, added: [] });
+        if (current) files.set(current, { status, added: [], hunks: [] });
       } else if (line.startsWith('--- ') && status === 'D') {
         const name = line.slice(4).replace(/^a\//u, '');
-        files.set(name, { status, added: [] });
+        files.set(name, { status, added: [], hunks: [] });
       }
       if (!line.startsWith('@@')) continue;
       header = false;
     }
-    const hunk = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/u.exec(line);
-    if (hunk) { next = Number(hunk[1]); continue; }
+    const hunk = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/u.exec(line);
+    if (hunk) {
+      next = Number(hunk[3]);
+      if (current) files.get(current).hunks.push({ oldStart: Number(hunk[1]), oldCount: Number(hunk[2] ?? 1), newStart: next, newCount: Number(hunk[4] ?? 1) });
+      continue;
+    }
     if (current && line.startsWith('+')) {
       files.get(current).added.push({ line: next, text: line.slice(1) });
       next += 1;
     }
   }
   return files;
+}
+
+/**
+ * The line an unchanged new-side line had before the change, from a zero-context diff's hunks. Why not match by
+ * position among same-named catches: a new catch with the same header shifts every later one (#806 third review).
+ */
+function lineBefore(hunks, line) {
+  let shift = 0;
+  for (const hunk of hunks) {
+    const before = hunk.newCount === 0 ? hunk.newStart < line : hunk.newStart + hunk.newCount - 1 < line;
+    if (before) shift += hunk.oldCount - hunk.newCount;
+  }
+  return line + shift;
 }
 
 /** The diff from one commit to another, or of one commit against its parent. */
@@ -211,14 +228,21 @@ function catches(source) {
     const end = closing(code, open, '(', ')');
     found.push({ at: match.index + match[0].indexOf('catch'), end, kind: 'handler', header: '.catch(', body: code.slice(open + 1, end) });
   }
-  // The nth catch with the same header text is the same catch on both sides of an edit that keeps its header.
-  const seen = new Map();
-  for (const entry of found.sort((a, b) => a.at - b.at)) {
-    const header = `${entry.kind}:${entry.header.replace(/\s+/gu, ' ')}`;
-    seen.set(header, (seen.get(header) ?? 0) + 1);
-    entry.identity = `${header}#${seen.get(header)}`;
-  }
   return found;
+}
+
+/**
+ * Each catch with its line and its place among catches of the same kind and header on that line, so a kept line
+ * with two `.catch(` handlers still matches each to its own earlier self.
+ */
+function onLine(found, source) {
+  const seen = new Map();
+  return [...found].sort((a, b) => a.at - b.at).map((entry) => {
+    const line = lineAt(source, entry.at);
+    const key = `${line}:${entry.kind}:${entry.header.replace(/\s+/gu, ' ')}`;
+    seen.set(key, (seen.get(key) ?? 0) + 1);
+    return { ...entry, line, slot: `${entry.kind}:${entry.header.replace(/\s+/gu, ' ')}#${seen.get(key)}` };
+  });
 }
 
 /** Whether a catch body neither throws nor writes a line. */
@@ -257,23 +281,25 @@ const CHECKS = {
       .map(([path]) => ({ path, line: 1, text: 'is a new gate or check, and no test in this change runs it with no data to show it fails closed' }));
   },
   /**
-   * A catch the change adds, or makes silent, that neither throws nor writes a line. Each catch is matched to its earlier
-   * self (same header, same place among those headers). Why compare: rewriting or only deleting an existing catch's log
-   * leaves its header untouched and may add no line at all, yet introduces the silence (#806 reviews). A catch that was
-   * already silent stays old debt unless the change rewrites its body.
+   * A catch the change adds, or makes silent, that neither throws nor writes a line. A catch whose header line the
+   * change keeps is matched to the catch that header had before, through the diff's line map. Why compare: rewriting
+   * or only deleting an existing catch's log leaves its header untouched and may add no line at all, yet introduces
+   * the silence (#806 reviews). A catch that was already silent stays old debt unless the change rewrites its body.
    */
   'silent-catch': (root, range, { diff }) => [...diff].filter(([path, file]) => SCRIPT.test(path) && !TEST_FILE.test(path) && file.status !== 'D')
     .flatMap(([path, file]) => {
       const source = textAt(root, range.head, path) ?? '';
+      const baseSource = textAt(root, range.base, path) ?? '';
       const added = file.added.map((entry) => entry.line);
-      const before = new Map(catches(textAt(root, range.base, path) ?? '').map((found) => [found.identity, found]));
-      return catches(source).map((found) => ({ ...found, line: lineAt(source, found.at), last: lineAt(source, found.end) }))
+      const before = onLine(catches(baseSource), baseSource);
+      const after = onLine(catches(source), source);
+      return after.map((found) => ({ ...found, last: lineAt(source, found.end) }))
         .filter((found) => {
           if (!silent(found)) return false;
-          const earlier = before.get(found.identity);
           if (added.includes(found.line)) return true;
-          // No earlier self with an unchanged header means a shifted count, not a new catch: a new one adds its header.
-          if (!earlier) return false;
+          const was = lineBefore(file.hunks, found.line);
+          const earlier = before.find((old) => old.line === was && old.slot === found.slot);
+          if (!earlier) return true;
           if (!silent(earlier)) return true;
           return bodyKey(earlier) !== bodyKey(found) && added.some((line) => line > found.line && line <= found.last);
         })
