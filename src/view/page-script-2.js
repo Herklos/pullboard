@@ -651,7 +651,8 @@ function flowSvg(p) {
   const inside = new Map(FLOW.states.map((s) => {
     const keeps = pairs.find((pair) => pair.from === s.id && pair.to === s.id);
     const said = keeps ? told([keeps]) : null;
-    const kept = said ? wrap(said.words, BW - 28 - wide('↻ ', 11), 11).map((line, i) => (i ? '  ' : '↻ ') + line) : [];
+    // A wrapped line opens with the dot it was split at, so the moves still read as one list (#954).
+    const kept = said ? wrap(said.words, BW - 28 - wide('↻ ', 11), 11).map((line, i) => (i ? '· ' : '↻ ') + line) : [];
     return [s.id, { keeps, said, kept, back: s.id === FLOW.initial && back ? back + ' sent back' : '' }];
   }));
   const BH = 44 + 15 * Math.max(1, ...[...inside.values()].map((box) => box.kept.length + (box.back ? 1 : 0)));

@@ -177,8 +177,8 @@ export function configProblems(config) {
   if (typeof config.practice !== 'string' || !config.practice) problems.push('"practice" names the doctrine file');
   if (typeof config.gate !== 'string') problems.push('"gate" is a shell command, like "npm test"');
   if (config.flakes !== undefined && (!config.flakes || typeof config.flakes !== 'object' || Array.isArray(config.flakes)
-      || config.flakes.rerun !== undefined && typeof config.flakes.rerun !== 'boolean'
-      || Object.keys(config.flakes).some(key => key !== 'rerun'))) problems.push('"flakes" has only the optional boolean "rerun", off by default');
+      || ['rerun', 'quarantine'].some(key => config.flakes[key] !== undefined && typeof config.flakes[key] !== 'boolean')
+      || Object.keys(config.flakes).some(key => !['rerun', 'quarantine'].includes(key)))) problems.push('"flakes" has only the optional booleans "rerun" and "quarantine", each off by default');
   if (config.rigor !== undefined && (!config.rigor || typeof config.rigor !== 'object' || Array.isArray(config.rigor)
       || config.rigor.budget !== undefined && (!Number.isSafeInteger(config.rigor.budget) || config.rigor.budget < 0)
       || Object.keys(config.rigor).some(key => key !== 'budget'))) problems.push('"rigor" has only the optional whole number "budget", the lines of non-test code one change may add; 400 by default');
