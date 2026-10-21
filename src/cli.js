@@ -216,6 +216,7 @@ import {
   answerQuestion,
   landBlueprint,
   planBlueprint,
+  starterCheck,
   readBlueprint,
   repoAnswers,
 } from './blueprints.js';
@@ -1761,9 +1762,8 @@ export async function addBlueprint(ctx, board, me, blueprint, { report = true, r
   const proposedLanes = proposals.filter((lane) => lanes.some((placed) => placed.proposal === lane));
   const starters = plan.items.map((entry, index) => ({ key: entry.key, afterKeys: entry.after, asked: lanes[index].asked, item: { by: me.id, lane: lanes[index].lane,
     title: entry.title, criterion: entry.criterion, specIds: entry.specIds, parentId: null, after: [], brief: entry.brief, route: entry.route,
-    ...(entry.check === undefined ? {} : { check: entry.check }) } }));
-  // The same checks pullboard add uses, before anything is written. A blueprint's item check is
-  // stored, never run: no check baseline starts during add, so nothing a blueprint supplies executes.
+    ...(entry.check === undefined ? {} : { check: starterCheck(blueprint, entry.check, lanes[index], ctx.config) }) } }));
+  // Bundled checks are scoped at placement; add stores checks without executing them or starting a baseline.
   // Every bundled starter carries a check (#724), and only the coordinator sets one, so an agent's
   // add is refused with the step that works: add it from the coordinator's checkout.
   if (me.id !== COORDINATOR && starters.some(({ item }) => item.check !== undefined)) {
