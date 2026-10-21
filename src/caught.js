@@ -3,7 +3,7 @@
  * `pullboard stats` and `pullboard digest`, shown only when someone asks.
  *
  * Why no new event kind: every catch is already a recorded move (a reject verdict, a reopen that
- * names a trunk conflict or a red landing, a proven flake, a sentinel finding), so the list is a
+ * names a trunk conflict or a red landing, a proven flake or a quarantined test, a sentinel finding), so the list is a
  * reading of history and adds nothing to it.
  */
 import { NATIVE_FLAKE_ENGINE } from './flake-engine.js';
@@ -77,6 +77,8 @@ export function caughtFrom(history, verdicts, boundary) {
       add('redHead', event, `the full suite failed ${tests || 'at landing'}`);
     } else if (event.event_kind === 'flake-observation' && detail.engine === NATIVE_FLAKE_ENGINE && detail.observation?.classification === 'flake') {
       add('flake', event, `${detail.observation.file ?? 'unknown file'}: ${detail.observation.name ?? 'unknown test'} passed on rerun at the same head`);
+    } else if (event.event_kind === 'test-quarantine') {
+      add('flake', event, `${detail.file ?? 'unknown file'} :: ${detail.name ?? 'unknown test'} went red and green on tree ${detail.tree ?? 'unknown'}`);
     } else if (event.event_kind === 'health-failure' && event.event_by === 'sentinel') {
       add('stuck', event, `${detail.subject ?? detail.key ?? 'a stuck state'} (${String(detail.cause ?? 'refusal').replace(/^refusal:/u, '')})`);
     }

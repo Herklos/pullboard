@@ -144,6 +144,7 @@ function addCatches(board) {
   store.logEvent(board, 'coordinator', 'reopen', 1, { commit: 'c'.repeat(40), note: 'merge main', conflict: { files: ['web/app.js'], trunk: 'e'.repeat(40) }, cause: 'merge-conflict' });
   store.logEvent(board, 'coordinator', 'reopen', 1, { commit: 'c'.repeat(40), note: 'red', supersedes: 1, landingFailure: { batch: 'b1', tests: [{ file: 'test/a.test.js', name: 'adds up' }], mergeCommit: 'f'.repeat(40) } });
   store.logEvent(board, 'coordinator', 'flake-observation', null, { engine: 61, observation: { id: 'o1', classification: 'flake', file: 'test/b.test.js', name: 'waits' } });
+  store.logEvent(board, 'coordinator', 'test-quarantine', 1, { engine: 67, file: 'test/c.test.js', name: 'same tree', tree: 'd'.repeat(40), runs: ['r1', 'r2'] });
   store.logEvent(board, 'sentinel', 'health-failure', 1, { key: 'k1', cause: 'refusal:STUCK', subject: 'item 1', engine: 1 });
 }
 
@@ -154,8 +155,8 @@ test('[N26,D1] stats names what the board caught', async (t) => {
   const json = await run(root, ['stats', '--json']);
   assert.equal(json.code, 0, json.stderr);
   const { counts, total, entries } = json.data.stats.caught;
-  assert.deepEqual(counts, { sentBack: 3, conflict: 1, redHead: 1, flake: 1, stuck: 1 });
-  assert.equal(total, 7);
+  assert.deepEqual(counts, { sentBack: 3, conflict: 1, redHead: 1, flake: 2, stuck: 1 });
+  assert.equal(total, 8);
   assert.match(entries.find((entry) => entry.kind === 'sentBack').text, /Fixture rejects the first attempt\./u, 'a sent-back line carries the gap the reviewer named');
   assert.ok(entries.every((entry) => entry.at && Object.hasOwn(entry, 'item')), 'each catch names its item and when');
   const repeated = entries.filter((entry) => entry.kind === 'sentBack' && entry.item === repeatedId);
@@ -169,7 +170,7 @@ test('[N26,D1] stats names what the board caught', async (t) => {
   assert.match(laterRepeat[0].text, /the corrected criterion still fails/u, 'the later event retains its note after earlier history is consumed');
   assert.doesNotMatch(laterRepeat[0].text, /the heading is missing/u);
   const text = await run(root, ['stats']);
-  assert.match(text.stdout, /caught: 3 sent back by a reviewer · 1 conflicted with the trunk and went back for a merge · 1 heads the full suite refused to publish · 1 flakes proven · 1 stuck states the sentinel reported/u);
+  assert.match(text.stdout, /caught: 3 sent back by a reviewer · 1 conflicted with the trunk and went back for a merge · 1 heads the full suite refused to publish · 2 flakes proven · 1 stuck states the sentinel reported/u);
   assert.match(text.stdout, /sent back by a reviewer: #1, \S+: TEST_FAILURE: Fixture rejects the first attempt\./u);
   const repeatedLines = text.stdout.split(/\r?\n/u).filter((line) => line.startsWith(`  sent back by a reviewer: #${repeatedId},`));
   assert.equal(repeatedLines.length, 2, 'each repeated rejection renders on one physical line');
@@ -179,6 +180,7 @@ test('[N26,D1] stats names what the board caught', async (t) => {
   assert.match(text.stdout, /conflicted with the trunk and went back for a merge: #1, \S+: conflicted with the trunk in web\/app\.js/u);
   assert.match(text.stdout, /heads the full suite refused to publish: #1, \S+: the full suite failed test\/a\.test\.js: adds up/u);
   assert.match(text.stdout, /flakes proven: no item, \S+: test\/b\.test\.js: waits passed on rerun/u);
+  assert.match(text.stdout, new RegExp(`flakes proven: #1, \\S+: test/c\\.test\\.js :: same tree went red and green on tree ${'d'.repeat(40)}`, 'u'), 'a test the board quarantined after one tree went red and green is a proven flake');
   assert.match(text.stdout, /stuck states the sentinel reported: #1, \S+: item 1 \(STUCK\)/u);
   const digest = await run(root, ['digest', '--json']);
   assert.equal(digest.code, 0, digest.stderr);
