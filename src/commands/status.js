@@ -1,6 +1,6 @@
 /** The pullboard status command, in its own module so an item adding another command never edits these lines. */
 import * as store from '../board.js';
-import { personNeedsState } from '../needs-state.js';
+import { personNeedsSummary } from '../needs-state.js';
 import {
   reviewQueueLine,
 } from '../next-steps.js';
@@ -32,7 +32,7 @@ export function run(io, { values }) {
   const summary = withBoard(ctx, (board) => {
     const me = whoAmI(ctx, board);
     const mine = store.listItems(board).filter((item) => item.item_status === 'claimed' && item.item_owner === me.id);
-    const approvalState = personNeedsState(ctx.info.root, { board });
+    const approvalState = personNeedsSummary(ctx.info.root, { board, config: ctx.config });
     return { me, mine, needs: approvalState.needs, specApprovalBaseline: approvalState.specApprovalBaseline, specApprovalEvidenceErrors: approvalState.specApprovalEvidenceErrors, stats: store.stats(board), reviewQueue: { ...store.reviewQueue(board), ...store.reviewQueueBreakdown(board) }, unread: store.unreadCount(board, me.id), relay: relayStatus(ctx.info.root),
       submitInvariantProposals: submitInvariantProposals(store.events(board), ctx.config) };
   });

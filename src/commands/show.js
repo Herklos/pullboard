@@ -7,7 +7,11 @@ import {
   barCorrections,
 } from '../bar-corrections.js';
 import * as store from '../board.js';
-import { agentApprovalLine, itemAgentApprovals, specApprovalState } from '../spec-approval.js';
+import {
+  agentApprovalLine,
+  itemAgentApprovals,
+  specApprovalState,
+} from '../spec-approval.js';
 import {
   sayCheckBaseline,
 } from '../check-baseline.js';

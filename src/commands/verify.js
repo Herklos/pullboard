@@ -1,6 +1,10 @@
 /** The pullboard verify command, in its own module so an item adding another command never edits these lines. */
 import * as store from '../board.js';
-import { agentApprovalLine, itemAgentApprovals, specApprovalState } from '../spec-approval.js';
+import {
+  agentApprovalLine,
+  itemAgentApprovals,
+  specApprovalState,
+} from '../spec-approval.js';
 import {
   checkNeedsBrowser,
   explicitCheckFiles,

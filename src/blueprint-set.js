@@ -14,7 +14,10 @@ import {
   bundledBlueprints,
   readBlueprint,
 } from './blueprints.js';
-import { CONFIG_FILE, configFromSource } from './config.js';
+import {
+  CONFIG_FILE,
+  configFromSource,
+} from './config.js';
 import { Refused } from './refused.js';
 
 /**

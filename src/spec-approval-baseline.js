@@ -1,5 +1,8 @@
 /** One shared compatibility snapshot, recorded through the board engine, never a person approval. */
-import { atomic, logEvent } from './board.js';
+import {
+  atomic,
+  logEvent,
+} from './board.js';
 import { Refused } from './refused.js';
 import { parseSpec } from './spec.js';
 import { COORDINATOR } from './config.js';

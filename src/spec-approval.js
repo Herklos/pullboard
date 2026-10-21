@@ -5,8 +5,14 @@ import * as store from './board.js';
 import { tryGit } from './git.js';
 import { personNeeds } from './needs.js';
 import { Refused } from './refused.js';
-import { loadSpec, readSignoffs } from './spec.js';
-import { isVerifiedSignoff, verifyRowDecision } from './signature.js';
+import {
+  loadSpec,
+  readSignoffs,
+} from './spec.js';
+import {
+  isVerifiedSignoff,
+  verifyRowDecision,
+} from './signature.js';
 
 /** Read each line's actual commit and Git author; neither identifies a person approval. */
 function rowOrigins(root, file) {
@@ -102,11 +108,17 @@ export function agentApprovalLine(rows) {
   return rows.length ? `verified against agent-approved ${rows.map(row => row.id).join(', ')}` : '';
 }
 
+/** Keep item detail and whole-state approval fields identical without changing compact summaries. */
+export function projectItemSpecApprovals(item, approval) {
+  const rows = itemAgentApprovals(item, approval);
+  return { ...item, agentApproved: rows, approvalQualification: agentApprovalLine(rows) };
+}
+
 /** Project current confirmation beside immutable items and their historical receipts. */
 export function projectSpecApprovals(state, approval) {
   const byId = new Map(approval.rows.map(row => [row.id, row]));
   const projected = { ...state, specApprovalBaseline: { pending: approval.baselinePending === true, invalid: approval.baselineInvalid === true }, specApprovalEvidenceErrors: approval.evidenceErrors ?? [], spec: state.spec.map(row => ({ ...row, agentApproval: byId.has(row.id) ? { ...byId.get(row.id), mode: approval.mode } : null })),
-    items: state.items?.map(item => ({ ...item, agentApproved: itemAgentApprovals(item, approval), approvalQualification: agentApprovalLine(itemAgentApprovals(item, approval)) })) };
+    items: state.items?.map(item => projectItemSpecApprovals(item, approval)) };
   return { ...projected, needs: personNeeds(projected) };
 }
 

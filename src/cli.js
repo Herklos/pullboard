@@ -213,10 +213,8 @@ import {
   standings,
   unmetRows,
 } from './spec.js';
-import {
-  captureSpecApprovalBaseline,
-  refuseAgentApprovedRows,
-} from './spec-approval.js';
+import { refuseAgentApprovedRows } from './spec-approval.js';
+import { initialSpecApprovalBaseline } from './spec-approval-bootstrap.js';
 import {
   answerQuestion,
   landBlueprint,
@@ -880,8 +878,7 @@ function relayOutboxSetting(root) {
 }
 
 export async function ordered(ctx, board, operation, args) {
-  const baselineRoot = ctx.info.isMain && operation !== 'recordSpecApprovalBaseline' && !store.specApprovalBaselineExists(board) ? primaryCheckoutRoot(ctx.info) : null;
-  const initialBaseline = baselineRoot ? captureSpecApprovalBaseline(baselineRoot, loadConfig(baselineRoot)) : null;
+  const initialBaseline = initialSpecApprovalBaseline(ctx, board, operation);
   // Only a reject or a reopen can open a builder's first-refusal window (#954), so an accept never reads the coordinator's policy.
   if (operation === 'reopen' || operation === 'verify' && args[1]?.decision === 'REJECT') args = firstRefusalArgs(operation, args, configFromSource(coordinatorFile(ctx.info.root, CONFIG_FILE).stdout));
   ctx.io.relayOutbox ??= () => relayOutboxSetting(ctx.info.root);

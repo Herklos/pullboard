@@ -54,7 +54,11 @@ import {
   projectFlowStats,
 } from './stats-flow.js';
 import { projectRowDecisions } from './row-decisions.js';
-import { projectSpecApprovals, specApprovalState } from './spec-approval.js';
+import {
+  projectItemSpecApprovals,
+  projectSpecApprovals,
+  specApprovalState,
+} from './spec-approval.js';
 import {
   fitFile,
   pendingFit,
@@ -967,7 +971,8 @@ export function createLocalApiHandler({ secret, getPort, runCommand, projects = 
           const row = currentBoard.db.prepare('SELECT item_status FROM item WHERE item_id = ?').get(dependency);
           if (row) status.set(dependency, row.item_status);
         }
-        const base = projectItemState(currentBoard, source, status);
+        const base = projectItemSpecApprovals(projectItemState(currentBoard, source, status),
+          specApprovalState(board.root, { board: currentBoard, config: loadConfig(board.root) }));
         // Detail reads need no new Git process while the trunk and immutable receipt log hold.
         const info = repoInfo(board.root);
         const tip = trunkRevisionReader(info)();

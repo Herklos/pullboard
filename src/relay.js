@@ -1410,9 +1410,9 @@ export async function relayCommandReceiptReported(root, moveId) {
 }
 
 /** Expose only an unreported operation descriptor so CLI preconditions cannot strand its outcome. */
-export function relayRecovered(root) {
+export function relayRecovered(root, { includePending = false } = {}) {
   const state = loadLink(linkFile(root));
-  return state ? state.recovered?.move ?? null : deletedRecovery(root)?.move ?? null;
+  return state ? state.recovered?.move ?? (includePending ? state.pending?.move : null) ?? null : deletedRecovery(root)?.move ?? null;
 }
 
 /** Explicitly refuse one blocked position, replay its valid tail on a private copy, then publish it. */

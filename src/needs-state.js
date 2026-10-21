@@ -16,7 +16,11 @@ import {
   undraftedRigor,
 } from './rigor-notices.js';
 import { personNeeds } from './needs.js';
-import { projectSpecApprovals, specApprovalState } from './spec-approval.js';
+import { displayAgentName } from './agent-names.js';
+import {
+  projectSpecApprovals,
+  specApprovalState,
+} from './spec-approval.js';
 import {
   sentinelDraftNeeds,
   sentinels,
@@ -39,4 +43,16 @@ export function personNeedsState(root, { board: providedBoard = null, includeRig
   } finally {
     if (!providedBoard) store.closeBoard(board);
   }
+}
+
+/** Keep status's complete obligation list without dashboard history, Git ages, or release notes. */
+export function personNeedsSummary(root, { board, config }) {
+  const spec = loadSpec(root, config);
+  const rows = projectRowDecisions(store.rowDecisions(board), { root, spec: spec.rows, practice: loadDoctrine(root, config).rows });
+  const projected = projectSpecApprovals({ ...rows,
+    decisions: store.openDecisions(board, store.PERSON), holds: store.laneHolds(board),
+    agents: store.listAgents(board).map(agent => ({ ...agent, displayName: displayAgentName(agent, config.agents.names) })),
+    rigorDrafts: rigorDraftNeeds(rows), sentinelDrafts: sentinelDraftNeeds(sentinels(board)),
+  }, specApprovalState(root, { board, config, spec }));
+  return projected;
 }

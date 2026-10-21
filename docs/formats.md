@@ -388,7 +388,7 @@ The `event` table is a SQLite schema object governed by `SCHEMA_VERSION`; its ap
 | `release` | builder | — |
 | `submit` | builder | `commit`, `tree`, `policyCommit`, engine-9 `criterionDigest`, engine-38 `submissionProof` |
 | `reserve` | reviewer | `until` |
-| `accept` | reviewer | `reason`, `commit`, engine-20 `implies`, engine-33 `review` |
+| `accept` | reviewer | `reason`, `commit`, engine-20 `implies`, engine-33 `review`, engine-68 `note` |
 | `reject` | reviewer | `reason`, `commit`, engine-20 `implies`, engine-33 `review` |
 | `reopen` | coordinator | `commit`, `note`, `judgment`, engine-10 `supersedes`, `landingFailure`, engine-30 `cause`, engine-52 `conflict` |
 | `merged` | coordinator | `commit` |
