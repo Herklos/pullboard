@@ -43,6 +43,7 @@ import * as gateReceipt from './gate-receipt.js';
 import * as itemSessions from './item-sessions.js';
 import * as seatCheckout from './seat-checkout.js';
 import { submitPreflight } from './submit-preflight.js';
+import { publishTrunk } from './publish.js';
 import * as store from './board.js';
 import * as nativeFlakes from './native-flake-cli.js';
 import {
@@ -3703,6 +3704,13 @@ function workCommands(io, args) {
       for (const blocked of result.blocked ?? []) if (blocked.code === 'STALE_VERDICT') io.say(staleVerdictRefusal({ item_id: blocked.id }, blocked).message);
       if (!result.batch) io.say(result.items ? `would land: ${result.items.map((id) => `#${id}`).join(', ') || 'none'}` : 'no verified items ready to land');
       return 0;
+    }),
+    publish: () => act(async (ctx, board, me) => {
+      if (me.id !== COORDINATOR || !ctx.info.isMain) throw new Refused('COORDINATOR_ONLY', 'only the coordinator publishes the trunk; ask your coordinator to run pullboard publish');
+      if (first || second || rest.length) throw new Refused('USAGE', 'pullboard publish');
+      const result = await publishTrunk({ root: ctx.info.root, board, config: mainPolicy(ctx.info.root).config, say: io.say, onWait: gateWaitReporter(io) });
+      io.result?.(result);
+      return result.published || result.waiting ? 0 : 1;
     }),
     merged: () => act(async (ctx, board, me) => {
       const recovered = await relayCommandReceipt(ctx.info.root, io.relayCommand);
