@@ -257,21 +257,25 @@ const CHECKS = {
       .map(([path]) => ({ path, line: 1, text: 'is a new gate or check, and no test in this change runs it with no data to show it fails closed' }));
   },
   /**
-   * A catch the change adds, or edits, that neither throws nor writes a line. Why edits count: rewriting an existing
-   * catch's body into a silent fallback introduces the silence even though its header line is unchanged (#806 review).
-   * A catch matched to its earlier self (same header, same place among those headers) that was already silent with
-   * the same body stays old debt.
+   * A catch the change adds, or makes silent, that neither throws nor writes a line. Each catch is matched to its earlier
+   * self (same header, same place among those headers). Why compare: rewriting or only deleting an existing catch's log
+   * leaves its header untouched and may add no line at all, yet introduces the silence (#806 reviews). A catch that was
+   * already silent stays old debt unless the change rewrites its body.
    */
-  'silent-catch': (root, range, { diff }) => [...diff].filter(([path, file]) => SCRIPT.test(path) && !TEST_FILE.test(path) && file.added.length)
+  'silent-catch': (root, range, { diff }) => [...diff].filter(([path, file]) => SCRIPT.test(path) && !TEST_FILE.test(path) && file.status !== 'D')
     .flatMap(([path, file]) => {
       const source = textAt(root, range.head, path) ?? '';
       const added = file.added.map((entry) => entry.line);
       const before = new Map(catches(textAt(root, range.base, path) ?? '').map((found) => [found.identity, found]));
       return catches(source).map((found) => ({ ...found, line: lineAt(source, found.at), last: lineAt(source, found.end) }))
-        .filter((found) => silent(found) && added.some((line) => line >= found.line && line <= found.last))
         .filter((found) => {
+          if (!silent(found)) return false;
           const earlier = before.get(found.identity);
-          return added.includes(found.line) || !earlier || !silent(earlier) || bodyKey(earlier) !== bodyKey(found);
+          if (added.includes(found.line)) return true;
+          // No earlier self with an unchanged header means a shifted count, not a new catch: a new one adds its header.
+          if (!earlier) return false;
+          if (!silent(earlier)) return true;
+          return bodyKey(earlier) !== bodyKey(found) && added.some((line) => line > found.line && line <= found.last);
         })
         .map((found) => ({ path, line: found.line, text: `${found.kind === 'clause' ? 'catch' : '.catch handler'} is silent: it neither throws nor logs a line that names its subject` }));
     }),

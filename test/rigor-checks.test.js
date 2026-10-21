@@ -588,3 +588,31 @@ test('rigor reports a catch the change made silent [D1,D3]', () => {
     'src/settings.js:4: silent-catch: catch is silent: it neither throws nor logs a line that names its subject',
   ], 'the catch whose logged body became a silent fallback is named at its header; the old silent catch, only reindented, is not');
 });
+
+test('rigor reports a catch whose log line alone is deleted [D1,D3]', () => {
+  const start = [
+    'export function settings(read) {',
+    '  try {',
+    '    return read();',
+    '  } catch (error) {',
+    '    console.warn(`settings unreadable: ${error.message}`);',
+    '    return null;',
+    '  }',
+    '}',
+    'export function other(read) {',
+    '  try {',
+    '    return read();',
+    '  } catch (error) {',
+    '    console.warn(`other unreadable: ${error.message}`);',
+    '    return null;',
+    '  }',
+    '}',
+    '',
+  ];
+  const repo = qualityRepo('quality-catch-deleted', { 'src/settings.js': start.join('\n') });
+  repo.commit('fix(settings): quieter reads', { 'src/settings.js': start.filter((line) => !line.includes('settings unreadable')).join('\n') });
+  const breaches = qualityBreaches(repo.root, changeRange(repo.root), { rules: ['silent-catch'] });
+  assert.deepEqual(breaches.map((breach) => breachLine(breach)), [
+    'src/settings.js:4: silent-catch: catch is silent: it neither throws nor logs a line that names its subject',
+  ], 'a change that only deletes a catch log names that catch; the untouched logged catch is not named');
+});
