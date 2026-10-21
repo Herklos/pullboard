@@ -1,6 +1,6 @@
 /** Cockpit activity checks, using the shared real-board fixtures [N26]. */
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -519,11 +519,12 @@ export async function createTransport({ onUpdate }) {
     const url = new URL(request.url, 'http://127.0.0.1');
     if (url.pathname === '/') return response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(cockpitPage('', { readOnly: true, transportModule: '/transport.js', stylesheet: '/view.css' }));
     if (url.pathname === '/transport.js') return response.writeHead(200, { 'content-type': 'text/javascript' }).end(moduleSource);
-    if (url.pathname === '/view.css') return response.writeHead(200, { 'content-type': 'text/css' }).end(readFileSync(new URL('../../src/view.css', import.meta.url)));
-    if (!url.pathname.startsWith('/fixture/') || request.method !== 'GET') return response.writeHead(404).end();
+    // The stylesheet and board reads come from the real view, so the case reads no source file itself.
+    const forward = url.pathname === '/view.css' ? '/view.css?k=' + encodeURIComponent(live.key) : url.pathname.slice('/fixture'.length) + url.search;
+    if ((url.pathname !== '/view.css' && !url.pathname.startsWith('/fixture/')) || request.method !== 'GET') return response.writeHead(404).end();
     reads.push(url.pathname);
-    fetchLive(live.base + url.pathname.slice('/fixture'.length) + url.search, { headers: { 'x-pullboard-key': live.key } })
-      .then(async (reply) => response.writeHead(reply.status, { 'content-type': 'application/json' }).end(await reply.text()))
+    fetchLive(live.base + forward, { headers: { 'x-pullboard-key': live.key } })
+      .then(async (reply) => response.writeHead(reply.status, { 'content-type': reply.headers.get('content-type') ?? 'application/json' }).end(await reply.text()))
       .catch(() => response.writeHead(502).end());
   });
   const profile = mkdtempSync(join(tmpdir(), 'pullboard-history-loading-'));
