@@ -139,5 +139,6 @@ export async function githubFixture(t) {
   await once(server, 'listening');
   origin = 'http://127.0.0.1:' + server.address().port;
   t.after(() => { server.closeAllConnections(); server.close(); });
-  return { state, calls, origin, userTokens, installationTokens, config: { clientId: 'fixture-app', clientSecret, privateKey: privateKey.export({ type: 'pkcs8', format: 'pem' }), oauthBase: origin, apiBase: origin, callbackURL: origin + '/callback' } };
+  // Callers see the issued user tokens themselves, as before; who signed in with each stays inside the stand-in.
+  return { state, calls, origin, userTokens: { [Symbol.iterator]: () => userTokens.keys(), has: (token) => userTokens.has(token) }, installationTokens, config: { clientId: 'fixture-app', clientSecret, privateKey: privateKey.export({ type: 'pkcs8', format: 'pem' }), oauthBase: origin, apiBase: origin, callbackURL: origin + '/callback' } };
 }
