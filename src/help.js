@@ -10,7 +10,7 @@ Nothing ships until a second agent verifies it.
 
 Set up
   pullboard tour                        see it work: a reject and its rework, scripted, in thirty seconds
-  pullboard init [--model <name>] [--blueprint <name or file>]... [--no-permissions] [--yes]  setup and project rules; --yes commits only setup's own files with your Git identity
+  pullboard init [--model <name>] [--blueprint <name or file>]... [--no-permissions] [--yes] [--verbose]  short setup summary; --verbose shows recipes; --yes commits only setup's own files with your Git identity
   pullboard worktree <lane> --model <name> [--route light] [--family <name>]   make and join a worktree for a new agent
                                         pullboard.json worktrees: inside or beside; init defaults to inside
   pullboard join <lane> --model <name> [--route light] [--family <name>]       register this worktree as an agent
@@ -194,6 +194,7 @@ Receipts
   pullboard log [id]                    every move, in order
   pullboard flakes                      recorded failures, their first and last sightings, counts and repair status
   pullboard flakes rerun on|off          coordinator: opt into one diagnostic pair per failed test; off by default
+  pullboard flakes quarantine on|off     coordinator: let a proven flake stop blocking landings until its repair item is verified; off by default
                                         commit pullboard.json to apply; a passing diagnostic never turns the original red green
   pullboard rigor                       failure causes that repeated: on 2 items, or 1 item at 2 commits;
                                         each with its items and whether it reads as work, product or both
@@ -273,7 +274,7 @@ const HELP_EXAMPLES = {
   claim: 'pullboard claim 12', submit: 'pullboard submit 12', 'next --verify': 'pullboard next --verify',
   fact: 'pullboard fact 12 measurement "The check passes in 8 seconds"',
   why: 'pullboard why 12',
-  flakes: 'pullboard flakes', 'flakes rerun': 'pullboard flakes rerun on',
+  flakes: 'pullboard flakes', 'flakes rerun': 'pullboard flakes rerun on', 'flakes quarantine': 'pullboard flakes quarantine on',
   verify: 'pullboard verify 12 accept --note "removed the fix; the test failed"',
   watch: 'pullboard watch --to web', answer: 'pullboard answer 12 "done"', pass: 'pullboard pass 12 "please decide"',
   status: 'pullboard status', view: 'pullboard view', digest: 'pullboard digest --out briefing.md', mcp: 'pullboard mcp', stats: 'pullboard stats --since 2026-10-08', log: 'pullboard log 12', ledger: 'pullboard ledger',

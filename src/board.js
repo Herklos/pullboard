@@ -53,6 +53,7 @@ import {
   storeTriggers,
 } from './machine.js';
 import { LOCAL_LANDING_ENGINE } from './land-engine.js';
+import { SPEC_APPROVAL_ENGINE } from './spec-approval-engine.js';
 import { Refused } from './refused.js';
 import { refuseMaskedExit } from './check-mask.js';
 import {
@@ -108,6 +109,7 @@ import {
   landingWaiverKind,
 } from './landing-exceptions.js';
 import { parseSpec } from './spec.js';
+import { quarantineWaivers } from './quarantine.js';
 import { invariantEvidence } from './submit-invariants.js';
 import { landingBatches } from './landing-batch-history.js';
 import {
@@ -124,6 +126,7 @@ export { acceptCheck } from './check-accept.js';
 export { declareJob, recordJobRun } from './recurring-jobs.js';
 export { proposeSentinel, decideSentinel, beginSentinelRun, finishSentinelRun } from './sentinels.js';
 export { flakeLedger, recordFlakeObservation } from './flakes.js';
+export { flakeQuarantines, gateRuns, recordGateRun } from './quarantine.js';
 
 /** The seat readers live in seats.js; the board re-exports them so `store.*` callers keep one import. */
 export { agentAt, agentCreator, listAgents, nextSeatId, seatEnrolled, seatLineage, withVerifierStanding } from './seats.js';
@@ -1510,12 +1513,12 @@ export function reserveReview(board, id, who) {
  * transaction, so no other verifier can take it between the look and the reservation.
  *
  * @param {any} board
- * @param {{ agentId: string, lane: string, leaseMs: number, policy: string, familyPolicy?: string, runnable?: boolean, routes?: string[] }} who
+ * @param {{ agentId: string, lane: string, leaseMs: number, policy: string, familyPolicy?: string, runnable?: boolean, routes?: string[], skipIds?: number[] }} who - skipIds: items the caller's own session built, never offered (verify refuses them too)
  * @returns {{ item: any | null, reasons: string[] }}
  */
-export function reserveNextReview(board, { agentId, lane, leaseMs, policy, familyPolicy = 'off', runnable, routes }) {
+export function reserveNextReview(board, { agentId, lane, leaseMs, policy, familyPolicy = 'off', runnable, routes, skipIds = [] }) {
   return atomic(board, () => {
-    const { item, reasons } = nextFor(board, { agentId, lane, verify: true, familyPolicy, runnable, routes });
+    const { item, reasons } = nextFor(board, { agentId, lane, verify: true, familyPolicy, runnable, routes, skipIds });
     return item ? { item: reserveWithin(board, item.item_id, { agentId, leaseMs, policy, familyPolicy }), reasons: [] } : { item: null, reasons };
   });
 }
@@ -1621,6 +1624,7 @@ export function verify(board, id, { agentId, decision, reason, note = '', cause,
     const returnedAt = !isAccept && engine >= REOPEN_FIRST_REFUSAL_ENGINE && reopenFirstRefusalMinutes > 0 && item.item_built_by ? board.clock.now() : undefined;
     const reservation = !isAccept && engine >= REOPEN_FIRST_REFUSAL_ENGINE ? firstRefusalDetail(board, item, reopenFirstRefusalMinutes, returnedAt) : {};
     const detail = { ...reservation, reason: code, commit: item.item_commit, ...(!isAccept && cause !== undefined && cause !== null ? { cause } : {}) };
+    if (isAccept && engine >= SPEC_APPROVAL_ENGINE) detail.note = note.trim();
     if (isAccept && check !== undefined) detail.check = check;
     if (newReview) detail.review = { commit: review.commit, ...(Object.hasOwn(review, 'head') ? { head: review.head } : {}), trunk: review.trunk, paths: [...review.paths] };
     logEvent(board, agentId, verb, id, implies?.length ? { ...detail, implies } : detail, returnedAt);
@@ -1709,7 +1713,6 @@ export function reopen(board, id, { agentId, note = '', conflict, cause, reopenF
     return { id: item.item_id, commit: submittedCommit, ...returned };
   });
 }
-
 
 /**
  * Refuse unless the acting agent is the coordinator.
@@ -2296,13 +2299,13 @@ export function buildOrder(board, { warm = [] } = {}) {
  * With `runnable`, only items that carry a check command, which an unattended runner needs; with
  * `routes`, only items on those routes, the ones a runner has an agent command for. With `warm`, the
  * files the agent worked in lately, an item that shares more of them comes first within its tier,
- * and `shared` names them (N20). A held lane offers nothing new (N22).
+ * and `shared` names them (N20). A held lane offers nothing new (N22). A verifier is never offered `skipIds` (#973; engine 69, so older replays carry none).
  *
  * @param {any} board
- * @param {{ agentId: string, lane: string, verify?: boolean, policy?: string, familyPolicy?: string, runnable?: boolean, routes?: string[], warm?: string[], priority?: number[], lanes?: string[] }} who
+ * @param {{ agentId: string, lane: string, verify?: boolean, policy?: string, familyPolicy?: string, runnable?: boolean, routes?: string[], warm?: string[], priority?: number[], lanes?: string[], skipIds?: number[] }} who
  * @returns {{ item: any | null, reasons: string[], shared?: string[] }}
  */
-export function nextFor(board, { agentId, lane, verify = false, policy = 'any', familyPolicy = 'off', runnable = false, routes = ROUTES, warm = [], priority = [], lanes }) {
+export function nextFor(board, { agentId, lane, verify = false, policy = 'any', familyPolicy = 'off', runnable = false, routes = ROUTES, warm = [], priority = [], lanes, skipIds = [] }) {
   const route = routeOf(board, agentId);
   const tier = (entry) => ROUTES.indexOf(entry.item_route);
   const allItems = listItems(board).reverse();
@@ -2314,7 +2317,7 @@ export function nextFor(board, { agentId, lane, verify = false, policy = 'any', 
   if (verify) {
     const family = board.db.prepare('SELECT agent_family FROM agent WHERE agent_id = ?').get(agentId)?.agent_family ?? null;
     const hasDifferentFamily = (entry) => Boolean(family && entry.item_builder_family && family !== entry.item_builder_family);
-    const unrelated = items.filter((entry) => entry.item_status === 'submitted' && entry.item_built_by !== agentId);
+    const unrelated = items.filter((entry) => entry.item_status === 'submitted' && entry.item_built_by !== agentId && !skipIds.includes(entry.item_id));
     const standingRefusal = unrelated.map((entry) => standingProblem(board, agentId, entry.item_built_by, entry.item_id)).find(Boolean);
     let reviewable = unrelated.filter((entry) => !standingProblem(board, agentId, entry.item_built_by, entry.item_id));
     if (policy === COORDINATOR && agentId !== COORDINATOR) reviewable = reviewable.filter((entry) => entry.item_lane === COORDINATOR);
@@ -2572,6 +2575,7 @@ export function milestones(board) {
 
 // A lane agent's drafted rows live in row-drafts.js (#878); exported here so the engine dispatches them.
 export { draftSpecRow, rowDrafts } from './row-drafts.js';
+export { recordSpecApprovalBaseline, specApprovalBaseline, specApprovalBaselineExists } from './spec-approval-baseline.js';
 // The roadmap's moves live in milestones.js; the board keeps exporting them so the engine replays them.
 export { addMilestone, canonicalMilestoneTarget, editMilestone, editMilestoneItems, orderMilestoneItems, moveMilestone, removeMilestone, roadmap, shipMilestone } from './milestones.js';
 
@@ -2720,7 +2724,7 @@ export function recordLandingWaiver(board, { agentId, channel, id, test, until, 
 export function landingWaivers(board) {
   return board.db.prepare("SELECT event_by,event_detail FROM event WHERE event_kind = 'landing_waiver' ORDER BY event_id").all()
     .filter((row) => row.event_by === PERSON)
-    .map((row) => JSON.parse(row.event_detail).waiver);
+    .map((row) => JSON.parse(row.event_detail).waiver).concat(quarantineWaivers(board)); // A proven flake's quarantine, when on [C7,D1].
 }
 
 /** Find a live person's waiver and derive its match kind without rewriting history [B3,R3,H16]. */

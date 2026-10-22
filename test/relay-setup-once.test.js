@@ -187,10 +187,7 @@ test('set up once links three registered boards, later registration and a persis
     if (setup?.child.exitCode === null) setup.child.kill('SIGTERM');
     await setup?.done.catch(() => {});
   });
-  // The relay polls at its production 200 ms. At the fixture's 10 ms its polls held this test process busy, so on a
-  // loaded machine the browser's replies waited behind them past their deadline while the page itself stayed quick
-  // (#955). Every page wait and assertion below is unchanged.
-  const box = await relayClientFixture(t, { pollMs: 200 });
+  const box = await relayClientFixture(t);
   const second = await project(box, 'second-project');
   const third = await project(box, 'third-project');
   const machineFile = join(box.env.PULLBOARD_HOME, 'relay-machine/state.json');

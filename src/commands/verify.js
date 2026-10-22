@@ -1,6 +1,11 @@
 /** The pullboard verify command, in its own module so an item adding another command never edits these lines. */
 import * as store from '../board.js';
 import {
+  agentApprovalLine,
+  itemAgentApprovals,
+  specApprovalState,
+} from '../spec-approval.js';
+import {
   checkNeedsBrowser,
   explicitCheckFiles,
 } from '../browser-admission.js';
@@ -91,6 +96,7 @@ export async function verifyHere(ctx, id, { second, values }) {
   let verificationProfile = null;
   let accepted = null;
   let acceptedLandingCommit = null;
+  let approvalRows = [];
   /** Record one verdict on the open board. */
   const decide = async (board) => {
     checkMainVerifier(ctx, board, values);
@@ -175,12 +181,14 @@ export async function verifyHere(ctx, id, { second, values }) {
       refuseUnverifiedStack(root, board, item, checkedCommit, currentTrunk);
     }
     review ??= captureVerdictReview(root, board, item, verdictTrunk(root));
+    if (decision === 'ACCEPT') approvalRows = itemAgentApprovals(item, specApprovalState(root, { board, config: ctx.config }));
+    const approvalNote = agentApprovalLine(approvalRows);
     if (decision === 'ACCEPT') git(root, ['update-ref', `refs/pullboard/items/${id}/${review.head.slice(0, 12)}`, review.head]);
     return await ordered(ctx, board, 'verify', [id, {
       agentId: me.id,
       decision,
       reason: values.reason,
-      note: (textArg(ctx.io, values, 'note') ?? '') + unaffectedMove + (check?.guardNote ?? ''),
+      note: (textArg(ctx.io, values, 'note') ?? '') + unaffectedMove + (check?.guardNote ?? '') + (approvalNote ? `\n${approvalNote}` : ''),
       ...(decision === 'REJECT' && values.cause !== undefined ? { cause: values.cause } : {}),
       head,
       digest,
@@ -199,11 +207,11 @@ export async function verifyHere(ctx, id, { second, values }) {
     }
     return verdict;
   });
-  ctx.io.result?.({ id, ...result });
+  ctx.io.result?.({ id, ...result, ...(approvalRows.length ? { agentApproved: approvalRows, approvalQualification: agentApprovalLine(approvalRows) } : {}) });
   const verifiedSummary = timingDigest(verificationProfile);
   const verifiedTiming = result.decision === 'ACCEPT' && verificationProfile && verifiedSummary ? `\n${verifiedSummary}\ntiming profile: ${verificationProfile.profilePath ?? '(not saved)'}` : '';
   ctx.io.say(result.decision === 'ACCEPT'
-    ? `verified #${id}: ${result.reason}${result.check === 'none' ? '; no frozen check ran' : ''}${verifiedTiming}`
+    ? `verified #${id}: ${result.reason}${result.check === 'none' ? '; no frozen check ran' : ''}${approvalRows.length ? `; ${agentApprovalLine(approvalRows)}` : ''}${verifiedTiming}`
     : `rejected #${id}: ${result.reason}; it is open again for rework`);
   if (accepted) ctx.io.say(landNext(ctx.info, accepted, acceptedLandingCommit));
   return 0;

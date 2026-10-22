@@ -8,6 +8,11 @@ import {
 } from '../bar-corrections.js';
 import * as store from '../board.js';
 import {
+  agentApprovalLine,
+  itemAgentApprovals,
+  specApprovalState,
+} from '../spec-approval.js';
+import {
   sayCheckBaseline,
 } from '../check-baseline.js';
 import * as infraNotes from '../infra-note.js';
@@ -28,12 +33,13 @@ import {
   sayBrief,
   withBoard,
 } from '../cli.js';
+import { relayStatus } from '../relay.js';
 
 /** Run `pullboard show` and return its exit code. */
 export function run(io, { first, values }) {
   const ctx = context(io);
   const id = idArg(first);
-  const { item, verdicts, moves, thread, related, reviewer, agents, mainMerge, infra } = withBoard(ctx, (board) => ({
+  const { item, verdicts, moves, thread, related, reviewer, agents, mainMerge, infra, approval } = withBoard(ctx, (board) => ({
     item: verdictProjector(ctx.info.root, board).project(store.getItem(board, id)),
     verdicts: store.verdictsFor(board, id),
     moves: store.events(board, { itemId: id }).filter((event) => ['attempt', 'escalate'].includes(event.event_kind)),
@@ -41,18 +47,25 @@ export function run(io, { first, values }) {
     related: store.relatedItems(board, store.getItem(board, id)),
     reviewer: store.reviewHolder(board, store.getItem(board, id)),
     agents: store.listAgents(board), mainMerge: mainMergeFor(board, id), infra: infraNotes.infraNoteOf(store.events(board, { itemId: id })),
+    approval: specApprovalState(ctx.info.root, { board, config: ctx.config }),
   }));
   const agentName = (id) => displayAgentName(agents.find((agent) => agent.agent_id === id) ?? { agent_id: id }, ctx.config.agents.names);
+  const agentApproved = itemAgentApprovals(item, approval);
+  const approvalQualification = agentApprovalLine(agentApproved);
+  // #922: moves on this item made while the relay was down wait in this machine's relay outbox until it answers.
+  const relayPending = (relayStatus(ctx.info.root).outbox ?? []).filter((move) => move.item === id);
   if (values.json) {
-    io.result({ ...item, verdicts, thread });
+    io.result({ ...item, verdicts, thread, agentApproved, approvalQualification, ...(relayPending.length ? { relayPending } : {}) });
     return 0;
   }
   io.say(itemLine(item, agentName, Boolean(mainMerge)));
+  if (item.item_status === 'verified' && approvalQualification) io.say(approvalQualification);
   if (item.item_verdict_state) io.say(staleVerdictRefusal(item, item.item_verdict_state).message);
   if (item.item_criterion) io.say(`criterion: ${item.item_criterion}`);
   if (item.item_check) io.say(`check: ${item.item_check}`);
   sayCheckBaseline(io, item);
   sayBrief(io, item.item_brief);
+  for (const move of relayPending) io.say(`pending in the relay outbox: ${move.operation}${move.actor ? ` by ${move.actor}` : ''} (made ${move.queuedAt}); it goes up in order when the relay answers`);
   for (const { item: other, shared } of related) {
     io.say(`related: #${other.item_id} ${other.item_title}: ${shared.slice(0, 4).join(', ')}${shared.length > 4 ? ', ...' : ''} (git log -p -1 ${other.item_commit.slice(0, 12)} -- ${shared[0]})`);
   }

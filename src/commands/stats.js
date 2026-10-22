@@ -3,6 +3,7 @@ import {
   barStatsLines,
 } from '../bar-corrections.js';
 import * as store from '../board.js';
+import { caughtLines } from '../caught.js';
 import * as gateReceipt from '../gate-receipt.js';
 import {
   flowLines,
@@ -28,6 +29,7 @@ export function run(io, { values }) {
   io.say(`agents: ${stats.agents.map((agent) => `${agentDisplayName(agents, ctx.config, agent.id)} (${agent.families.join('/')}; ${agent.moves} moves)`).join(', ') || 'none'}`);
   io.say(`events: ${stats.firstEventAt ?? 'none'} to ${stats.lastEventAt ?? 'none'}${stats.since ? ` (since ${stats.since})` : ''}`);
   for (const line of barStatsLines(stats.bars)) io.say(line);
+  for (const line of caughtLines(stats.caught)) io.say(line);
   for (const line of flowLines(stats.flow)) io.say(line);
   for (const line of waits.lines) io.say(line);
   return 0;

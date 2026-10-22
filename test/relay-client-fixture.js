@@ -136,11 +136,11 @@ export { childResult as relayFixtureChild };
 
 /**
  * Start an isolated board and authorized loopback relay; a null coordinatorModel keeps its initial identity unknown.
- * pollMs is how often the in-process relay polls each live stream. The 10 ms default keeps live moves quick, but each
- * poll opens the board journals, so a case that holds several streams open for minutes can pass the relay's own 200 ms
- * default: on a loaded machine 10 ms polls filled this test process and its DevTools replies queued behind them (#955).
+ * The relay polls each live stream at its production 200 ms. Each poll opens the board journals, and at the 10 ms this
+ * fixture once used, a loaded machine kept the test process busy enough that browser replies queued past their
+ * deadlines (#955, #979). A case that needs a faster poll passes pollMs by name and says why.
  */
-export async function relayClientFixture(t, { cliChildren, coordinatorModel, accountStorageBytes, pollMs = 10 } = {}) {
+export async function relayClientFixture(t, { cliChildren, coordinatorModel, accountStorageBytes, pollMs = 200 } = {}) {
   const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'pullboard-relay-cleanup-')));
   const root = join(scratch, 'repo');
   const home = join(scratch, 'home');
