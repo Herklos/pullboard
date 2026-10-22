@@ -1020,3 +1020,6 @@ code.inline.long { white-space: break-spaces; overflow-wrap: anywhere; }
 
 #settings-content .settings-table { overflow-x: auto; }
 #settings-content { overflow-wrap: anywhere; }
+
+.machine-settings-entry { display: none; }
+.boardless .machine-settings-entry { display: block; }
