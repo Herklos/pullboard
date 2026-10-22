@@ -17,10 +17,10 @@ Pullboard now turns a failure that keeps coming back into a rule with its proof.
 - Pullboard tracks flaky tests, including CI runs: a test that goes red and green on the same tree is filed once with its runs, and can stop blocking landings until its fix is verified (`pullboard flakes quarantine on`, off by default). (#887, #918, #813)
 - `pullboard queue` shows the work queue with release breakpoints, rank, route and who holds each item, and `pullboard health` names queue faults: a route nobody serves, an item nobody can take, a rank out of order. (#797, #798)
 - A recurring job declares its cadence with `pullboard loop declare`, and a missed run shows in health. (#815)
-- Optional two-tier landing: accepted work lands on your local trunk in seconds, and `pullboard publish` pushes only a head the whole suite passed (`landing.publish` set to `separate`; off by default). (#801)
+- Optional two-tier landing: accepted work lands on your local trunk in seconds, and `pullboard publish` pushes only a head the whole suite passed (`landing.publish` set to `separate`; off by default, except that `pullboard init` turns it on in a repo with no remote). (#801, #963)
 - A reopened item can wait for its own builder first, for a time you set (`claim.reopenFirstRefusalMinutes`; off by default). (#954)
 - A spec row an agent marks approved by hand shows as agent-approved, with the agent and commit, until you confirm or decline it. A setting, `spec.agentApproval`, chooses flag (the default), allow or refuse. (#960)
-- `GET /api/v1/settings` reports every setting, its scope, its value and where it comes from, read-only; secrets show only as set or not set. (#968)
+- `GET /api/v1/settings` reports the board's settings, each with its scope, its value and where it comes from, read-only; secrets show only as set or not set. `spec.agentApproval` joins the list in the next release. (#968)
 - `pullboard publish` records each full-suite run, so a flaky test it sees is filed like any other. (#975)
 
 ### Safer by default
@@ -43,6 +43,7 @@ Pullboard now turns a failure that keeps coming back into a rule with its proof.
 
 - `pullboard init --yes` never hangs when an agent runs it; a Codex agent whose sandbox cannot write the board gets its one-step fix; an agent can make its first lane without stopping to ask. (#906, #913, #914)
 - `pullboard next` never tells a seat it holds another seat's claim, and the MCP `board_status` tool answers on a board with held items. (#958, #974)
+- `pullboard next --verify` no longer reserves a review for a seat of the session that built the item. (#973)
 - A hung network mount no longer stalls Pullboard. (#912)
 - The tour leaves no demo project behind, links nothing to the relay, and finishes when an agent runs it. (#951, #952)
 - `pullboard land` works in a repo with no remote, and `pullboard status` no longer opens with a refusal there. (#963)
