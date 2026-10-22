@@ -640,7 +640,7 @@ code.inline.long { white-space: break-spaces; overflow-wrap: anywhere; }
 .fact-code .muted { margin-left: 4px; font-size: 12px; }
 .fact-code .ref { margin-left: 4px; }
 .ref-missing { display: inline-block; }
-.feed .act { display: flex; gap: 0 5px; align-items: baseline; min-width: 0; }
+.feed .act { display: flex; gap: 0 5px; align-items: baseline; min-width: 0; overflow-wrap: anywhere; }
 .feed .act .what { flex: 1 1 auto; min-width: 0; overflow-wrap: break-word; color: var(--ink-muted); }
 .feed .act .said { flex: 1 1 0; min-width: 0; margin-left: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-muted); }
 .feed .act .said code { white-space: nowrap; }
@@ -1007,3 +1007,7 @@ code.inline.long { white-space: break-spaces; overflow-wrap: anywhere; }
 .hosted-page.loading .shell { display: none; }
 .hosted-page.loading .hosted-mark { display: grid; place-items: center; min-height: 100vh; color: var(--ink-muted); }
 .hosted-page.loading .hosted-mark svg { width: 56px; height: 56px; }
+
+/* Approval provenance is literal text, including an unabridged commit on a phone. */
+.agent-approval p { margin: 6px 0; overflow-wrap: anywhere; }
+.agent-approval .actions { display: flex; flex-wrap: wrap; gap: 8px; }

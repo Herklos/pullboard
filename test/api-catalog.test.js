@@ -688,6 +688,17 @@ catalogCase('[A1] catalog commands keep their real repository exercises', async 
   assert.equal(landing.batch, null);
   assert.deepEqual(landing.landed, []);
   assert.deepEqual(landing.items, []);
+  const published = join(source.dir, 'published.git');
+  await source.git(source.dir, 'init', '-q', '--bare', published);
+  await source.git(source.repo, 'remote', 'add', 'origin', published);
+  const publishing = await source.run(source.repo, 'publish', '--json');
+  assert.equal(publishing.status, 0, publishing.stderr || publishing.stdout);
+  const publication = parseOneDocument(publishing.stdout);
+  coveredRoots.add('publish');
+  const trunkHead = await source.git(source.repo, 'rev-parse', 'HEAD');
+  assert.deepEqual([publication.head, publication.published, publication.red], [trunkHead, true, []]);
+  assert.equal(await source.git(published, 'rev-parse', 'refs/heads/main'), trunkHead, 'publish pushed the head the suite passed');
+  await source.git(source.repo, 'remote', 'remove', 'origin'); // Later catalog commands keep their remote-less fixture.
   await json(source, source.repo, 'roadmap');
   await json(source, source.repo, 'queue');
   const failures = await json(source, source.repo, 'flakes');

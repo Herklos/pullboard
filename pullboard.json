@@ -1,9 +1,11 @@
 {
   "name": "pullboard",
   "gate": "npm run gate",
+  "landingShards": 6,
   "affectedTests": "node bin/run-tests.js",
   "submitGate": "landing",
   "submit": { "requireInfraNote": true },
+  "claim": { "reopenFirstRefusalMinutes": 30 },
   "submitInvariants": [
     "test/refusal-next-steps.test.js"
   ],
