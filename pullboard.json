@@ -3,6 +3,8 @@
   "gate": "npm run gate",
   "affectedTests": "node bin/run-tests.js",
   "submitGate": "landing",
+  "submit": { "requireInfraNote": true },
+  "claim": { "reopenFirstRefusalMinutes": 30 },
   "submitInvariants": [
     "test/refusal-next-steps.test.js"
   ],
@@ -89,7 +91,8 @@
       "feat",
       "fix"
     ],
-    "noEmoji": true
+    "noEmoji": true,
+    "noHostName": true
   },
   "staticChecks": "node --experimental-vm-modules --disable-warning=ExperimentalWarning bin/static-style-checks.js",
   "flakes": {
