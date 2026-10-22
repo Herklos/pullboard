@@ -38,6 +38,8 @@ import { pageScriptPart1 } from './view/page-script-1.js';
 import { pageScriptPart2 } from './view/page-script-2.js';
 import { pageScriptPart3 } from './view/page-script-3.js';
 import { pageScriptPart4 } from './view/page-script-4.js';
+import { settingsMarkup } from './view/settings-page.js';
+import { settingsPageScript } from './view/settings-page.js';
 import { historyLoadingScript } from './view/history-loading.js';
 
 /** The CLI's default phrases, ordered by depth for the existing prose inventory guard. */
@@ -118,6 +120,7 @@ ${hostedLocal && !snapshot ? '<div class="hosted-mark" aria-hidden="true"><svg v
     <button class="theme-btn" id="theme" type="button" title="Theme: system"><svg class="sys" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.5"/><path fill="currentColor" d="M8 2a6 6 0 0 1 0 12Z"/></svg><svg class="sun" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="3" fill="none" stroke="currentColor" stroke-width="1.5"/><path fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" d="M8 1.5v1.2M8 13.3v1.2M1.5 8h1.2M13.3 8h1.2M3.4 3.4l.85.85M11.75 11.75l.85.85M3.4 12.6l.85-.85M11.75 4.25l.85-.85"/></svg><svg class="moon" viewBox="0 0 16 16" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" d="M13.6 9.6A6 6 0 1 1 6.4 2.4a5.2 5.2 0 0 0 7.2 7.2Z"/></svg></button>
   </div>
   <div class="side-body" id="side-body">
+    <button class="ghost" data-tab="settings" type="button">Settings</button>
     <div class="label">Projects</div>
     <nav id="proj-list" aria-label="Projects on this machine"></nav>
     <button class="share-again" id="share-again" type="button" hidden>Link boards to pullboard.dev&hellip;</button>
@@ -139,6 +142,7 @@ ${hostedLocal && !snapshot ? '<div class="hosted-mark" aria-hidden="true"><svg v
 <main>
   <section class="card-panel first">
     <h2>No boards yet</h2>
+    <button class="ghost" data-settings-open type="button">Settings for this machine</button>
     <p>Run <code>pullboard init</code> in a git repo, or ask an agent to. Its board shows up here by itself.</p>
   </section>
   <p class="empty" id="project-loading" role="status" hidden>Loading project…</p>
@@ -209,6 +213,7 @@ ${hostedLocal && !snapshot ? '<div class="hosted-mark" aria-hidden="true"><svg v
     <button class="ghost flow-show" id="flow-show" type="button" hidden>Show the lifecycle</button>
     <div class="card-panel feed" id="activity"></div>
   </section>
+  ${settingsMarkup()}
   <section data-pane="roadmap" class="roadmap-layout" id="roadmap" aria-label="Roadmap"></section>
   ${hostedLocal && !snapshot ? starMarkup() : ''}
 </main>
@@ -1073,6 +1078,7 @@ function render() {
   renderHostedReleaseNote(p);
   renderPersonRequests(p);
   renderCredentials();
+  if (view.tab === 'settings') { $('group-view').hidden = true; showTab(); return; }
   if (group) { renderGroup(group); return; }
   if (!p) return;
   $('proof-stats').hidden = false;
@@ -1450,7 +1456,7 @@ function render() {
  * it, so it stays closed across reloads, and across restarts of the view, which serves from the
  * same address again, until they open it. While hidden it is not drawn.
  */
-${pageScriptPart4(pageScope)}${historyLoadingScript()}</script>
+${settingsPageScript()}${pageScriptPart4(pageScope)}${historyLoadingScript()}</script>
 </body>
 </html>`;
 }
