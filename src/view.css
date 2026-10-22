@@ -640,7 +640,7 @@ code.inline.long { white-space: break-spaces; overflow-wrap: anywhere; }
 .fact-code .muted { margin-left: 4px; font-size: 12px; }
 .fact-code .ref { margin-left: 4px; }
 .ref-missing { display: inline-block; }
-.feed .act { display: flex; gap: 0 5px; align-items: baseline; min-width: 0; }
+.feed .act { display: flex; gap: 0 5px; align-items: baseline; min-width: 0; overflow-wrap: anywhere; }
 .feed .act .what { flex: 1 1 auto; min-width: 0; overflow-wrap: break-word; color: var(--ink-muted); }
 .feed .act .said { flex: 1 1 0; min-width: 0; margin-left: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-muted); }
 .feed .act .said code { white-space: nowrap; }
