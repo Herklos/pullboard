@@ -112,7 +112,7 @@ test('opening an item loads its detail on demand [N26,A2]', { timeout: 150_000 }
         criterion: 'The greeting renders from the snapshot alone.',
         check: ['true', 'green'],
         brief: 'Keep the greeting short.',
-        verdicts: [['REJECT', 'the first greeting needs a correction'], ['ACCEPT', 'the page shows it\nverified against agent-approved G1']],
+        verdicts: [['REJECT', 'the first greeting needs a correction'], ['ACCEPT', 'the page shows it']],
         moves: ['add', 'claim', 'submit', 'reject', 'claim', 'submit', 'accept'],
         facts: ['The corrected greeting renders offline.'],
       }, 'the detail carries what the summary leaves out');
@@ -148,7 +148,7 @@ test('opening an item loads its detail on demand [N26,A2]', { timeout: 150_000 }
       await chrome.waitFor("document.body.classList.contains('snapshot') && !!data?.project && snapshotReplay.index === snapshotReplay.events.length && view.item === 1 && !!document.querySelector('#detail .tl')");
       const exported = await chrome.stable(DETAIL);
       assert.equal(exported.criterion, 'The greeting renders from the snapshot alone.');
-      assert.deepEqual(exported.verdicts, [['REJECT', 'the first greeting needs a correction'], ['ACCEPT', 'the page shows it\nverified against agent-approved G1']]);
+      assert.deepEqual(exported.verdicts, [['REJECT', 'the first greeting needs a correction'], ['ACCEPT', 'the page shows it']]);
       assert.deepEqual(exported.facts, ['The corrected greeting renders offline.']);
       await searchFor(chrome, 'zeppelin', 15_000); // budget: hang-only ceiling for a search the page answers itself.
       await chrome.waitFor("!!document.querySelector('#find-results [data-find=\"item:2\"]')");
