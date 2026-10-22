@@ -203,7 +203,11 @@ async function journeyFailureReport(readPage, readAnswers) {
 async function observeJourneyRows(wait, readPage, readAnswers) {
   try {
     await wait();
-    return { ready: true };
+    // A traced passing run reads the same page facts a failure does: the transport-start decision (#902's control).
+    if (process.env.PULLBOARD_JOURNEY_TRACE !== '1') return { ready: true };
+    let report = { pageCaptureAvailable: false, apiCaptureAvailable: false };
+    try { report = await journeyFailureReport(readPage, readAnswers); } catch { /* A trace never fails a passing run. */ }
+    return { ready: true, report };
   } catch (error) {
     let report = { pageCaptureAvailable: false, apiCaptureAvailable: false };
     try { report = await journeyFailureReport(readPage, readAnswers); } catch { /* Keep the original row failure if reporting itself fails. */ }
