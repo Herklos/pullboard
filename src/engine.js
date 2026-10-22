@@ -22,6 +22,7 @@ import { CHECK_ACCEPT_ENGINE } from './check-accept.js';
 import { HEALTH_SENTINEL_ENGINE } from './health-receipts.js';
 import { BOARD_SENTINEL_ENGINE } from './sentinels.js';
 import { RECURRING_JOB_ENGINE } from './job-engine.js';
+import { SPEC_APPROVAL_ENGINE } from './spec-approval-engine.js';
 import { GATE_RUN_ENGINE } from './gate-run-engine.js';
 import { requireBound } from './quarantine.js';
 import {
@@ -69,7 +70,7 @@ export const ENGINE_OPERATIONS = Object.freeze([
   'claim', 'release', 'submit', 'reserveReview', 'reserveNextReview', 'verify', 'merged',
   'withdraw', 'refreeze', 'reopen', 'shout', 'passDecision', 'answerDecision', 'holdLane', 'releaseLane', 'holdItem', 'releaseItemHold',
   'addMilestone', 'editMilestoneItems', 'orderMilestoneItems', 'moveMilestone', 'editMilestone', 'removeMilestone', 'shipMilestone',
-  'recordRowDecisions', 'applyRowDecisions', 'draftSpecRow', 'appendFact',
+  'recordRowDecisions', 'applyRowDecisions', 'draftSpecRow', 'appendFact', 'recordSpecApprovalBaseline',
   'recordLandingBatch', 'recordLandingWaiver', 'recordLandingFlake', 'finishLandingBatch', 'acceptCheck',
   'recordHealthFindings', 'proposeSentinel', 'decideSentinel', 'beginSentinelRun', 'finishSentinelRun',
   'recordFlakeObservation', 'recordGateRun', 'declareJob', 'recordJobRun',
@@ -77,7 +78,7 @@ export const ENGINE_OPERATIONS = Object.freeze([
 
 /** Engine version at which each ordered operation first has stable replay semantics. */
 const OPERATION_ENGINE = Object.freeze({ draftSpecRow: ROW_DRAFT_ENGINE, orderMilestoneItems: MILESTONE_RANK_ENGINE, reopen: 8, recordLandingBatch: 8, recordLandingWaiver: 8, recordLandingFlake: 8, finishLandingBatch: 8, acceptCheck: CHECK_ACCEPT_ENGINE,
-  shipMilestone: MILESTONE_SHIP_ENGINE });
+  shipMilestone: MILESTONE_SHIP_ENGINE, recordSpecApprovalBaseline: SPEC_APPROVAL_ENGINE });
 
 /** Dependency edits, causes, sealed reviews, submission proofs, trunk conflicts, health observations and milestone targets retain distinct recorded engine meanings. */
 function minimumOperationEngine(operation, args, board, at) {
@@ -199,7 +200,7 @@ function validateMove(move) {
 }
 
 /** Restore only the frozen criterion callback; no receiver runs another machine's Git or shell. */
-function executableArgs(move, board) {
+export function executableArgs(move, board) {
   const args = structuredClone(move.args);
   if (move.operation === 'appendFact') {
     if (!args[1] || typeof args[1] !== 'object' || Array.isArray(args[1])) throw new Refused('RELAY_MOVE', 'a fact needs its typed arguments; use the current Pullboard engine');
