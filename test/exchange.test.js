@@ -233,7 +233,7 @@ test('export and import CLI commands exchange a versioned document between real 
     // An import recipient starts without its own declared coordinator metadata.
     const initEnv = { ...env };
     delete initEnv.PULLBOARD_MODEL;
-    const initialized = runFixtureChild(process.execPath, [BIN, 'init'], { cwd: targetRoot, env: initEnv, encoding: 'utf8' });
+    const initialized = runFixtureChild(process.execPath, [BIN, 'init', '--verbose'], { cwd: targetRoot, env: initEnv, encoding: 'utf8' });
     assert.equal(initialized.status, 0, initialized.stderr || initialized.stdout);
     assert.match(initialized.stdout, /coordinator/i);
 
