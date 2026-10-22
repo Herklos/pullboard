@@ -529,8 +529,8 @@ export function atomic(board, work) {
 export function logEvent(board, by, kind, itemId, detail = {}, at) {
   const model = agentModel(board, by);
   const isAgent = Boolean(board.db.prepare('SELECT 1 FROM agent WHERE agent_id = ?').get(by));
-  const recorded = (board.executionEngineVersion ?? ENGINE_VERSION) >= 8 && isAgent
-    ? { ...detail, model: model ?? 'unknown' } : detail;
+  const recorded = { ...detail, ...((board.executionEngineVersion ?? ENGINE_VERSION) >= 8 && isAgent ? { model: model ?? 'unknown' } : {}),
+    ...(board.movePerson ? { person: board.movePerson } : {}) }; // The person behind a relayed move, from engine 71 (engine.js) [E3].
   const inserted = board.db
     .prepare('INSERT INTO event (event_at, event_by, event_kind, item_id, event_detail) VALUES (?, ?, ?, ?, ?)')
     .run(at ? at.toISOString() : now(board), by, kind, itemId, JSON.stringify(recorded));

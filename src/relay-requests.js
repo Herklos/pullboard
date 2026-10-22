@@ -43,6 +43,10 @@ export function receivePersonRequest(board, document, { sequence, at, sender }) 
     try {
       if (sender?.kind !== 'person' || typeof sender.userId !== 'string' || !sender.userId || sender.userId.length > 256) throw new Refused('RELAY_PERSON_ONLY', 'only the authenticated person can send a relay request; use the paired view with the person session');
       request = validatePersonRequest(document);
+      // On a board that names approvers, a phone request that acts as the person must come from one [E4].
+      if (sender.approver === false && ['answer', 'hold', 'spec-approve', 'spec-decline'].includes(request.move?.verb)) {
+        throw new Refused('NOT_APPROVER', `${sender.login ?? 'this person'} is not an approver of this board; ask an approver to answer, hold or decide rows`);
+      }
     } catch (cause) {
       if (!(cause instanceof Refused)) throw cause;
       error = recordedRefusal(cause);
