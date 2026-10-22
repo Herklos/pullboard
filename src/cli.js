@@ -214,7 +214,10 @@ import {
   unmetRows,
 } from './spec.js';
 import { refuseAgentApprovedRows } from './spec-approval.js';
-import { initialSpecApprovalBaseline } from './spec-approval-bootstrap.js';
+import {
+  ensureSpecApprovalCoordinator,
+  initialSpecApprovalBaseline,
+} from './spec-approval-bootstrap.js';
 import {
   answerQuestion,
   landBlueprint,
@@ -902,11 +905,7 @@ export async function ordered(ctx, board, operation, args) {
           () => store.recordSpecApprovalBaseline(board, ...values))
         : store.recordSpecApprovalBaseline(board, ...values);
     };
-    // A hand-configured local project's first command may create a worktree before any seat exists.
-    // Establish its local coordinator first; linked and recovered moves retain relay authority.
-    if (initialBaseline && ctx.info.isMain && !relayLinked(ctx.info.root) && !relayRecovered(ctx.info.root)) {
-      store.ensureCoordinator(board, ctx.info.root);
-    }
+    ensureSpecApprovalCoordinator(ctx, board, initialBaseline);
     const actor = ctx.info.isMain ? COORDINATOR : store.agentAt(board, ctx.info.root)?.agent_id;
     if (initialBaseline && actor) await recordBaseline(actor);
     const result = await withItemSession(ctx.info, operation, args, () => relayLinked(ctx.info.root) || relayRecovered(ctx.info.root)
