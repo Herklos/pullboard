@@ -24,7 +24,7 @@ export async function approvalAgentApi(box, root) {
     url = await new Promise((resolve, reject) => {
       let output = '';
       // Startup hang ceiling for a private process and socket, not a performance claim.
-      const timer = setTimeout(() => reject(new Error('private agent API did not publish its address')), 15_000);
+      const timer = setTimeout(() => reject(new Error('private agent API did not publish its address')), 15_000); // budget: private process/socket startup hang ceiling, not a performance claim.
       child.once('exit', code => { clearTimeout(timer); reject(new Error('private agent API exited ' + code)); });
       child.stdout.on('data', chunk => {
         output += chunk;
@@ -82,7 +82,7 @@ export async function approvalReadGate(chrome, origin) {
     if (held.length) return resolve(held.length);
     const observe = () => { clearTimeout(timer); observers.delete(observe); resolve(held.length); };
     // Fixture coordination hang ceiling, not a response-time performance requirement.
-    const timer = setTimeout(() => { observers.delete(observe); reject(new Error('no actual state response entered the read gate')); }, 10_000);
+    const timer = setTimeout(() => { observers.delete(observe); reject(new Error('no actual state response entered the read gate')); }, 10_000); // budget: actual-response coordination hang ceiling, not response-time performance.
     observers.add(observe);
   });
   /** Unlock every held read and remove only this fixture's DevTools interception. */
