@@ -398,8 +398,8 @@ test('a session whose claims cannot be recorded is refused before it moves, neve
 });
 
 /** Open a helper seat from the web seat inside an agent session, returning the CLI result and the helper's Git directory. */
-function openHelper(box, session, { agent = true } = {}) {
-  const made = box.run(box.web, ['worktree', 'web', '--model', 'Helper Model', '--json'], { session, sessionKey: 'CODEX_THREAD_ID', agent });
+function openHelper(box, session, { agent = true, from = box.web } = {}) {
+  const made = box.run(from, ['worktree', 'web', '--model', 'Helper Model', '--json'], { session, sessionKey: 'CODEX_THREAD_ID', agent });
   assert.equal(made.status, 0, `${made.stdout}${made.stderr}`);
   const result = JSON.parse(made.stdout);
   const gitDir = resolve(result.path, box.git(result.path, 'rev-parse', '--git-dir'));
@@ -441,4 +441,19 @@ test('agents lists each agent with its helpers [N2,B13]', () => {
   const text = box.run(box.web, ['agents'], { agent: false });
   assert.equal(text.status, 0);
   assert.match(text.stdout, new RegExp(`${helper.result.agent}[^\\n]*#1`, 'u'), 'the text view shows the helper and its item');
+});
+
+test('agents gives the coordinator a row with the helpers it opened [N2,B13]', () => {
+  const box = project();
+  const helper = openHelper(box, 'codex-thread-coordinator-800', { from: box.repo });
+  assert.equal(JSON.parse(readFileSync(helper.file, 'utf8')).parent, 'coordinator', 'the main checkout is recorded as the parent');
+  const listed = JSON.parse(box.run(box.repo, ['agents', '--json'], { agent: false }).stdout).agents;
+  const top = listed.find((agent) => agent.id === 'coordinator');
+  assert.ok(top, 'the coordinator has its own row');
+  assert.deepEqual(top.helpers.map((agent) => agent.id), [helper.result.agent], 'its helper is nested under it');
+  assert.equal(listed.some((agent) => agent.id === helper.result.agent), false, 'the helper is not a top-level agent');
+  const lines = box.run(box.repo, ['agents'], { agent: false }).stdout.split(/\r?\n/u);
+  const at = lines.findIndex((line) => line.startsWith('coordinator'));
+  assert.ok(at >= 0, 'the text view has a coordinator line');
+  assert.match(lines[at + 1] ?? '', new RegExp(`^ {2}\\S.*${helper.result.agent}|^ {2}.*\\(web lane\\)`, 'u'), 'the helper is indented under it');
 });

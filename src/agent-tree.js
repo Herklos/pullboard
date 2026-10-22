@@ -1,4 +1,5 @@
 /** The agents view: each agent with its seats, helpers and holds, from the board and this machine's parent notes [N2,B13]. */
+import { dirname } from 'node:path';
 import { COORDINATOR } from './config.js';
 import { displayAgentName } from './agent-names.js';
 import { seatLinks } from './agent-session.js';
@@ -6,7 +7,7 @@ import * as store from './board.js';
 
 /**
  * Every joined agent with its seats, its helpers and what each holds, helpers nested under the agent that opened them
- * [N2,B13]. The parent links are read from this machine's checkouts; a helper whose parent is gone is listed on its own.
+ * [N2,B13]. The parent links are read from this machine's checkouts; the coordinator is listed like any agent, and a helper whose parent is gone is listed on its own.
  *
  * @param {any} info - the checkout's repository info
  * @param {any} config
@@ -14,8 +15,12 @@ import * as store from './board.js';
  * @returns {any[]}
  */
 export function agentTree(info, config, board) {
-  const agents = store.listAgents(board).filter((agent) => agent.agent_lane !== COORDINATOR);
+  const agents = store.listAgents(board);
   const { parents, digests } = seatLinks(info, agents);
+  // The coordinator is the main checkout; a board that never declared its seat still shows it once it has opened a helper.
+  if (!agents.some((agent) => agent.agent_id === COORDINATOR) && [...parents.values()].includes(COORDINATOR)) {
+    agents.unshift({ agent_id: COORDINATOR, agent_lane: COORDINATOR, agent_path: dirname(info.commonDir) });
+  }
   const held = new Map();
   for (const item of store.listItems(board)) {
     if (!item.item_owner || !['claimed', 'submitted'].includes(item.item_status)) continue;
