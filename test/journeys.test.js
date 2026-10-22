@@ -905,6 +905,12 @@ async function everyBoardJourney(t, slow = null, { restart = false } = {}) {
       () => journeyTrace.snapshot(),
     );
     if (!rowObservation.ready) await failJourneyRows(t, rowObservation, authTrace, cookiePauses);
+    // With PULLBOARD_JOURNEY_TRACE=1 a passing run reports what a failing one does: the page's transport-start facts and
+    // every navigation, so one commit can be compared across Node versions (#902's macOS control).
+    if (process.env.PULLBOARD_JOURNEY_TRACE === '1') {
+      t.diagnostic('trace ' + JSON.stringify(rowObservation.report));
+      t.diagnostic('auth trace ' + JSON.stringify(await authTrace.read()));
+    }
     // Every run reports how many API pauses carried their cookie, so a passing CI run still shows its Chrome's behaviour (#835).
     const pauseCounts = Object.groupBy(cookiePauses, ({ cookie }) => cookie);
     t.diagnostic('cookie pauses ' + JSON.stringify(Object.fromEntries(Object.entries(pauseCounts).map(([cookie, rows]) => [cookie, rows.length]))));
