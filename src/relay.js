@@ -1264,7 +1264,7 @@ export async function syncRelay(root, io) {
   const file = files.get(root) ?? linkFile(root);
   files.set(root, file);
   // A CI or cloud session with an agent token and a board key in its environment links itself once [E18].
-  if (!existsSync(file) && !await environmentLink(root, file, io)) return null;
+  if (!await environmentLink(root, file, io) && !existsSync(file)) return null;
   return locked(file, async () => {
     const state = loadLink(file);
     if (!state) return null;

@@ -555,6 +555,19 @@ test('every session reads and moves: terminal, SSH, agent, job or CI [E9,E18]', 
     const shown = JSON.stringify(output.document) + (output.failure ?? '');
     assert.equal(shown.includes(token) || shown.includes(key), false, 'no output repeats a secret');
   }
+  // A clone already linked to another board keeps its link: the environment never overwrites it.
+  const otherLink = join(ciRoot, '.git', 'pullboard', 'relay.json');
+  const elsewhere = JSON.stringify({ ...JSON.parse(readFileSync(otherLink, 'utf8')), board: 'f'.repeat(32) });
+  writeFileSync(otherLink, elsewhere, { mode: 0o600 });
+  const warned = await ci('status');
+  assert.match(JSON.stringify(warned.document?.diagnostics ?? []), /RELAY_LINKED/u, 'the environment names the link to another board and the read goes on');
+  const refused = await ci('add', box.lane, 'Added across boards');
+  assert.notEqual(refused.code, 0, 'a session on another board’s link does not move');
+  for (const output of [warned, refused]) {
+    const shown = JSON.stringify(output.document) + (output.failure ?? '');
+    assert.equal(shown.includes(token) || shown.includes(key), false, 'the refusal repeats no secret');
+  }
+  assert.equal(readFileSync(otherLink, 'utf8'), elsewhere, 'the other board’s link is left as it was');
 });
 
 /** A file's permission bits. */
