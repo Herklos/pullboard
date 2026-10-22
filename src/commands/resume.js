@@ -64,6 +64,7 @@ import {
 import {
   loadSpec,
 } from '../spec.js';
+import { initialSpecApprovalBaseline } from '../spec-approval-bootstrap.js';
 import {
   flowAlertLine,
 } from '../stats-flow.js';
@@ -114,6 +115,15 @@ export async function resumeHere(io, view) {
   const ctx = context(io);
   await withBoard(ctx, async board => {
     const me = whoAmI(ctx, board);
+    // Bootstrap is an ordered move: observe health only after it, so the first legacy scan is not stale.
+    const initialBaseline = initialSpecApprovalBaseline(ctx, board, 'recordHealthFindings');
+    if (initialBaseline) {
+      const baselineIo = ctx.io.personRequest || ctx.io.personRequestMoveId
+        ? { ...ctx.io, personRequest: undefined, personRequestMoveId: undefined } : ctx.io;
+      await ordered({ ...ctx, io: baselineIo }, board, 'recordSpecApprovalBaseline', [{
+        agentId: COORDINATOR, baseline: initialBaseline,
+      }]);
+    }
     const observation = scanHealthSentinel(ctx.file, { root: ctx.info.root, config: ctx.config, now: ctx.clock.now() });
     if (observation) {
       try { await ordered(ctx, board, 'recordHealthFindings', [{ agentId: me.id, ...observation }]); }

@@ -113,7 +113,7 @@ The board file is in the repository's Git common directory at `.git/pullboard/bo
 | `row grammar` | `1` | `SPEC_GRAMMAR_VERSION` in `src/spec.js`; optional `<!-- pullboard-grammar N -->` line in either file (absence means the current grammar) | Both files share the version. A declared version must match; an incompatible grammar change requires a coordinated version bump and compatible files. No automatic conversion occurs. |
 | `board schema` | `2` | `SCHEMA_VERSION` in `src/board.js`, persisted as `PRAGMA user_version` | Create missing tables and indexes, add missing columns in place with declared defaults, restore missing or changed triggers, and remove stale machine triggers without replacing rows. |
 | `event log` | `1` | `EVENT_LOG_VERSION` in `src/board.js`, persisted in `board_meta` as `event_log_version` | Older event-log versions upgrade in place; newer versions are refused with `EVENT_LOG_VERSION`. Preserve event rows when the board schema changes. |
-| `move engine` | `67` | `ENGINE_VERSION` in `src/machine.js`, carried as `engine` in every sealed executable move | Bump when a move's meaning changes, independently of the event log and sealed envelope. A newer engine is refused with `ENGINE_VERSION`, naming both versions and asking you to upgrade Pullboard. |
+| `move engine` | `68` | `ENGINE_VERSION` in `src/machine.js`, carried as `engine` in every sealed executable move | Bump when a move's meaning changes, independently of the event log and sealed envelope. A newer engine is refused with `ENGINE_VERSION`, naming both versions and asking you to upgrade Pullboard. |
 <!-- format-versions:end -->
 
 Relay transport capability `apiVersion: 2` is independent of these versions and
@@ -388,7 +388,7 @@ The `event` table is a SQLite schema object governed by `SCHEMA_VERSION`; its ap
 | `release` | builder | — |
 | `submit` | builder | `commit`, `tree`, `policyCommit`, engine-9 `criterionDigest`, engine-38 `submissionProof` |
 | `reserve` | reviewer | `until` |
-| `accept` | reviewer | `reason`, `commit`, engine-20 `implies`, engine-33 `review` |
+| `accept` | reviewer | `reason`, `commit`, engine-20 `implies`, engine-33 `review`, engine-68 `note` |
 | `reject` | reviewer | `reason`, `commit`, engine-20 `implies`, engine-33 `review` |
 | `reopen` | coordinator | `commit`, `note`, `judgment`, engine-10 `supersedes`, `landingFailure`, engine-30 `cause`, engine-52 `conflict` |
 | `merged` | coordinator | `commit` |
@@ -490,3 +490,13 @@ Engine 43 (`RIGOR_NOTICE_ENGINE`) posts one coordinator shout and one typed `rig
 A proved Rigor draft carries `source: rigor:<percent-encoded JSON>` with `version: 1`, its `key`, `evidence` (`items`, `occurrences`, `neverAgain`) and `proof` (`check`, `red`, `green`). The proof contains actual full commits, executed exit statuses and problem counts. The existing spec and doctrine row grammar reads this field; prose mentioning Rigor is not a typed source. The person uses ordinary Approve or Decline, and the coordinator applies the approved row without a new build item.
 
 Engine 54 replaces the automatic strong-to-strong ceiling escalation with one coordinator notice per rejection pair, naming the builder and both rejection receipts. Ordinary rejection still reopens and clears the owner and lease. Light and mid routes keep engine-50 automatic escalation. Engines 50 through 53 retain their original ceiling escalation when replayed.
+
+## Approval provenance
+
+A row approved after the board’s compatibility baseline is reported as `agent-approved` until its exact source is backed by a person decision or a verified signed row-decision receipt. The initial approved set is recorded during `init`, before the setup commit. An older board records its existing approved rows on its first ordered command with this version; earlier reads report the baseline as pending and flag nothing. The snapshot is a compatibility boundary, not evidence of historical person approval. Git blame supplies the row's commit and author, labelled “Git author, seat unknown”; it never establishes person approval. `pullboard spec approve <id>` confirms the row and `spec decline <id> --reason "why"` declines it through the existing person channel. File application remains a coordinator step.
+
+`pullboard.json` accepts the existing `"spec": "SPEC.md"` form, or `"spec": {"file": "SPEC.md", "agentApproval": "flag"}`. `flag` is the default and keeps work moving; `allow` suppresses the outstanding approval call; explicit `refuse` prevents a new frozen citation of an unconfirmed row with `AGENT_APPROVAL_REQUIRED`.
+
+Engine 68 retains the existing validated verifier note in new acceptance-event detail. Earlier engines retain their original receipt shape; later person confirmations project current approval state beside that immutable history. No new row status or approval authority is inferred from a Git author or an unsigned receipt.
+
+The engine-68 `recordSpecApprovalBaseline` move carries `{agentId, baseline: {version: 1, file, anchor, rows: [{id, text, source}]}}`. `anchor` is the current commit or `null` before the first commit; exact source rows also cover uncommitted initial requirements. Only the authenticated coordinator may establish the snapshot; a person uses the main checkout’s coordinator path. Lane commands never seed or replace it. The first snapshot is indexed under `board_meta.spec_approval_baseline` with a `spec_approval_baseline` event. Replay writes metadata only, never checkout files. Sender attribution is authenticated normally, older engines refuse the new move, and later bootstrap attempts cannot replace or expand the original snapshot. No local sidecar establishes shared approval authority. The metadata snapshot must agree with its single original coordinator event; a partial restore with either half missing or changed is invalid. A malformed stored marker remains in place with an invalid-baseline diagnostic; it is not treated as an absent migration baseline or reseeded by later commands. Board imports remain trusted recovery operations; agreement of these records is a consistency check, not cryptographic authentication of an imported history.

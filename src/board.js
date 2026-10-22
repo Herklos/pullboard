@@ -53,6 +53,7 @@ import {
   storeTriggers,
 } from './machine.js';
 import { LOCAL_LANDING_ENGINE } from './land-engine.js';
+import { SPEC_APPROVAL_ENGINE } from './spec-approval-engine.js';
 import { Refused } from './refused.js';
 import { refuseMaskedExit } from './check-mask.js';
 import {
@@ -1623,6 +1624,7 @@ export function verify(board, id, { agentId, decision, reason, note = '', cause,
     const returnedAt = !isAccept && engine >= REOPEN_FIRST_REFUSAL_ENGINE && reopenFirstRefusalMinutes > 0 && item.item_built_by ? board.clock.now() : undefined;
     const reservation = !isAccept && engine >= REOPEN_FIRST_REFUSAL_ENGINE ? firstRefusalDetail(board, item, reopenFirstRefusalMinutes, returnedAt) : {};
     const detail = { ...reservation, reason: code, commit: item.item_commit, ...(!isAccept && cause !== undefined && cause !== null ? { cause } : {}) };
+    if (isAccept && engine >= SPEC_APPROVAL_ENGINE) detail.note = note.trim();
     if (isAccept && check !== undefined) detail.check = check;
     if (newReview) detail.review = { commit: review.commit, ...(Object.hasOwn(review, 'head') ? { head: review.head } : {}), trunk: review.trunk, paths: [...review.paths] };
     logEvent(board, agentId, verb, id, implies?.length ? { ...detail, implies } : detail, returnedAt);
@@ -1711,7 +1713,6 @@ export function reopen(board, id, { agentId, note = '', conflict, cause, reopenF
     return { id: item.item_id, commit: submittedCommit, ...returned };
   });
 }
-
 
 /**
  * Refuse unless the acting agent is the coordinator.
@@ -2574,6 +2575,7 @@ export function milestones(board) {
 
 // A lane agent's drafted rows live in row-drafts.js (#878); exported here so the engine dispatches them.
 export { draftSpecRow, rowDrafts } from './row-drafts.js';
+export { recordSpecApprovalBaseline, specApprovalBaseline, specApprovalBaselineExists } from './spec-approval-baseline.js';
 // The roadmap's moves live in milestones.js; the board keeps exporting them so the engine replays them.
 export { addMilestone, canonicalMilestoneTarget, editMilestone, editMilestoneItems, orderMilestoneItems, moveMilestone, removeMilestone, roadmap, shipMilestone } from './milestones.js';
 

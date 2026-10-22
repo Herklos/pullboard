@@ -29,6 +29,7 @@ import { Refused } from './refused.js';
 import {
   hasSignerFile,
   isVerifiedSignoff,
+  readRawRecords,
   signRows,
   verifySignedRecords,
 } from './signature.js';
@@ -461,18 +462,7 @@ export function frozenCriterion(spec, item, doctrine = null) {
  * @returns {{ id: string, by: string, on: string, text: string }[]}
  */
 export function readSignoffs(root) {
-  const file = join(root, SIGNOFFS_FILE);
-  const records = !existsSync(file) ? [] : readFileSync(file, 'utf8')
-    .split('\n')
-    .filter((line) => line.trim())
-    .map((line, index) => {
-      try {
-        return JSON.parse(line);
-      } catch {
-        throw new Refused('BAD_SIGNOFFS', `${SIGNOFFS_FILE} line ${index + 1} is not JSON`);
-      }
-    });
-  return verifySignedRecords(root, records);
+  return verifySignedRecords(root, readRawRecords(root));
 }
 
 /**

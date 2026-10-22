@@ -213,6 +213,8 @@ import {
   standings,
   unmetRows,
 } from './spec.js';
+import { refuseAgentApprovedRows } from './spec-approval.js';
+import { initialSpecApprovalBaseline } from './spec-approval-bootstrap.js';
 import {
   answerQuestion,
   landBlueprint,
@@ -877,6 +879,7 @@ function relayOutboxSetting(root) {
 }
 
 export async function ordered(ctx, board, operation, args) {
+  const initialBaseline = initialSpecApprovalBaseline(ctx, board, operation);
   // Only a reject or a reopen can open a builder's first-refusal window (#954), so an accept never reads the coordinator's policy.
   if (operation === 'reopen' || operation === 'verify' && args[1]?.decision === 'REJECT') args = firstRefusalArgs(operation, args, configFromSource(coordinatorFile(ctx.info.root, CONFIG_FILE).stdout));
   ctx.io.relayOutbox ??= () => relayOutboxSetting(ctx.info.root);
@@ -888,8 +891,23 @@ export async function ordered(ctx, board, operation, args) {
   }
   const command = ['add', 'edit', 'merged'].includes(ctx.io.relayCommand?.cliOperation) ? ctx.io.relayCommand : undefined;
   /** Dispatch while this session holds the checkout, including long-running next/run loops. */
-  const execute = () => withItemSession(ctx.info, operation, args, () => relayLinked(ctx.info.root) || relayRecovered(ctx.info.root)
-    ? relayOperation(ctx.info.root, operation, args, ctx.io, command, () => store[operation](board, ...args)) : store[operation](board, ...args));
+  const execute = async () => {
+    /** Keep bootstrap in the same authenticated seat, without borrowing a person's action receipt. */
+    const recordBaseline = async (agentId) => {
+      const values = [{ agentId, baseline: initialBaseline }];
+      const baselineIo = ctx.io.personRequest || ctx.io.personRequestMoveId
+        ? { ...ctx.io, personRequest: undefined, personRequestMoveId: undefined } : ctx.io;
+      return relayLinked(ctx.info.root) || relayRecovered(ctx.info.root)
+        ? relayOperation(ctx.info.root, 'recordSpecApprovalBaseline', values, baselineIo, undefined,
+          () => store.recordSpecApprovalBaseline(board, ...values))
+        : store.recordSpecApprovalBaseline(board, ...values);
+    };
+    const actor = ctx.info.isMain ? COORDINATOR : store.agentAt(board, ctx.info.root)?.agent_id;
+    if (initialBaseline && actor) await recordBaseline(actor);
+    const result = await withItemSession(ctx.info, operation, args, () => relayLinked(ctx.info.root) || relayRecovered(ctx.info.root)
+      ? relayOperation(ctx.info.root, operation, args, ctx.io, command, () => store[operation](board, ...args)) : store[operation](board, ...args));
+    return result;
+  };
   const digest = agentSessionDigest();
   const boardOnly = CHECKOUT_BOARD_ONLY.get(ctx.io);
   const boardOnlyOperation = (boardOnly === 'shout' && operation === 'shout') || (boardOnly === 'fact' && operation === 'appendFact');
@@ -1052,6 +1070,7 @@ export function freezer(ctx, { captureVerifyPolicy = false, board } = {}) {
       config = policy ? itemPolicy(ctx.info.root, { ...item, item_frozen: JSON.stringify({ policy }) }).config : ctx.config;
     }
     const doctrine = board ? agentDoctrine(ctx, board) : loadDoctrine(ctx.info.root, config);
+    if (board) refuseAgentApprovedRows(ctx.info.root, { board, config, item });
     const frozen = frozenCriterion(loadSpec(ctx.info.root, config), item, doctrine);
     if (!policy) return frozen; // Legacy criteria retain their original digest and committed claim base.
     const text = JSON.stringify({ ...JSON.parse(frozen.text), policy });

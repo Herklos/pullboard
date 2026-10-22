@@ -1,5 +1,6 @@
 /** The pullboard status command, in its own module so an item adding another command never edits these lines. */
 import * as store from '../board.js';
+import { personNeedsSummary } from '../needs-state.js';
 import {
   reviewQueueLine,
 } from '../next-steps.js';
@@ -32,7 +33,8 @@ export function run(io, { values }) {
   const summary = withBoard(ctx, (board) => {
     const me = whoAmI(ctx, board);
     const mine = store.listItems(board).filter((item) => item.item_status === 'claimed' && item.item_owner === me.id);
-    return { me, mine, stats: store.stats(board), reviewQueue: { ...store.reviewQueue(board), ...store.reviewQueueBreakdown(board) }, unread: store.unreadCount(board, me.id), relay: relayStatus(ctx.info.root),
+    const approvalState = personNeedsSummary(ctx.info.root, { board, config: ctx.config });
+    return { me, mine, needs: approvalState.needs, specApprovalBaseline: approvalState.specApprovalBaseline, specApprovalEvidenceErrors: approvalState.specApprovalEvidenceErrors, stats: store.stats(board), reviewQueue: { ...store.reviewQueue(board), ...store.reviewQueueBreakdown(board) }, unread: store.unreadCount(board, me.id), relay: relayStatus(ctx.info.root),
       submitInvariantProposals: submitInvariantProposals(store.events(board), ctx.config) };
   });
   if (values.json) {
@@ -44,8 +46,11 @@ export function run(io, { values }) {
   io.say(`${summary.me.displayName}: ${summary.unread} unread shouts; holding ${summary.mine.map((item) => `#${item.item_id}`).join(', ') || 'nothing'}`);
   io.say(`board: ${items.open} open, ${items.claimed} claimed, ${items.submitted} awaiting verification, ${items.verified} verified, ${items.withdrawn} withdrawn`);
   io.say(`verdicts: ${accepted} accepted, ${rejected} rejected`);
+  if (summary.specApprovalBaseline?.pending) io.say('approval baseline pending: the next coordinator or person command in the main checkout records the existing approved rows; lane work may continue and none are flagged until then');
+  if (summary.specApprovalBaseline?.invalid) io.say('approval baseline unreadable: existing rows need approval evidence; restore a known-good board export to recover the original baseline');
   io.say(reviewQueueLine(ctx, summary.reviewQueue, span));
   for (const proposal of summary.submitInvariantProposals) io.say(submitInvariantLine(proposal));
+  for (const need of summary.needs.filter(need => need.kind === 'agent-approved')) io.say(`${need.text}; ${need.what}`);
   if (!summary.relay.linked && !originRepository(ctx.info.root, { optional: true })) {
     io.say('optional: add a GitHub origin and run pullboard relay on to link this board');
   }
