@@ -476,12 +476,12 @@ function askLine(io, question) {
  * @param {any} io
  * @returns {Promise<number>}
  */
-export async function offerRelayAtInit(root, io) {
+export async function offerRelayAtInit(root, io, { details = true } = {}) {
   const shared = relayLinked(root) || readRelayMachine().autoLink;
   const offer = relayOfferAtInit({ enabled: relayOfferEnabled(), shared, stdin: io.stdin, stdout: io.stdout });
   if (offer === 'none') return 0;
   if (offer === 'ask' && acceptsRelayOffer(await askLine(io, RELAY_OFFER_QUESTION))) return await relayOnAllCommand(undefined, io);
-  io.say(RELAY_LATER);
+  if (details) io.say(RELAY_LATER);
   return 0;
 }
 
