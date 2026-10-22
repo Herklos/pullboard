@@ -730,7 +730,7 @@ test('the export asks for the full board [N26,A2]', { timeout: 90_000 }, // budg
       })()`);
       assert.ok(opened.title.includes('Offline greeting'), `the address opens item #1: ${opened.title}`);
       assert.equal(opened.criterion, criterion, 'the exported item shows its criterion');
-      assert.deepEqual(opened.verdicts, [['REJECT', 'the first greeting needs a correction'], ['ACCEPT', 'the page shows it']],
+      assert.deepEqual(opened.verdicts, [['REJECT', 'the first greeting needs a correction'], ['ACCEPT', 'the page shows it\nverified against agent-approved G1']],
         'the exported item shows both verdicts with their notes');
       assert.deepEqual(opened.moves, ['add', 'claim', 'submit', 'reject', 'claim', 'submit', 'accept'], 'the exported thread shows every move');
       assert.deepEqual(opened.facts, ['The corrected greeting renders offline.'], 'the exported thread shows its fact');
