@@ -1936,7 +1936,7 @@ async function nextSeatContext(ctx, board, me, item, seats) {
   if (!agent) {
     let opened;
     const { worktreeFor } = await import('./commands/worktree.js');
-    await worktreeFor({ ...ctx.io, say: () => {}, result: (value) => { opened = value; } }, item.item_lane, me.route, me.family, me.model);
+    await worktreeFor({ ...ctx.io, say: () => {}, result: (value) => { opened = value; } }, item.item_lane, me.route, me.family, me.model, false);
     agent = store.agentAt(board, opened.path);
     created = true;
   }
