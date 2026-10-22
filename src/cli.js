@@ -943,7 +943,10 @@ async function bindCheckoutSession(io, positionals, values) {
   if (command === 'answer' && values.as === 'person') return;
   const digest = agentSessionDigest();
   if (!digest) {
-    if (command === 'takeover') throw new Refused('AGENT_SESSION', 'takeover belongs to an agent session; run pullboard takeover from the agent’s shell');
+    // A person's shell in a linked main checkout takes the board's coordinator; it binds no agent session (#347).
+    if (command === 'takeover' && !(repoInfo(io.cwd).isMain && relayLinked(repoInfo(io.cwd).root))) {
+      throw new Refused('AGENT_SESSION', 'takeover belongs to an agent session; run pullboard takeover from the agent’s shell');
+    }
     return;
   }
   if (command === 'check') {

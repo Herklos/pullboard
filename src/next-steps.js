@@ -234,6 +234,8 @@ export const NEXT_STEPS = Object.freeze({
   CORE_BARE: 'turn off core.bare: git config core.bare false',
   COORDINATOR_CHECK: 'ask your coordinator to set the check: pullboard shout coordinator "please set a check on #<id>"',
   COORDINATOR_ONLY: 'ask the coordinator to do it: pullboard shout coordinator "<what you need>"',
+  COORDINATOR_HELD: 'coordinate from the main checkout the refusal names, or run pullboard takeover in this main checkout to take the coordinator here',
+  COORDINATOR_TAKEOVER: 'link the board with pullboard relay on in the main checkout, then run pullboard takeover there',
   COORDINATOR_VERIFIES: 'leave the review to the coordinator; shout it when the item is ready: pullboard shout coordinator "#<id> is ready to verify"',
   CRITERIA_CHANGED: 'ask the coordinator to refreeze it: pullboard shout coordinator "please refreeze #<id>"',
   CRITERION_PROVES_NOTHING: 'set a check that fails before the work: pullboard edit <id> --check "<command>", or ask the person to accept this one: pullboard check accept <id>',

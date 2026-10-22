@@ -45,6 +45,7 @@ import {
   seal,
   unseal,
 } from './seal.js';
+import { stampCoordinatorHolder } from './coordinator-hold.js';
 import { Refused } from './refused.js';
 
 /** How many replay refusals the link keeps for pullboard status; older ones stay in the relay's own receipts. */
@@ -321,7 +322,7 @@ export async function queueMove(link, { operation, args, command, move, error, a
   })();
   if (!move) {
     const sent = withSeatName(root, operation, args);
-    move = localRecords(root, (board) => prepareEngineMove(board, operation, sent));
+    move = stampCoordinatorHolder(localRecords(root, (board) => prepareEngineMove(board, operation, sent)), state.machine);
     move.actor = relayMoveActor(move) ?? credentialActor(move);
   }
   const stray = strayItemRefs(outbox, move);
