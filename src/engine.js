@@ -61,6 +61,8 @@ import {
 } from './flake-engine.js';
 import { LOCAL_LANDING_ENGINE } from './land-engine.js';
 import { REVIEW_SKIP_ENGINE } from './review-skip-engine.js';
+import { COORDINATOR_HOLD_ENGINE } from './coordinator-hold-engine.js';
+import { requireCoordinatorHold } from './coordinator-hold.js';
 
 const ITEM_ID_FIRST_ARGUMENT = new Set(['acceptCheck', 'editItem', 'escalate', 'recordAttempt', 'claim', 'release', 'submit', 'reserveReview', 'verify', 'merged', 'withdraw', 'refreeze', 'reopen', 'appendFact']);
 
@@ -73,12 +75,12 @@ export const ENGINE_OPERATIONS = Object.freeze([
   'recordRowDecisions', 'applyRowDecisions', 'draftSpecRow', 'appendFact', 'recordSpecApprovalBaseline',
   'recordLandingBatch', 'recordLandingWaiver', 'recordLandingFlake', 'finishLandingBatch', 'acceptCheck',
   'recordHealthFindings', 'proposeSentinel', 'decideSentinel', 'beginSentinelRun', 'finishSentinelRun',
-  'recordFlakeObservation', 'recordGateRun', 'declareJob', 'recordJobRun',
+  'recordFlakeObservation', 'recordGateRun', 'declareJob', 'recordJobRun', 'takeCoordinator',
 ]);
 
 /** Engine version at which each ordered operation first has stable replay semantics. */
 const OPERATION_ENGINE = Object.freeze({ draftSpecRow: ROW_DRAFT_ENGINE, orderMilestoneItems: MILESTONE_RANK_ENGINE, reopen: 8, recordLandingBatch: 8, recordLandingWaiver: 8, recordLandingFlake: 8, finishLandingBatch: 8, acceptCheck: CHECK_ACCEPT_ENGINE,
-  shipMilestone: MILESTONE_SHIP_ENGINE, recordSpecApprovalBaseline: SPEC_APPROVAL_ENGINE });
+  shipMilestone: MILESTONE_SHIP_ENGINE, recordSpecApprovalBaseline: SPEC_APPROVAL_ENGINE, takeCoordinator: COORDINATOR_HOLD_ENGINE });
 
 /** Dependency edits, causes, sealed reviews, submission proofs, trunk conflicts, health observations and milestone targets retain distinct recorded engine meanings. */
 function minimumOperationEngine(operation, args, board, at) {
@@ -352,6 +354,8 @@ export function applyEngineMove(board, move, { sequence, at, standing = null, en
         const execute = () => store.atomic(board, () => {
           const problem = requestMoveProblem(board, move);
           if (problem) throw problem;
+          // One main checkout coordinates a linked board at a time; another is refused by name (#347).
+          requireCoordinatorHold(board, move, standing?.lineage, at);
           return store[move.operation](board, ...executableArgs(move, board));
         });
         const result = standing ? store.withVerifierStanding(board, standing, execute) : execute();

@@ -107,6 +107,7 @@ import {
   outboxQueueable,
   queueMove,
 } from './relay-outbox.js';
+import { stampCoordinatorHolder } from './coordinator-hold.js';
 import { Refused } from './refused.js';
 import { refusalFromReceipt } from './recorded-refusal.js';
 import { relayNotices } from './relay-notices.js';
@@ -1204,7 +1205,7 @@ export async function relayOperation(root, operation, args, io, command, applyLo
       try {
         if (!move) {
           const sent = withSeatName(root, operation, args);
-          move = localRecords(root, (board) => prepareEngineMove(board, operation, sent, io.personRequestMoveId ? { id: io.personRequestMoveId } : {}));
+          move = stampCoordinatorHolder(localRecords(root, (board) => prepareEngineMove(board, operation, sent, io.personRequestMoveId ? { id: io.personRequestMoveId } : {})), state.machine);
           if (io.personRequest) move.personRequest = structuredClone(io.personRequest);
           const problem = move.personRequest && localRecords(root, board => requestMoveProblem(board, move, { checkExecutorLease: false }));
           if (problem) throw problem;
@@ -1263,8 +1264,7 @@ export async function syncRelay(root, io) {
   const files = LINK_FILES.get(io) ?? LINK_FILES.set(io, new Map()).get(io);
   const file = files.get(root) ?? linkFile(root);
   files.set(root, file);
-  // A CI or cloud session with an agent token and a board key in its environment links itself once [E18].
-  if (!await environmentLink(root, file, io) && !existsSync(file)) return null;
+  if (!await environmentLink(root, file, io) && !existsSync(file)) return null; // a CI or cloud session links from its environment [E18]
   return locked(file, async () => {
     const state = loadLink(file);
     if (!state) return null;

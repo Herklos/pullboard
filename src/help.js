@@ -21,6 +21,7 @@ Set up
   pullboard lane add <name> --owns <path>[,<path>]   add a lane that owns those folders to pullboard.json
                                         refuses a lane name or a path that is already owned, naming the owner
   pullboard takeover                   rebind this checkout when the same agent starts a new session
+                                        in a linked main checkout it also takes the board's coordinator here
   pullboard resources                  local resource holders and their FIFO queues
   pullboard settings [gateSlots <n> | browserSlots <n>]  view or set machine capacity (gate default 2; browser default 1)
                                         browser-free check slots are opt-in: gate.browserFreeChecks in ~/.pullboard/settings.json (default false)

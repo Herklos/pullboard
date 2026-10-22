@@ -930,7 +930,7 @@ export async function claimOrdered(ctx, board, args) {
   return await ordered(ctx, board, 'claim', args);
 }
 
-/** Check ownership before sync or command side effects; reads and authenticated person channels keep their identity. */
+/** Check ownership before sync or command side effects; reads and authenticated person channels keep their identity. A person's takeover in a linked main checkout binds no session (#347). */
 async function bindCheckoutSession(io, positionals, values) {
   if (values.help || values.version || io.personChannel === 'view' || io.personRequest) return;
   const [command, first] = positionals;
@@ -943,7 +943,7 @@ async function bindCheckoutSession(io, positionals, values) {
   if (command === 'answer' && values.as === 'person') return;
   const digest = agentSessionDigest();
   if (!digest) {
-    if (command === 'takeover') throw new Refused('AGENT_SESSION', 'takeover belongs to an agent session; run pullboard takeover from the agent’s shell');
+    if (command === 'takeover' && !(repoInfo(io.cwd).isMain && relayLinked(repoInfo(io.cwd).root))) throw new Refused('AGENT_SESSION', 'takeover belongs to an agent session; run pullboard takeover from the agent’s shell');
     return;
   }
   if (command === 'check') {
@@ -973,17 +973,8 @@ async function bindCheckoutSession(io, positionals, values) {
     return;
   }
   const lease = await bindLocalSession(info, { agent: agent ?? 'unjoined agent', digest, takeover: command === 'takeover', keepLease: !['run', 'next'].includes(command), waitLimitMs: command === 'hook' ? HOOK_CHECKOUT_WAIT_MS : 0,
-    /** Use an existing ordered shout so takeover has a receipt without changing the board format. */
-    recordTakeover: async () => {
-      const ctx = context(io);
-      await withBoard(ctx, async (board) => {
-        const me = whoAmI(ctx, board);
-        const message = { from: me.id, to: info.isMain ? 'person' : COORDINATOR,
-          text: `${me.displayName} took over this checkout in a new agent session.`, lanes: laneNames(ctx.config) };
-        if (relayLinked(info.root)) await relayOperation(info.root, 'shout', [message], io, undefined, () => store.shout(board, message));
-        else store.shout(board, message);
-      });
-    },
+    /** Record the takeover; a linked main checkout takes the board's coordinator before its receipt shout, which the hold would refuse (#347). */
+    recordTakeover: async () => (await import('./commands/takeover.js')).recordCheckoutTakeover(io, info),
   });
   if (agent) return { lease };
   /** Replace the temporary identity after a successful first join, retaining the winning session. */
