@@ -56,6 +56,11 @@ import {
 } from './stats-flow.js';
 import { projectRowDecisions } from './row-decisions.js';
 import {
+  projectItemSpecApprovals,
+  projectSpecApprovals,
+  specApprovalState,
+} from './spec-approval.js';
+import {
   fitFile,
   pendingFit,
   projectFit,
@@ -92,6 +97,7 @@ function stateFileInputs(root, config) {
     { name: `spec:${config.spec}`, path: join(root, config.spec) },
     { name: `practice:${config.practice}`, path: join(root, config.practice) },
     { name: 'builtin:standard-doctrine.md', path: new URL('./standard-doctrine.md', import.meta.url) },
+    ...['signoffs.jsonl', 'signers', 'first-commit', 'signers.initial'].map(name => ({ name: `approval:${name}`, path: join(root, '.pullboard', name) })),
     { name: 'fit:blueprint-fit.json', path: fitFile(repoInfo(root).commonDir) },
   ];
 }
@@ -478,7 +484,7 @@ function buildLocalBoardState(root, boardId, board, codeIsMain, { previous = nul
     state.requests = projectData.requests;
     state.personRequests = projectData.personRequests;
     state.milestones = projectData.milestones;
-    const decorated = projectFit(pendingFit(repoInfo(root).commonDir), projectRowDecisions(projectData.rowDecisions, state));
+    const decorated = projectSpecApprovals(projectFit(pendingFit(repoInfo(root).commonDir), projectRowDecisions(projectData.rowDecisions, state)), specApprovalState(root, { board, config }));
     const bases = new Map(decorated.items.map((item) => [item.id, item]));
     for (const id of dirtyIds) {
       if (!currentById.has(id)) continue;
@@ -971,7 +977,8 @@ export function createLocalApiHandler({ secret, getPort, runCommand, projects = 
           const row = currentBoard.db.prepare('SELECT item_status FROM item WHERE item_id = ?').get(dependency);
           if (row) status.set(dependency, row.item_status);
         }
-        const base = projectItemState(currentBoard, source, status);
+        const base = projectItemSpecApprovals(projectItemState(currentBoard, source, status),
+          specApprovalState(board.root, { board: currentBoard, config: loadConfig(board.root) }));
         // Detail reads need no new Git process while the trunk and immutable receipt log hold.
         const info = repoInfo(board.root);
         const tip = trunkRevisionReader(info)();

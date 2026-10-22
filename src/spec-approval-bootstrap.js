@@ -1,0 +1,15 @@
+/** Keep one compatibility setup move recoverable without stealing an interrupted work result [S1,H16]. */
+import { specApprovalBaselineExists } from './board.js';
+import { loadConfig } from './config.js';
+import { relayRecovered } from './relay.js';
+import { captureSpecApprovalBaseline } from './spec-approval.js';
+
+/** Reuse the exact interrupted setup payload; only a main-checkout command can establish it. */
+export function initialSpecApprovalBaseline(ctx, board, operation) {
+  if (!ctx.info.isMain || operation === 'recordSpecApprovalBaseline') return null;
+  const recovered = relayRecovered(ctx.info.root, { includePending: true });
+  // A pending send or catch-up can retain the original move while its setup reply is still unreported.
+  // Repeating that same move consumes its receipt through ordinary relay validation, not a new seed.
+  if (recovered?.operation === 'recordSpecApprovalBaseline') return recovered.args[0].baseline;
+  return specApprovalBaselineExists(board) ? null : captureSpecApprovalBaseline(ctx.info.root, loadConfig(ctx.info.root));
+}
