@@ -535,7 +535,14 @@ test('every session reads and moves: terminal, SSH, agent, job or CI [E9,E18]', 
   const ciHome = join(box.root, '..', 'ci-home');
   mkdirSync(ciHome, { mode: 0o700 });
   const key = readFileSync(box.keyFile, 'utf8').trim();
-  const ciEnv = { ...box.env, HOME: ciHome, PULLBOARD_HOME: join(ciHome, '.pullboard'), PULLBOARD_MACHINE_HOME: join(ciHome, 'machine'),
+  // The CI machine also has a keychain holding a legacy copy of the key; the session must not move it into a file.
+  const ciKeychainBin = join(ciHome, 'keychain-bin');
+  mkdirSync(ciKeychainBin, { mode: 0o700 });
+  for (const name of readdirSync(box.env.PATH)) symlinkSync(join(box.env.PATH, name), join(ciKeychainBin, name));
+  for (const name of ['security', 'secret-tool']) {
+    writeFileSync(join(ciKeychainBin, name), '#!/bin/sh\ncase "$1" in search) exit 1;; find-generic-password|lookup) printf %s "$PULLBOARD_RELAY_KEY"; exit 0;; esac\nexit 0\n', { mode: 0o755 });
+  }
+  const ciEnv = { ...box.env, HOME: ciHome, PULLBOARD_HOME: join(ciHome, '.pullboard'), PULLBOARD_MACHINE_HOME: join(ciHome, 'machine'), PATH: ciKeychainBin,
     PULLBOARD_RELAY_TOKEN: token, PULLBOARD_RELAY_KEY: key, PULLBOARD_RELAY_URL: box.origin };
   const ci = (...args) => sessionChild(ciRoot, ciEnv, [cli, ...args, '--json']);
   const status = await ci('status');
@@ -561,9 +568,12 @@ test('every session reads and moves: terminal, SSH, agent, job or CI [E9,E18]', 
   writeFileSync(otherLink, elsewhere, { mode: 0o600 });
   const warned = await ci('status');
   assert.match(JSON.stringify(warned.document?.diagnostics ?? []), /RELAY_LINKED/u, 'the environment names the link to another board and the read goes on');
+  const relayRead = await ci('relay', 'status');
+  assert.equal(relayRead.code, 0, `relay status is a read too, so it goes on: ${JSON.stringify(relayRead.document?.error?.code ?? null)}`);
+  assert.match(JSON.stringify(relayRead.document?.diagnostics ?? []), /RELAY_LINKED/u, 'relay status names the link to another board');
   const refused = await ci('add', box.lane, 'Added across boards');
   assert.notEqual(refused.code, 0, 'a session on another board’s link does not move');
-  for (const output of [warned, refused]) {
+  for (const output of [warned, relayRead, refused]) {
     const shown = JSON.stringify(output.document) + (output.failure ?? '');
     assert.equal(shown.includes(token) || shown.includes(key), false, 'the refusal repeats no secret');
   }
