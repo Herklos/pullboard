@@ -6,7 +6,6 @@ import {
   withBoard,
 } from '../cli.js';
 import { COORDINATOR } from '../config.js';
-import { computerLabel } from '../coordinator-hold.js';
 import { relayLinked } from '../relay.js';
 import { relayMachineContext } from '../relay.js';
 
@@ -19,8 +18,8 @@ export async function run(io) {
   const ctx = context(io);
   const me = withBoard(ctx, (board) => whoAmI(ctx, board));
   if (ctx.info.isMain && relayLinked(ctx.info.root)) {
-    const label = computerLabel(relayMachineContext(ctx.info.root)?.machine);
-    const taken = await withBoard(ctx, (board) => ordered(ctx, board, 'takeCoordinator', [{ agentId: COORDINATOR, label }]));
+    const machine = relayMachineContext(ctx.info.root)?.machine;
+    const taken = await withBoard(ctx, (board) => ordered(ctx, board, 'takeCoordinator', [{ agentId: COORDINATOR, ...(typeof machine === 'string' ? { machine } : {}) }]));
     io.result?.({ agent: me.id, path: ctx.info.root, coordinator: taken.holder, previous: taken.previous });
     io.say(`${me.displayName} now coordinates this board from ${taken.holder}${taken.previous && taken.previous !== taken.holder ? `, taking over from ${taken.previous}` : ''}`);
     return 0;

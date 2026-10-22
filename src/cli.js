@@ -930,7 +930,7 @@ export async function claimOrdered(ctx, board, args) {
   return await ordered(ctx, board, 'claim', args);
 }
 
-/** Check ownership before sync or command side effects; reads and authenticated person channels keep their identity. */
+/** Check ownership before sync or command side effects; reads and authenticated person channels keep their identity. A person's takeover in a linked main checkout binds no session (#347). */
 async function bindCheckoutSession(io, positionals, values) {
   if (values.help || values.version || io.personChannel === 'view' || io.personRequest) return;
   const [command, first] = positionals;
@@ -943,10 +943,7 @@ async function bindCheckoutSession(io, positionals, values) {
   if (command === 'answer' && values.as === 'person') return;
   const digest = agentSessionDigest();
   if (!digest) {
-    // A person's shell in a linked main checkout takes the board's coordinator; it binds no agent session (#347).
-    if (command === 'takeover' && !(repoInfo(io.cwd).isMain && relayLinked(repoInfo(io.cwd).root))) {
-      throw new Refused('AGENT_SESSION', 'takeover belongs to an agent session; run pullboard takeover from the agent’s shell');
-    }
+    if (command === 'takeover' && !(repoInfo(io.cwd).isMain && relayLinked(repoInfo(io.cwd).root))) throw new Refused('AGENT_SESSION', 'takeover belongs to an agent session; run pullboard takeover from the agent’s shell');
     return;
   }
   if (command === 'check') {
