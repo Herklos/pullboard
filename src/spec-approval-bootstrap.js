@@ -1,8 +1,20 @@
 /** Keep one compatibility setup move recoverable without stealing an interrupted work result [S1,H16]. */
-import { specApprovalBaselineExists } from './board.js';
+import {
+  ensureCoordinator,
+  specApprovalBaselineExists,
+} from './board.js';
 import { loadConfig } from './config.js';
-import { relayRecovered } from './relay.js';
+import {
+  relayLinked,
+  relayRecovered,
+} from './relay.js';
 import { captureSpecApprovalBaseline } from './spec-approval.js';
+
+/** Establish cold local authority inside the checkout lease; linked and recovered moves keep relay authority. */
+export function ensureSpecApprovalCoordinator(ctx, board, baseline) {
+  if (!baseline || !ctx.info.isMain || relayLinked(ctx.info.root) || relayRecovered(ctx.info.root)) return;
+  ensureCoordinator(board, ctx.info.root);
+}
 
 /** Reuse the exact interrupted setup payload; only a main-checkout command can establish it. */
 export function initialSpecApprovalBaseline(ctx, board, operation) {
