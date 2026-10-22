@@ -42,12 +42,12 @@ test('init writes config, spec, agent docs and hooks once, and never clobbers [I
   box.git(repo, 'init', '-q', '-b', 'main');
   writeFileSync(join(repo, 'AGENTS.md'), '# Mine\n\nkeep me\n');
   writeFileSync(join(repo, 'package.json'), JSON.stringify({ scripts: { test: 'node --test' } }));
-  const first = box.run(repo, 'init');
+  const first = box.run(repo, 'init', '--verbose');
   assert.equal(first.code, 0);
   assert.match(first.out, /added the pullboard section to AGENTS.md/);
   assert.equal(JSON.parse(readFileSync(join(repo, 'pullboard.json'), 'utf8')).gate, 'npm test');
   writeFileSync(join(repo, 'pullboard.json'), JSON.stringify({ ...CONFIG, gate: 'mine' }));
-  const second = box.run(repo, 'init');
+  const second = box.run(repo, 'init', '--verbose');
   assert.match(second.out, /kept pullboard.json/);
   assert.doesNotMatch(second.out, /no gate yet/, 'the config already names a gate');
   assert.equal(JSON.parse(readFileSync(join(repo, 'pullboard.json'), 'utf8')).gate, 'mine');
@@ -119,7 +119,7 @@ test("the coordinator's resume names its next step from the spec and the board, 
   const repo = join(fresh.dir, 'fresh');
   mkdirSync(repo);
   fresh.git(repo, 'init', '-q', '-b', 'main');
-  const initialized = fresh.run(repo, 'init');
+  const initialized = fresh.run(repo, 'init', '--verbose');
   assert.match(initialized.out, /^Next: ask your agent to set up Pullboard here; in Claude Code, start a new session first so it loads the Pullboard skills\.$/m, 'init gives one setup instruction and preserves Claude Code skill loading');
   const firstSetup = JSON.parse(fresh.run(repo, 'resume', '--json').out).setup;
   assert.equal(firstSetup?.step, 1, 'a new board starts by asking what the person wants');
