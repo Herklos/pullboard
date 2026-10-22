@@ -1299,11 +1299,14 @@ test('[O3] declared families travel from join through submit and verdict, and ab
   assert.equal(store.agentAt(persistent, noFamilyRoot).agent_model, 'Test Model');
   const apiState = projectState(repo);
   assert.equal(apiState.agents.find((agent) => agent.agent_id === 'web-1').agent_model, 'Test Model');
-  store.register(persistent, { lane: 'coordinator', path: repo });
+  // CLI seats use Git's physical root even when the fixture directory names a /tmp alias.
+  const coordinatorRoot = git(repo, 'rev-parse', '--show-toplevel');
+  assert.equal(store.agentAt(persistent, coordinatorRoot).agent_id, 'coordinator');
+  store.register(persistent, { lane: 'coordinator', path: coordinatorRoot });
   const stateWithCoordinator = projectState(repo);
   assert.equal(stateWithCoordinator.agents.find((agent) => agent.agent_id === 'coordinator').agent_model, null);
-  assert.equal(store.agentAt(persistent, repo).agent_family, null, 'the core supplies no family for itself');
-  store.register(persistent, { lane: 'coordinator', path: repo, family: 'Family Coordinator' });
+  assert.equal(store.agentAt(persistent, coordinatorRoot).agent_family, null, 'the core supplies no family for itself');
+  store.register(persistent, { lane: 'coordinator', path: coordinatorRoot, family: 'Family Coordinator' });
   const coordinatorResume = await runMain(repo, ['resume']);
   assert.match(coordinatorResume.stdout, /resume: coordinator \(unknown\) \[family Family Coordinator\], coordinator lane/);
   const coordinatorJson = await runMain(repo, ['resume', '--json']);
