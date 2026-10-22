@@ -88,6 +88,7 @@ import {
   unseal,
 } from './seal.js';
 import { terminalQr } from './qr.js';
+import { environmentLink } from './relay-environment.js';
 import { locked } from './relay-lock.js';
 import {
   decideUncertainBaseline,
@@ -964,14 +965,14 @@ async function ensureOrdered(root, file, state, io) {
 }
 
 /** Restore a compacted, authenticated native prefix before receiving any following operations. */
-async function restoreCheckpoint(root, state, io, key) {
+export async function restoreCheckpoint(root, state, io, key, restore = restoreRelaySnapshot) {
   const document = await request(state, '/api/v1/boards/' + state.board + '/state', {}, io);
   const snapshot = document.state;
   if (!snapshot || !Number.isSafeInteger(snapshot.sequence) || snapshot.sequence < 0) throw new Refused('RELAY_RESPONSE', 'the relay snapshot has no valid coverage sequence; fetch it again');
   const senderProblem = relaySenderProblem(null, snapshot.sender, 'snapshot');
   if (senderProblem) throw senderProblem;
   const native = await decoded(key, snapshot, state, 'snapshot', snapshot.sequence);
-  localRecords(root, (board) => restoreRelaySnapshot(board, native, snapshot.sequence));
+  localRecords(root, (board) => restore(board, native, snapshot.sequence));
 }
 
 /**
@@ -1259,11 +1260,11 @@ export async function relayOperation(root, operation, args, io, command, applyLo
 /** Catch up an opted-in replica before/after a CLI command; offline reads retain local evidence. */
 export async function syncRelay(root, io) {
   // Reuse Git discovery only within this command; still re-read the link before each retry.
-  let files = LINK_FILES.get(io);
-  if (!files) { files = new Map(); LINK_FILES.set(io, files); }
+  const files = LINK_FILES.get(io) ?? LINK_FILES.set(io, new Map()).get(io);
   const file = files.get(root) ?? linkFile(root);
   files.set(root, file);
-  if (!existsSync(file)) return null;
+  // A CI or cloud session with an agent token and a board key in its environment links itself once [E18].
+  if (!existsSync(file) && !await environmentLink(root, file, io)) return null;
   return locked(file, async () => {
     const state = loadLink(file);
     if (!state) return null;

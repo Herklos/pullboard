@@ -10,6 +10,13 @@ import { after, test } from 'node:test';
 import * as store from '../src/board.js';
 import { exportBoard, importBoard } from '../src/exchange.js';
 import { applyEngineMove, prepareEngineMove } from '../src/engine.js';
+import { readdirSync } from 'node:fs';
+import { lstatSync } from 'node:fs';
+import { renameSync } from 'node:fs';
+import { symlinkSync } from 'node:fs';
+import { relayClientFixture as sessionRelay } from './relay-client-fixture.js';
+import { relayFixtureChild as sessionChild } from './relay-client-fixture.js';
+import { runFixtureGit as sessionGit } from './fixture-child.js';
 import { createE2eHelpers } from './e2e-helpers.js';
 import { serveApi } from '../src/api.js';
 import { main } from '../src/cli.js';
@@ -467,3 +474,88 @@ test('an older pushed landing shows stale checked proof and a correction path ac
       'a later correction containing the checked composition clears the derived warning without rewriting the old landing');
     assert.equal(withBoard(box.repo, board => store.getItem(board, 1)).item_merged_commit, submitted);
   });
+
+
+/** Every file under a directory, so a test can prove no secret was written anywhere in it. */
+function filesUnder(directory) {
+  if (!existsSync(directory)) return [];
+  return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => entry.isDirectory() ? filesUnder(join(directory, entry.name)) : [join(directory, entry.name)]);
+}
+
+test('every session reads and moves: terminal, SSH, agent, job or CI [E9,E18]', { timeout: 240_000 }, async (t) => { // budget: hang ceiling for real CLI runs on three homes and a loopback relay; not a speed target.
+  const box = await sessionRelay(t);
+  const cli = join(import.meta.dirname, '..', 'bin', 'pullboard.js');
+
+  // S6d: on a machine with a keychain, relay on keeps the key in the owner-only file every session can read.
+  const keychainBin = join(box.root, '..', 'keychain-bin');
+  mkdirSync(keychainBin, { mode: 0o700 });
+  for (const name of readdirSync(box.env.PATH)) symlinkSync(join(box.env.PATH, name), join(keychainBin, name));
+  const keychainLog = join(box.root, '..', 'keychain-calls.log');
+  for (const name of ['security', 'secret-tool']) {
+    writeFileSync(join(keychainBin, name), `#!/bin/sh\necho "$1" >> ${JSON.stringify(keychainLog)}\n[ "$1" = search ] && exit 1\nexit 0\n`, { mode: 0o755 });
+  }
+  const plainPath = box.env.PATH;
+  box.env.PATH = keychainBin;
+  assert.equal((await box.link()).code, 0, 'relay on links the board on a machine with a keychain');
+  box.env.PATH = plainPath;
+  const keys = join(box.env.PULLBOARD_HOME, 'relay-keys');
+  assert.deepEqual(readdirSync(keys).filter((name) => name.endsWith('.key')).length, 1, 'the key sits in one owner-only file');
+  assert.equal(statSyncMode(box.keyFile), 0o600, 'the key file is owner-only');
+  const writes = existsSync(keychainLog) ? readFileSync(keychainLog, 'utf8').split('\n').filter((call) => ['add-generic-password', 'store'].includes(call)) : [];
+  assert.deepEqual(writes, [], 'relay on never writes the key to the keychain');
+
+  // S6b: a session that cannot read the key (SSH, a scheduled job, a locked keychain) still reads the whole board.
+  assert.equal((await box.cli('add', box.lane, 'Read from any session')).code, 0);
+  renameSync(keys, keys + '.parked');
+  try {
+    for (const command of [['list'], ['show', '1'], ['inbox'], ['whoami'], ['status'], ['resume'], ['log']]) {
+      const read = await box.cli(...command);
+      assert.equal(read.code, 0, `${command[0]} reads without the key: ${JSON.stringify(read.document?.error ?? null)}`);
+    }
+    const move = await box.cli('add', box.lane, 'Needs the key');
+    assert.equal(move.document?.error?.code, 'RELAY_KEY_MISSING', 'a move without the key is refused, never sent or lost');
+  } finally { renameSync(keys + '.parked', keys); }
+
+  // S6c: a CI or cloud session, with an agent token and the board key in its environment and no key file, reads and moves.
+  // The project's committed setup is what every checkout, CI's included, gets.
+  sessionGit(['add', '-A'], { cwd: box.root, env: box.env });
+  sessionGit(['-c', 'core.hooksPath=/dev/null', 'commit', '-q', '-m', 'chore: set up pullboard'], { cwd: box.root, env: box.env });
+  const seatRoot = join(box.root, '..', 'ci-seat');
+  sessionGit(['worktree', 'add', '-q', '-b', 'ci-seat', seatRoot], { cwd: box.root, env: box.env });
+  const joined = await box.cliAt(seatRoot, 'join', box.lane, '--model', 'fixture-model');
+  assert.equal(joined.code, 0, `the person gives CI its own seat: ${JSON.stringify(joined.document?.error ?? null)}`);
+  const seat = (await box.cliAt(seatRoot, 'whoami')).document;
+  assert.equal((await box.cliAt(seatRoot, 'shout', 'coordinator', 'the CI seat is ready')).code, 0, 'the seat moves once, which mints its token');
+  const link = JSON.parse(readFileSync(box.linkFile, 'utf8'));
+  const token = link.agentTokens?.[seat.id]?.token;
+  assert.match(token ?? '', /^pa_/u, 'the seat holds its own agent token');
+  const ciRoot = join(box.root, '..', 'ci-clone');
+  sessionGit(['clone', '-q', box.root, ciRoot], { cwd: box.root, env: box.env });
+  sessionGit(['remote', 'set-url', 'origin', 'git@github.com:fixture/repository.git'], { cwd: ciRoot, env: box.env });
+  const ciHome = join(box.root, '..', 'ci-home');
+  mkdirSync(ciHome, { mode: 0o700 });
+  const key = readFileSync(box.keyFile, 'utf8').trim();
+  const ciEnv = { ...box.env, HOME: ciHome, PULLBOARD_HOME: join(ciHome, '.pullboard'), PULLBOARD_MACHINE_HOME: join(ciHome, 'machine'),
+    PULLBOARD_RELAY_TOKEN: token, PULLBOARD_RELAY_KEY: key, PULLBOARD_RELAY_URL: box.origin };
+  const ci = (...args) => sessionChild(ciRoot, ciEnv, [cli, ...args, '--json']);
+  const status = await ci('status');
+  assert.equal(status.code, 0, 'CI reads the board');
+  const listed = await ci('list', '--all');
+  assert.ok(listed.document.items.some((item) => (item.title ?? item.item_title) === 'Read from any session'),
+    `CI reads the board’s items: ${JSON.stringify(listed.document.items?.map((item) => item.title ?? item.item_title))} ${JSON.stringify(status.document).replaceAll(token, '<token>').replaceAll(key, '<key>').slice(0, 900)}`);
+  const added = await ci('add', box.lane, 'Added from CI');
+  assert.equal(added.code, 0, `CI moves on the board: ${JSON.stringify(added.document?.error ?? null)}`);
+  assert.equal((await box.cli('status')).code, 0);
+  const items = (await box.cli('export')).document.tables.item;
+  assert.ok(items.some((item) => item.item_title === 'Added from CI'), 'the CI move reaches the person’s board');
+  assert.equal(filesUnder(join(ciEnv.PULLBOARD_HOME, 'relay-keys')).length, 0, 'CI keeps no key file');
+  const written = [...filesUnder(join(ciRoot, '.git', 'pullboard')), ...filesUnder(ciHome)].map((file) => readFileSync(file)).map((bytes) => bytes.toString('latin1'));
+  assert.equal(written.some((text) => text.includes(token) || text.includes(key)), false, 'neither the token nor the key is written to disk');
+  for (const output of [status, listed, added]) {
+    const shown = JSON.stringify(output.document) + (output.failure ?? '');
+    assert.equal(shown.includes(token) || shown.includes(key), false, 'no output repeats a secret');
+  }
+});
+
+/** A file's permission bits. */
+function statSyncMode(file) { return lstatSync(file).mode & 0o777; }

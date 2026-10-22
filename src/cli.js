@@ -38,6 +38,7 @@ import {
   refuseNextIdle,
 } from './next-steps.js';
 import { reviewerStartup } from './next-steps.js';
+import { environmentAgent } from './relay-environment.js';
 import { judgeTrunkMove } from './verdict-trunk.js';
 import * as gateReceipt from './gate-receipt.js';
 import * as itemSessions from './item-sessions.js';
@@ -361,7 +362,6 @@ import {
   unlinkedRelayProjects,
 } from './relay-setup.js';
 import { executePersonRequests } from './relay-request-execution.js';
-import { engineReceipt } from './engine.js';
 import {
   accountedFailures,
   landingRemote,
@@ -1030,6 +1030,9 @@ export function refuseRemoteCoordinatorModel(ctx, command) {
  * @returns {{ id: string, lane: string, route?: string, family: string | null, model: string | null, displayName: string }}
  */
 export function whoAmI(ctx, board) {
+  // A CI or cloud session works as the agent its environment token names, on that one board [E18].
+  const seat = environmentAgent(ctx.info.root, board);
+  if (seat) return { id: seat.agent_id, lane: seat.agent_lane, route: seat.agent_route, family: seat.agent_family ?? null, model: seat.agent_model ?? 'unknown', displayName: displayAgentName(seat, ctx.config.agents.names) };
   if (ctx.info.isMain) {
     ctx.io.caller?.('coordinator', ctx.info.root);
     const registered = store.listAgents(board).find((agent) => agent.agent_id === COORDINATOR);
@@ -1340,12 +1343,6 @@ export function refuseUnverifiedStack(root, board, item, commit, trunk) {
       `#${item.item_id} includes unverified item #${stacked.item_id} at ${stacked.item_commit}; wait for #${stacked.item_id} to be accepted or rebuild without its commits before continuing`,
     );
   }
-}
-
-/** Return the durable outcome only when a recovered move exactly matches its original receipt. */
-export function recordedRecovery(board, move) {
-  const receipt = engineReceipt(board, move.id);
-  return receipt?.move === JSON.stringify(move) ? receipt : null;
 }
 
 /**
