@@ -561,7 +561,12 @@ test('the board knows its people: events name them, approvers decide [E3,E4,E20]
   const bobOn = await relayFixtureChild(bobRoot, bobEnv, [CLI, 'relay', 'on', '--url', box.origin, '--json']);
   box.providerState.signer = 'alice';
   assert.equal(bobOn.code, 0, `bob signs in as himself on his own computer: ${bobOn.stderr}`);
-  assert.equal((await relayFixtureChild(bobRoot, bobEnv, [CLI, 'add', box.lane, 'An item bob adds', '--json'])).code, 0, 'bob adds an item');
+  // One coordinator per board [E19]: bob's main checkout takes the coordinator to act, then alice takes it back.
+  const bobTakes = await relayFixtureChild(bobRoot, bobEnv, [CLI, 'takeover', '--json']);
+  assert.equal(bobTakes.code, 0, `bob's main checkout takes the coordinator: ${JSON.stringify(bobTakes.document?.error ?? null)}`);
+  const bobAdd = await relayFixtureChild(bobRoot, bobEnv, [CLI, 'add', box.lane, 'An item bob adds', '--json']);
+  assert.equal(bobAdd.code, 0, `bob adds an item: ${JSON.stringify(bobAdd.document?.error ?? null)}`);
+  assert.equal((await box.cli('takeover')).code, 0, 'alice’s main checkout takes the coordinator back');
   const exported = (await box.cli('export')).document.tables;
   const events = exported.event;
   const madeBy = (title) => {
