@@ -45,6 +45,7 @@ Pullboard now turns a failure that keeps coming back into a rule with its proof.
 - `pullboard next` never tells a seat it holds another seat's claim, and the MCP `board_status` tool answers on a board with held items. (#958, #974)
 - `pullboard next --verify` no longer reserves a review for a seat of the session that built the item. (#973)
 - A hung network mount no longer stalls Pullboard. (#912)
+- A registered runner's round trip no longer times out under load: each runner call makes 5 git calls instead of about 700, and its timing guards charge each phase only its own time. (#972)
 - The tour leaves no demo project behind, links nothing to the relay, and finishes when an agent runs it. (#951, #952)
 - `pullboard land` works in a repo with no remote, and `pullboard status` no longer opens with a refusal there. (#963)
 - `pullboard init` now prints a short summary and one next step; the details are behind `--verbose`. (#964)
