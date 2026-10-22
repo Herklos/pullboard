@@ -134,6 +134,7 @@ At the start of every coordinator cycle, check the flow from the `flow:` line in
 ## Commands by coordination task
 
 - When registering the main checkout as coordinator, run `pullboard join coordinator --model <name>`; when joining a lane, run `pullboard join <lane> --model <name>`. After the same agent starts a new session, run `pullboard takeover`; confirm the active identity with `pullboard whoami`.
+- When you need to see who works for whom, run `pullboard agents`: each agent with its seats and the helpers it opened, and what each holds.
 - When you need current syntax, run `pullboard help` or `pullboard help <command>`; check the installed release with `pullboard version`. Use `pullboard tour` to walk a person through the scripted example in a throwaway repo.
 - When checking machine gate capacity, run `pullboard resources`; change the configured slot count with `pullboard settings gateSlots <n>`, `pullboard settings browserSlots <n>` or `pullboard settings gate.shortSlots <n>` only when the team has agreed to that machine-wide setting.
 - When an item needs its frozen check, run `pullboard check <id>`; use `pullboard claim <id>` to take or renew a specific lease and `pullboard release <id>` when you cannot continue. `pullboard done <id>` is the submit alias.
