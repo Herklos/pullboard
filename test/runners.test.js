@@ -20,6 +20,7 @@ import { createE2eHelpers } from './e2e-helpers.js';
 import { refuseSandboxBlocked } from '../src/gate.js';
 import { SECRET, HOST, shellQuote, installSshStandIn } from './runner-ssh-fixture.js';
 import { sourceSetupFailureFixture } from './runner-source-setup-fixture.js';
+import { runnerSourceRefusalCases } from './runner-source-refusal-fixture.js';
 
 /** Per-phase deadlines for one runner round trip; together they stay near the 60-second hang ceiling. */
 const ROUND_TRIP_DEADLINES = { dispatch: 20_000, 'remote run': 30_000, 'result return': 10_000 }; // budget: a stuck runner fails by name in about a minute, far under the 660-second per-test limit.
@@ -92,11 +93,13 @@ function writeProbe(repo, { remoteStateRoot, remoteMachineHome, sourceHome, sour
   historyBaseCommit, annotatedTagObject, lightweightTagObject }) {
   const probe = `import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { isAbsolute, join, relative, sep } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 test('runner executed the committed source in its private checkout', () => {
+  assert.equal(readFileSync('empty.bin').length, 0, 'an empty blob preserves the next object boundary');
+  assert.deepEqual(readFileSync('binary.bin'), Buffer.from([0, 10, 255, 13, 0, 128]), 'binary framing preserves exact bytes');
   const commit = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
   const tree = execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { encoding: 'utf8' }).trim();
   const shallow = execFileSync('git', ['rev-parse', '--is-shallow-repository'], { encoding: 'utf8' }).trim();
@@ -593,6 +596,8 @@ test('a private check never refuses its own remote lease [C7,V4]', async (t) => 
   }
 });
 
+test('current source refuses private, oversized and unsupported blobs before SSH [C7,S1]', runnerSourceRefusalCases);
+
 test('a queued run executes on a registered runner and its result comes back [C7]', async (t) => {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'pullboard-runner-')));
   TEMP.push(dir);
@@ -631,9 +636,11 @@ test('a queued run executes on a registered runner and its result comes back [C7
   assert.equal(initialized.status, 0, initialized.context);
   writeFileSync(join(repo, 'pullboard.json'), JSON.stringify({ gate: 'true' }));
   writeFileSync(join(repo, 'tracked.txt'), 'committed runner source\n');
+  writeFileSync(join(repo, 'empty.bin'), Buffer.alloc(0));
+  writeFileSync(join(repo, 'binary.bin'), Buffer.from([0, 10, 255, 13, 0, 128]));
   writeFileSync(join(repo, 'history-original.txt'), 'committed history witness\n');
   writeFileSync(join(repo, '.gitignore'), '.env\n');
-  git(repo, env, 'add', '.gitignore', 'pullboard.json', 'tracked.txt', 'history-original.txt');
+  git(repo, env, 'add', '.gitignore', 'pullboard.json', 'tracked.txt', 'history-original.txt', 'empty.bin', 'binary.bin');
   git(repo, env, 'commit', '-q', '-m', 'test: prepare registered runner fixture');
   const historyBaseCommit = git(repo, env, 'rev-parse', 'HEAD');
   git(repo, env, 'tag', '-a', 'runner-release', '-m', 'runner release annotation witness', historyBaseCommit);
