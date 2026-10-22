@@ -60,6 +60,7 @@ import {
   carriesFlakeDiagnostics,
 } from './flake-engine.js';
 import { LOCAL_LANDING_ENGINE } from './land-engine.js';
+import { REVIEW_SKIP_ENGINE } from './review-skip-engine.js';
 
 const ITEM_ID_FIRST_ARGUMENT = new Set(['acceptCheck', 'editItem', 'escalate', 'recordAttempt', 'claim', 'release', 'submit', 'reserveReview', 'verify', 'merged', 'withdraw', 'refreeze', 'reopen', 'appendFact']);
 
@@ -92,6 +93,7 @@ function minimumOperationEngine(operation, args, board, at) {
   if (['declareJob', 'recordJobRun'].includes(operation)) return RECURRING_JOB_ENGINE;
   if (operation === 'recordGateRun') return GATE_RUN_ENGINE;
   if (operation === 'recordHealthFindings') return HEALTH_SENTINEL_ENGINE;
+  if (operation === 'reserveNextReview' && Array.isArray(args[0]?.skipIds) && args[0].skipIds.length) return REVIEW_SKIP_ENGINE;
   const options = args[1];
   if (carriesConflict(operation, args)) return board && store.itemById(board, args[0])?.item_status === 'submitted' ? SUBMITTED_CONFLICT_ENGINE : CONFLICT_ENGINE;
   if (operation === 'submit' && options?.submissionProof !== undefined

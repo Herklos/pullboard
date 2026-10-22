@@ -1513,12 +1513,12 @@ export function reserveReview(board, id, who) {
  * transaction, so no other verifier can take it between the look and the reservation.
  *
  * @param {any} board
- * @param {{ agentId: string, lane: string, leaseMs: number, policy: string, familyPolicy?: string, runnable?: boolean, routes?: string[] }} who
+ * @param {{ agentId: string, lane: string, leaseMs: number, policy: string, familyPolicy?: string, runnable?: boolean, routes?: string[], skipIds?: number[] }} who - skipIds: items the caller's own session built, never offered (verify refuses them too)
  * @returns {{ item: any | null, reasons: string[] }}
  */
-export function reserveNextReview(board, { agentId, lane, leaseMs, policy, familyPolicy = 'off', runnable, routes }) {
+export function reserveNextReview(board, { agentId, lane, leaseMs, policy, familyPolicy = 'off', runnable, routes, skipIds = [] }) {
   return atomic(board, () => {
-    const { item, reasons } = nextFor(board, { agentId, lane, verify: true, familyPolicy, runnable, routes });
+    const { item, reasons } = nextFor(board, { agentId, lane, verify: true, familyPolicy, runnable, routes, skipIds });
     return item ? { item: reserveWithin(board, item.item_id, { agentId, leaseMs, policy, familyPolicy }), reasons: [] } : { item: null, reasons };
   });
 }
@@ -2299,13 +2299,13 @@ export function buildOrder(board, { warm = [] } = {}) {
  * With `runnable`, only items that carry a check command, which an unattended runner needs; with
  * `routes`, only items on those routes, the ones a runner has an agent command for. With `warm`, the
  * files the agent worked in lately, an item that shares more of them comes first within its tier,
- * and `shared` names them (N20). A held lane offers nothing new (N22).
+ * and `shared` names them (N20). A held lane offers nothing new (N22). A verifier is never offered `skipIds` (#973; engine 69, so older replays carry none).
  *
  * @param {any} board
- * @param {{ agentId: string, lane: string, verify?: boolean, policy?: string, familyPolicy?: string, runnable?: boolean, routes?: string[], warm?: string[], priority?: number[], lanes?: string[] }} who
+ * @param {{ agentId: string, lane: string, verify?: boolean, policy?: string, familyPolicy?: string, runnable?: boolean, routes?: string[], warm?: string[], priority?: number[], lanes?: string[], skipIds?: number[] }} who
  * @returns {{ item: any | null, reasons: string[], shared?: string[] }}
  */
-export function nextFor(board, { agentId, lane, verify = false, policy = 'any', familyPolicy = 'off', runnable = false, routes = ROUTES, warm = [], priority = [], lanes }) {
+export function nextFor(board, { agentId, lane, verify = false, policy = 'any', familyPolicy = 'off', runnable = false, routes = ROUTES, warm = [], priority = [], lanes, skipIds = [] }) {
   const route = routeOf(board, agentId);
   const tier = (entry) => ROUTES.indexOf(entry.item_route);
   const allItems = listItems(board).reverse();
@@ -2317,7 +2317,7 @@ export function nextFor(board, { agentId, lane, verify = false, policy = 'any', 
   if (verify) {
     const family = board.db.prepare('SELECT agent_family FROM agent WHERE agent_id = ?').get(agentId)?.agent_family ?? null;
     const hasDifferentFamily = (entry) => Boolean(family && entry.item_builder_family && family !== entry.item_builder_family);
-    const unrelated = items.filter((entry) => entry.item_status === 'submitted' && entry.item_built_by !== agentId);
+    const unrelated = items.filter((entry) => entry.item_status === 'submitted' && entry.item_built_by !== agentId && !skipIds.includes(entry.item_id));
     const standingRefusal = unrelated.map((entry) => standingProblem(board, agentId, entry.item_built_by, entry.item_id)).find(Boolean);
     let reviewable = unrelated.filter((entry) => !standingProblem(board, agentId, entry.item_built_by, entry.item_id));
     if (policy === COORDINATOR && agentId !== COORDINATOR) reviewable = reviewable.filter((entry) => entry.item_lane === COORDINATOR);
