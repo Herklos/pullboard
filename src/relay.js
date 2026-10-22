@@ -62,6 +62,7 @@ import {
   seatReceipt,
   withSeatName,
 } from './relay-seats.js';
+import { syncApprovers } from './relay-approvers.js';
 import {
   ENGINE_VERSION,
   VERIFIER_STANDING_ENGINE,
@@ -855,12 +856,11 @@ async function replayRelayRecord(board, key, state, record) {
     if (record.kind === 'request') return receivePersonRequest(board, move, { sequence: record.event_id, at: record.event_at, sender: record.sender });
     return applyRelayMove(board, move, { sequence: record.event_id, at: record.event_at, sender: record.sender, kind: record.kind,
       digest: createHash('sha256').update(record.sealed).digest('hex'), registration: record.registration });
-  } catch (error) {
-    if (!(error instanceof Refused) || !['RELAY_MOVE', 'RELAY_RESPONSE', 'SEAL_FORMAT', 'SEAL_AUTH_FAILED'].includes(error.code)) throw error;
-    return refuseRelayMove(board, move, { sequence: record.event_id, at: record.event_at, sender: record.sender, kind: record.kind,
-      code: error.code === 'SEAL_AUTH_FAILED' ? 'RELAY_SEAL' : error.code,
+  } catch (error) { // A seal no key opens, from an engine no newer than this one, is junk: set aside, never a stop [E20].
+    if (!(error instanceof Refused) || !(['RELAY_MOVE', 'RELAY_RESPONSE', 'SEAL_FORMAT', 'SEAL_AUTH_FAILED'].includes(error.code) || error.code === 'SEAL_VERSION' && record.sender?.engine <= ENGINE_VERSION)) throw error;
+    return refuseRelayMove(board, move, { sequence: record.event_id, at: record.event_at, sender: record.sender, kind: record.kind, code: ['SEAL_AUTH_FAILED', 'SEAL_VERSION'].includes(error.code) ? 'RELAY_SEAL' : error.code,
       digest: createHash('sha256').update(String(record.sealed)).digest('hex'),
-      refusal: error.code === 'SEAL_AUTH_FAILED'
+      refusal: ['SEAL_AUTH_FAILED', 'SEAL_VERSION'].includes(error.code)
         ? new Refused('RELAY_SEAL', 'this relay record failed authentication and was logged as refused; run pullboard relay to continue with the next ordered record')
         : error });
   }
@@ -1649,7 +1649,7 @@ export async function relayOn(root, address, io, { session, credential, quiet = 
     delete state.personReauth;
     saveLink(file, state);
     // The person's own sign-in sets up the coordinator's token, so no agent can mint it (#579).
-    if (/^ps_[A-Za-z0-9_-]{43}$/u.test(signed.token ?? '')) await ensurePersonCoordinator(file, state, signed.token, io);
+    if (/^ps_[A-Za-z0-9_-]{43}$/u.test(signed.token ?? '')) { await ensurePersonCoordinator(file, state, signed.token, io); await syncApprovers(root, state, signed.token, io); }
     let result;
     try {
       let ready = true;

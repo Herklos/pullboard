@@ -4,6 +4,9 @@ import assert from 'node:assert/strict';
 import childProcess from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
 import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { cpSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { after, test } from 'node:test';
@@ -19,9 +22,15 @@ import { snapshotState } from '../relay/browser-model.js';
 import { unpackRelease } from './release-archive.js';
 import { relayClientFixture } from './relay-client-fixture.js';
 import { relayFixtureChild } from './relay-client-fixture.js';
+import { runFixtureGit } from './fixture-child.js';
+import { decodeBoardKey } from '../src/seal.js';
+import { seal } from '../src/seal.js';
+import { ENGINE_VERSION as PEOPLE_VERSION } from '../src/machine.js';
 import { resolve } from 'node:path';
 import { relayWorkBudgetMs } from './relay-budget.js';
 import { hostname } from 'node:os';
+
+const CLI = join(import.meta.dirname, '..', 'bin', 'pullboard.js');
 
 const helpers = createE2eHelpers();
 after(helpers.cleanup);
@@ -472,6 +481,168 @@ test('an older pushed landing shows stale checked proof and a correction path ac
       'a later correction containing the checked composition clears the derived warning without rewriting the old landing');
     assert.equal(withBoard(box.repo, board => store.getItem(board, 1)).item_merged_commit, submitted);
   });
+
+/** A person's own session, through the stand-in GitHub's real OAuth, signed in as `login`. */
+async function personSession(box, login) {
+  box.providerState.signer = login;
+  try {
+    const start = await fetch(box.origin + '/auth/github/start', { redirect: 'manual' });
+    const binding = start.headers.getSetCookie().find((value) => value.startsWith('pb_oauth_binding=')).split(';')[0];
+    const approved = await fetch(start.headers.get('location'), { redirect: 'manual' });
+    const callback = await fetch(approved.headers.get('location'), { redirect: 'manual', headers: { cookie: binding } });
+    assert.equal(callback.status, 303, `${login} signs in`);
+    return callback.headers.getSetCookie().find((value) => value.startsWith('pb_session=')).split(';')[0].slice('pb_session='.length);
+  } finally { box.providerState.signer = 'alice'; }
+}
+
+/** Call the relay as one credential, returning the status and document. */
+async function relayCall(box, token, method, path, body) {
+  const response = await fetch(box.origin + path, { method, headers: { authorization: 'Bearer ' + token, 'x-pullboard-engine': String(PEOPLE_VERSION),
+    ...(body ? { 'content-type': 'application/json' } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}) });
+  let document = null;
+  try { document = await response.json(); } catch { /* An empty answer stays null. */ }
+  return { status: response.status, document };
+}
+
+/** Seal one phone request the way the paired view does and send it with this person's session. */
+async function phoneRequest(box, session, move) {
+  const link = JSON.parse(readFileSync(box.linkFile, 'utf8'));
+  const head = await relayCall(box, session, 'GET', '/api/v2/boards/' + link.board + '/state');
+  assert.equal(head.status, 200, `this person reads the board: ${JSON.stringify(head.document)}`);
+  const events = await relayCall(box, session, 'GET', `/api/v1/boards/${link.board}/events?after=${head.document.state.sequence}`);
+  const sequence = Math.max(head.document.state.sequence, ...(events.document.events ?? []).map((event) => event.event_id)) + 1;
+  const document = { version: 1, type: 'person-request', id: randomUUID(), move };
+  const key = decodeBoardKey(readFileSync(box.keyFile, 'utf8').trim());
+  const sealed = Buffer.from(await seal(key, new TextEncoder().encode(JSON.stringify(document)), { boardId: link.board, kind: 'request', sequence })).toString('base64url');
+  const sent = await relayCall(box, session, 'POST', `/api/v1/boards/${link.board}/requests`, { sequence, sealed });
+  assert.equal(sent.status, 200, `the relay stores the sealed request: ${JSON.stringify(sent.document)}`);
+  return document.id;
+}
+
+/** The phone requests this board has received, by id. */
+async function receivedRequests(box) {
+  assert.equal((await box.cli('status')).code, 0, 'the coordinator reads the relay');
+  const meta = (await box.cli('export')).document.tables.board_meta.find((row) => row.meta_key === 'relay_person_requests');
+  return Object.fromEntries((meta ? JSON.parse(meta.meta_value) : []).map((record) => [record.id, record]));
+}
+
+/** Two people with write access to the fixture repository, alice and bob, and alice's linked board. */
+async function teamBoard(t, approvers) {
+  const box = await relayClientFixture(t);
+  Object.assign(box.providerState, { people: { alice: { id: 7, permission: 'write' }, bob: { id: 8, permission: 'write' } }, signer: 'alice' });
+  if (approvers) {
+    const file = join(box.root, 'pullboard.json');
+    writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, 'utf8')), approvers }, null, 2) + '\n');
+    runFixtureGit(['add', 'pullboard.json'], { cwd: box.root, env: box.env });
+    runFixtureGit(['-c', 'core.hooksPath=/dev/null', 'commit', '-q', '-m', 'chore: name the approvers'], { cwd: box.root, env: box.env });
+  }
+  assert.equal((await box.link()).code, 0, 'alice links the board, signed in as herself');
+  return box;
+}
+
+test('the board knows its people: events name them, approvers decide [E3,E4,E20]', { timeout: 180_000 }, async (t) => { // budget: hang ceiling for two people's real CLI runs and relay calls; not a speed target.
+  const box = await teamBoard(t, ['alice']);
+  const link = JSON.parse(readFileSync(box.linkFile, 'utf8'));
+  const alice = await personSession(box, 'alice');
+  const bob = await personSession(box, 'bob');
+  assert.deepEqual((await relayCall(box, alice, 'GET', `/api/v1/boards/${link.board}/approvers`)).document.approvers, ['alice'], 'relay on gave the relay the approvers pullboard.json names');
+
+  // S4c: every move records the person who made it, and the agent if one did.
+  assert.equal((await box.cli('add', box.lane, 'An item alice adds')).code, 0);
+  const bobRoot = join(box.root, '..', 'bob-clone');
+  runFixtureGit(['clone', '-q', box.root, bobRoot], { cwd: box.root, env: box.env });
+  runFixtureGit(['remote', 'set-url', 'origin', 'git@github.com:fixture/repository.git'], { cwd: bobRoot, env: box.env });
+  const bobHome = join(box.root, '..', 'bob-home');
+  const bobEnv = { ...box.env, HOME: bobHome, PULLBOARD_HOME: join(bobHome, '.pullboard'), PULLBOARD_MACHINE_HOME: join(bobHome, 'machine') };
+  cpSync(join(box.root, '.git', 'pullboard'), join(bobRoot, '.git', 'pullboard'), { recursive: true, filter: (path) => !path.endsWith('.lock') });
+  mkdirSync(join(bobEnv.PULLBOARD_HOME, 'relay-keys'), { recursive: true, mode: 0o700 });
+  cpSync(box.keyFile, join(bobEnv.PULLBOARD_HOME, 'relay-keys', link.board + '.key'));
+  box.providerState.signer = 'bob';
+  const bobOn = await relayFixtureChild(bobRoot, bobEnv, [CLI, 'relay', 'on', '--url', box.origin, '--json']);
+  box.providerState.signer = 'alice';
+  assert.equal(bobOn.code, 0, `bob signs in as himself on his own computer: ${bobOn.stderr}`);
+  // One coordinator per board [E19]: bob's main checkout takes the coordinator to act, then alice takes it back.
+  const bobTakes = await relayFixtureChild(bobRoot, bobEnv, [CLI, 'takeover', '--json']);
+  assert.equal(bobTakes.code, 0, `bob's main checkout takes the coordinator: ${JSON.stringify(bobTakes.document?.error ?? null)}`);
+  const bobAdd = await relayFixtureChild(bobRoot, bobEnv, [CLI, 'add', box.lane, 'An item bob adds', '--json']);
+  assert.equal(bobAdd.code, 0, `bob adds an item: ${JSON.stringify(bobAdd.document?.error ?? null)}`);
+  assert.equal((await box.cli('takeover')).code, 0, 'alice’s main checkout takes the coordinator back');
+  const exported = (await box.cli('export')).document.tables;
+  const events = exported.event;
+  const madeBy = (title) => {
+    const id = exported.item.find((item) => item.item_title === title)?.item_id;
+    return events.filter((event) => event.event_kind === 'add' && event.item_id === id).map((event) => JSON.parse(event.event_detail).person);
+  };
+  assert.deepEqual(madeBy('An item alice adds'), ['alice'], 'alice’s move names alice');
+  assert.deepEqual(madeBy('An item bob adds'), ['bob'], 'bob’s move names bob');
+  assert.ok(events.filter((event) => event.event_kind === 'add').every((event) => event.event_by), 'each move still names the agent or seat that made it');
+
+  // S4b: only an approver answers the person's decisions, and only an approver decides rows.
+  const asked = await box.cli('shout', 'person', 'Ship the health endpoint as plain text or JSON?', '--decision');
+  assert.equal(asked.code, 0);
+  const decision = asked.document.id ?? asked.document.shout_id ?? asked.document.result?.id;
+  const fromBob = await phoneRequest(box, bob, { verb: 'answer', item: Number(decision), args: { text: 'JSON' } });
+  const fromAlice = await phoneRequest(box, alice, { verb: 'answer', item: Number(decision), args: { text: 'JSON' } });
+  const requests = await receivedRequests(box);
+  assert.equal(requests[fromBob].status, 'refused', 'bob, a writer but not an approver, cannot answer as the person');
+  assert.equal(requests[fromBob].error.code, 'NOT_APPROVER');
+  assert.notEqual(requests[fromAlice].status, 'refused', 'alice, an approver, answers as the person');
+  const rowFromBob = await phoneRequest(box, bob, { verb: 'spec-approve', args: { ids: 'G1' } });
+  assert.equal((await receivedRequests(box))[rowFromBob].error?.code, 'NOT_APPROVER', 'bob cannot approve a row');
+
+  // E4: a change to the list takes effect only once an existing approver makes it.
+  assert.equal((await relayCall(box, bob, 'PUT', `/api/v1/boards/${link.board}/approvers`, { approvers: ['bob'] })).document.error?.code, 'NOT_APPROVER', 'bob cannot make himself an approver');
+  assert.deepEqual((await relayCall(box, bob, 'GET', `/api/v1/boards/${link.board}/approvers`)).document.approvers, ['alice']);
+
+  // S9: a move no member can open is set aside, and only an approver unlinks the board or replaces its snapshot.
+  const bobMachine = JSON.parse(readFileSync(join(bobRoot, '.git', 'pullboard', 'relay.json'), 'utf8')).token;
+  const head = await relayCall(box, alice, 'GET', '/api/v2/boards/' + link.board + '/state');
+  const after = await relayCall(box, alice, 'GET', `/api/v1/boards/${link.board}/events?after=${head.document.state.sequence}`);
+  const next = Math.max(head.document.state.sequence, ...(after.document.events ?? []).map((event) => event.event_id)) + 1;
+  const junk = await relayCall(box, bobMachine, 'POST', `/api/v1/boards/${link.board}/moves`, { sequence: next, sealed: randomBytes(64).toString('base64url') });
+  assert.equal(junk.status, 200, 'a member’s credential can store bytes no key opens');
+  const afterJunk = await box.cli('add', box.lane, 'After the junk');
+  assert.equal(afterJunk.code, 0, `replay sets the unopenable move aside and the board moves on: ${afterJunk.stderr ?? ''}${JSON.stringify(afterJunk.document ?? {}).slice(0, 600)}`);
+  assert.ok((await box.cli('export')).document.tables.event.some((event) => event.event_kind === 'relay_refused' && JSON.parse(event.event_detail).sequence === next), 'the set-aside move is on the record');
+  const deleted = await relayCall(box, bob, 'DELETE', `/api/v1/boards/${link.board}`);
+  assert.equal(deleted.document?.error?.code, 'NOT_APPROVER', 'bob cannot unlink the board');
+  const replaced = await relayCall(box, bobMachine, 'PUT', `/api/v1/boards/${link.board}/state`, { sequence: next, sealed: randomBytes(64).toString('base64url') });
+  assert.equal(replaced.document?.error?.code, 'NOT_APPROVER', 'bob’s computer cannot replace the snapshot');
+  assert.equal((await box.cli('status')).code, 0, 'alice’s board still reads');
+});
+
+test('the board knows its people: a phone move names the phone’s person, refused or not [E3,E4]', { timeout: 180_000 }, async (t) => { // budget: hang ceiling for real CLI runs and relay calls; not a speed target.
+  const box = await teamBoard(t, ['alice']);
+  const bob = await personSession(box, 'bob');
+  // Bob's phone adds an item; alice's computer carries it out, so the move is sent with alice's credential.
+  const title = 'An item from bob’s phone';
+  const added = await phoneRequest(box, bob, { verb: 'add', args: { lane: box.lane, title } });
+  const asked = await box.cli('shout', 'person', 'Plain text or JSON?', '--decision');
+  assert.equal(asked.code, 0);
+  const decision = asked.document.id ?? asked.document.shout_id ?? asked.document.result?.id;
+  const denied = await phoneRequest(box, bob, { verb: 'answer', item: Number(decision), args: { text: 'JSON' } });
+  const requests = await receivedRequests(box);
+  assert.equal(requests[added].status, 'done', 'bob’s phone adds the item');
+  assert.equal(requests[denied].error?.code, 'NOT_APPROVER', 'bob’s phone cannot answer as the person');
+  const tables = (await box.cli('export')).document.tables;
+  const id = tables.item.find((item) => item.item_title === title)?.item_id;
+  const add = tables.event.find((event) => event.event_kind === 'add' && event.item_id === id);
+  const refused = tables.event.find((event) => event.event_kind === 'relay_refused' && JSON.parse(event.event_detail).sequence === requests[denied].sequence);
+  assert.ok(add && refused, 'both are on the record');
+  assert.equal(JSON.parse(add.event_detail).person, 'bob', 'the add names bob, whose phone asked for it, not alice, whose computer carried it out');
+  assert.equal(JSON.parse(refused.event_detail).person, 'bob', 'the refused answer still names bob, who tried it');
+});
+
+test('a board that names no approvers takes person moves as before [E4]', { timeout: 120_000 }, async (t) => { // budget: hang ceiling for real CLI runs and relay calls; not a speed target.
+  const box = await teamBoard(t, null);
+  const link = JSON.parse(readFileSync(box.linkFile, 'utf8'));
+  const bob = await personSession(box, 'bob');
+  assert.equal((await relayCall(box, bob, 'GET', `/api/v1/boards/${link.board}/approvers`)).document.approvers, null, 'the relay holds no approvers for this board');
+  const asked = await box.cli('shout', 'person', 'Plain text or JSON?', '--decision');
+  const decision = asked.document.id ?? asked.document.shout_id ?? asked.document.result?.id;
+  const fromBob = await phoneRequest(box, bob, { verb: 'answer', item: Number(decision), args: { text: 'JSON' } });
+  assert.notEqual((await receivedRequests(box))[fromBob].status, 'refused', 'any writer’s session answers as the person, as today');
+});
 
 test('one coordinator per board across machines [E19]', { timeout: relayWorkBudgetMs(12) }, async t => { // budget: hang ceiling for two linked devices' real CLI and relay round trips; not a speed target.
   const box = await relayClientFixture(t);

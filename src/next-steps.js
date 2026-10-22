@@ -369,6 +369,8 @@ export const NEXT_STEPS = Object.freeze({
   NOT_HOLDING: 'name an item: pullboard check <id>, or run the project gate: pullboard gate',
   NOT_JOINED: 'join a lane from this worktree: pullboard join <lane> --model "<model name>" (see: pullboard lanes)',
   NOT_MAIN: 'run this coordinator-owned operation from the main checkout, or ask the coordinator to do it',
+  NOT_APPROVER: 'ask one of the approvers pullboard.json names to do it, signed in as themselves; to change the list, an approver commits it and runs pullboard relay on',
+  BAD_APPROVERS: 'list approvers in pullboard.json as distinct GitHub logins, at most fifty, then run pullboard relay on',
   NOT_MERGED: 'merge the item\'s commit onto the trunk, then pullboard merged <id>',
   NOT_SSH_KEY: 'add a valid OpenSSH public key: pullboard spec signers add --key ~/.ssh/id_ed25519.pub',
   NOT_SSH_KEY_PATH: 'set user.signingkey to an SSH key file: git config user.signingkey ~/.ssh/id_ed25519.pub',
