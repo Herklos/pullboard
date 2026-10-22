@@ -84,7 +84,7 @@ export function createRelayJournal({ directory, boardId, maxBytes = DEFAULT_BYTE
     db.prepare('UPDATE journal_meta SET value=? WHERE key=?').run(String(FORMAT), 'format');
     // Engine-27 attribution (#579): the relay's policy stamp, the person-set coordinator flag and a
     // seat receipt. Older records keep these empty, so they replay exactly as they did.
-    // Engine-71 people (#343): the GitHub login behind each record, and whether that person was one of the
+    // Engine-73 people (#343): the GitHub login behind each record, and whether that person was one of the
     // board's approvers when it arrived. Older records keep them empty and replay as they did.
     for (const [column, type] of [['sender_policy', 'INTEGER'], ['sender_root', 'INTEGER'], ['sender_lineage', 'TEXT'], ['registration', 'TEXT'],
       ['sender_login', 'TEXT'], ['sender_approver', 'INTEGER'], ['sender_engine', 'INTEGER']]) {

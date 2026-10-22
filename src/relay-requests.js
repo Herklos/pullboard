@@ -22,7 +22,7 @@ export function personRequestRecords(board) {
 }
 
 /**
- * The GitHub login the relay stamped on a record from engine 71 on, or null: the person who made or tried it [E3].
+ * The GitHub login the relay stamped on a record from engine 73 on, or null: the person who made or tried it [E3].
  *
  * @param {any} sender
  * @returns {string | null}
