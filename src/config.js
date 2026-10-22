@@ -53,6 +53,7 @@ export function defaults() {
     verify: { policy: 'any', family: 'off', reviewRatio: 3 },
     agents: { names: 'suffix' },
     check: { install: '', timeout: '5m' },
+    claim: { reopenFirstRefusalMinutes: 0 },
     lanes: {},
     products: {},
     shared: [],
@@ -97,9 +98,13 @@ export function durationMs(text, setting = 'lease') {
  * @returns {object}
  */
 function merge(base, raw) {
+  const spec = raw.spec && typeof raw.spec === 'object' && !Array.isArray(raw.spec) ? raw.spec : null;
+  if (spec && Object.keys(spec).some(key => !['file', 'agentApproval'].includes(key))) throw new Refused('BAD_CONFIG', '"spec" has only "file" and "agentApproval"');
   return {
     ...base,
     ...raw,
+    spec: spec ? spec.file : raw.spec === undefined ? base.spec : raw.spec,
+    specAgentApproval: spec?.agentApproval === undefined ? 'flag' : spec.agentApproval,
     commits: { ...base.commits, ...(raw.commits ?? {}) },
     protect: { ...base.protect, ...(raw.protect ?? {}) },
     verify: typeof raw.verify === 'string'
@@ -109,6 +114,10 @@ function merge(base, raw) {
       : raw.agents && typeof raw.agents === 'object' && !Array.isArray(raw.agents)
         ? { ...base.agents, ...raw.agents }
         : raw.agents,
+    claim: raw.claim === undefined ? base.claim
+      : raw.claim && typeof raw.claim === 'object' && !Array.isArray(raw.claim)
+        ? { ...base.claim, ...raw.claim }
+        : raw.claim,
     check: raw.check === undefined ? base.check
       : raw.check && typeof raw.check === 'object' && !Array.isArray(raw.check)
         ? { ...base.check, ...raw.check }
@@ -169,14 +178,20 @@ export function configProblems(config) {
     }
   }
   if (typeof config.spec !== 'string' || !config.spec) problems.push('"spec" names a file');
+  if (config.specAgentApproval !== undefined && !['flag', 'allow', 'refuse'].includes(config.specAgentApproval)) problems.push('"spec.agentApproval" is flag, allow or refuse');
   if (typeof config.practice !== 'string' || !config.practice) problems.push('"practice" names the doctrine file');
   if (typeof config.gate !== 'string') problems.push('"gate" is a shell command, like "npm test"');
   if (config.flakes !== undefined && (!config.flakes || typeof config.flakes !== 'object' || Array.isArray(config.flakes)
-      || config.flakes.rerun !== undefined && typeof config.flakes.rerun !== 'boolean'
-      || Object.keys(config.flakes).some(key => key !== 'rerun'))) problems.push('"flakes" has only the optional boolean "rerun", off by default');
+      || ['rerun', 'quarantine'].some(key => config.flakes[key] !== undefined && typeof config.flakes[key] !== 'boolean')
+      || Object.keys(config.flakes).some(key => !['rerun', 'quarantine'].includes(key)))) problems.push('"flakes" has only the optional booleans "rerun" and "quarantine", each off by default');
   if (config.rigor !== undefined && (!config.rigor || typeof config.rigor !== 'object' || Array.isArray(config.rigor)
       || config.rigor.budget !== undefined && (!Number.isSafeInteger(config.rigor.budget) || config.rigor.budget < 0)
       || Object.keys(config.rigor).some(key => key !== 'budget'))) problems.push('"rigor" has only the optional whole number "budget", the lines of non-test code one change may add; 400 by default');
+  if (config.relay !== undefined && (!config.relay || typeof config.relay !== 'object' || Array.isArray(config.relay)
+      || config.relay.outbox !== undefined && typeof config.relay.outbox !== 'boolean'
+      || Object.keys(config.relay).some(key => key !== 'outbox'))) problems.push('"relay" has only the optional boolean "outbox", off by default');
+  if (config.approvers !== undefined && (!Array.isArray(config.approvers) || config.approvers.length > 50 || new Set(config.approvers).size !== config.approvers.length
+      || config.approvers.some((login) => typeof login !== 'string' || !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/u.test(login)))) problems.push('"approvers" lists the GitHub logins who act as the person on a linked board, at most fifty; leave it out for today\'s behaviour');
   if (!['inside', 'beside'].includes(config.worktrees)) problems.push('"worktrees" is "inside" or "beside"');
   if (config.submitGate !== undefined && config.submitGate !== 'landing') {
     problems.push('"submitGate" is "landing" when the full suite should be deferred until landing');
@@ -218,6 +233,11 @@ export function configProblems(config) {
   if (config.checks !== undefined && (typeof config.checks !== 'object' || config.checks === null || Array.isArray(config.checks)
     || Object.keys(config.checks).some((key) => key !== 'provesNothing') || !['hold', 'warn'].includes(config.checks.provesNothing))) {
     problems.push('"checks" is { "provesNothing": "hold" or "warn" }: "hold" refuses claim and submit while an item\'s check already passes on main');
+  }
+  if (!config.claim || typeof config.claim !== 'object' || Array.isArray(config.claim)
+    || !Number.isSafeInteger(config.claim.reopenFirstRefusalMinutes) || config.claim.reopenFirstRefusalMinutes < 0
+    || config.claim.reopenFirstRefusalMinutes > Math.floor(8_640_000_000_000_000 / 60_000)) {
+    problems.push('"claim.reopenFirstRefusalMinutes" is a non-negative whole number of minutes within the supported date range; 0 disables it');
   }
   if (typeof config.check?.install !== 'string') problems.push('"check.install" is an install command string');
   const timeout = typeof config.check?.timeout === 'string' ? CHECK_TIMEOUT_RE.exec(config.check.timeout) : null;

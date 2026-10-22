@@ -22,7 +22,12 @@ import { CHECK_ACCEPT_ENGINE } from './check-accept.js';
 import { HEALTH_SENTINEL_ENGINE } from './health-receipts.js';
 import { BOARD_SENTINEL_ENGINE } from './sentinels.js';
 import { RECURRING_JOB_ENGINE } from './job-engine.js';
+import { PEOPLE_ENGINE } from './people-engine.js';
+import { SPEC_APPROVAL_ENGINE } from './spec-approval-engine.js';
+import { GATE_RUN_ENGINE } from './gate-run-engine.js';
+import { requireBound } from './quarantine.js';
 import {
+  REOPEN_FIRST_REFUSAL_ENGINE,
   CAUSE_ENGINE,
   ENGINE_VERSION,
   VERIFIER_STANDING_ENGINE,
@@ -36,9 +41,12 @@ import {
   canonicalMilestoneTarget,
 } from './milestones.js';
 import { Refused } from './refused.js';
+import { firstRefusal } from './claims.js';
 import {
   requestMoveProblem,
   recordRequestMove,
+  relayPerson,
+  requestPerson,
 } from './relay-requests.js';
 import {
   relayMoveActor,
@@ -55,6 +63,9 @@ import {
   carriesFlakeDiagnostics,
 } from './flake-engine.js';
 import { LOCAL_LANDING_ENGINE } from './land-engine.js';
+import { REVIEW_SKIP_ENGINE } from './review-skip-engine.js';
+import { COORDINATOR_HOLD_ENGINE } from './coordinator-hold-engine.js';
+import { requireCoordinatorHold } from './coordinator-hold.js';
 
 const ITEM_ID_FIRST_ARGUMENT = new Set(['acceptCheck', 'editItem', 'escalate', 'recordAttempt', 'claim', 'release', 'submit', 'reserveReview', 'verify', 'merged', 'withdraw', 'refreeze', 'reopen', 'appendFact']);
 
@@ -64,18 +75,20 @@ export const ENGINE_OPERATIONS = Object.freeze([
   'claim', 'release', 'submit', 'reserveReview', 'reserveNextReview', 'verify', 'merged',
   'withdraw', 'refreeze', 'reopen', 'shout', 'passDecision', 'answerDecision', 'holdLane', 'releaseLane', 'holdItem', 'releaseItemHold',
   'addMilestone', 'editMilestoneItems', 'orderMilestoneItems', 'moveMilestone', 'editMilestone', 'removeMilestone', 'shipMilestone',
-  'recordRowDecisions', 'applyRowDecisions', 'draftSpecRow', 'appendFact',
+  'recordRowDecisions', 'applyRowDecisions', 'draftSpecRow', 'appendFact', 'recordSpecApprovalBaseline',
   'recordLandingBatch', 'recordLandingWaiver', 'recordLandingFlake', 'finishLandingBatch', 'acceptCheck',
   'recordHealthFindings', 'proposeSentinel', 'decideSentinel', 'beginSentinelRun', 'finishSentinelRun',
-  'recordFlakeObservation', 'declareJob', 'recordJobRun',
+  'recordFlakeObservation', 'recordGateRun', 'declareJob', 'recordJobRun', 'takeCoordinator',
 ]);
 
 /** Engine version at which each ordered operation first has stable replay semantics. */
 const OPERATION_ENGINE = Object.freeze({ draftSpecRow: ROW_DRAFT_ENGINE, orderMilestoneItems: MILESTONE_RANK_ENGINE, reopen: 8, recordLandingBatch: 8, recordLandingWaiver: 8, recordLandingFlake: 8, finishLandingBatch: 8, acceptCheck: CHECK_ACCEPT_ENGINE,
-  shipMilestone: MILESTONE_SHIP_ENGINE });
+  shipMilestone: MILESTONE_SHIP_ENGINE, recordSpecApprovalBaseline: SPEC_APPROVAL_ENGINE, takeCoordinator: COORDINATOR_HOLD_ENGINE });
 
 /** Dependency edits, causes, sealed reviews, submission proofs, trunk conflicts, health observations and milestone targets retain distinct recorded engine meanings. */
-function minimumOperationEngine(operation, args, board) {
+function minimumOperationEngine(operation, args, board, at) {
+  if (['verify', 'reopen'].includes(operation) && args[1]?.reopenFirstRefusalMinutes !== undefined
+    || ['claim', 'release'].includes(operation) && board && firstRefusal(board, args[0], at)) return REOPEN_FIRST_REFUSAL_ENGINE;
   // A batch landed on the local trunk before it is published (#801).
   if (operation === 'recordLandingBatch' && args[0]?.batch?.state === 'trunk'
     || operation === 'finishLandingBatch' && board && store.landingBatches(board).find(batch => batch.id === args[0]?.id)?.state === 'trunk') return LOCAL_LANDING_ENGINE;
@@ -83,7 +96,9 @@ function minimumOperationEngine(operation, args, board) {
   if (operation === 'recordLandingBatch' && carriesFlakeDiagnostics(args[0]?.batch)) return NATIVE_FLAKE_ENGINE;
   if (['proposeSentinel', 'decideSentinel', 'beginSentinelRun', 'finishSentinelRun'].includes(operation) || typeof args[1]?.cause === 'string' && args[1].cause.startsWith('sentinel:')) return BOARD_SENTINEL_ENGINE;
   if (['declareJob', 'recordJobRun'].includes(operation)) return RECURRING_JOB_ENGINE;
+  if (operation === 'recordGateRun') return GATE_RUN_ENGINE;
   if (operation === 'recordHealthFindings') return HEALTH_SENTINEL_ENGINE;
+  if (operation === 'reserveNextReview' && Array.isArray(args[0]?.skipIds) && args[0].skipIds.length) return REVIEW_SKIP_ENGINE;
   const options = args[1];
   if (carriesConflict(operation, args)) return board && store.itemById(board, args[0])?.item_status === 'submitted' ? SUBMITTED_CONFLICT_ENGINE : CONFLICT_ENGINE;
   if (operation === 'submit' && options?.submissionProof !== undefined
@@ -145,6 +160,8 @@ export function prepareEngineMove(board, operation, args, { id = randomUUID(), a
   if (operation === 'submit' && ENGINE_VERSION >= SUBMISSION_PROOF_ENGINE) submissionProof(args[1]?.submissionProof);
   const minimumEngine = minimumOperationEngine(operation, args, board);
   if (ENGINE_VERSION < minimumEngine) throw new Refused('ENGINE_VERSION', `${operation} requires engine version ${minimumEngine}; this pullboard uses engine ${ENGINE_VERSION}; upgrade before sending it`);
+  // A gate run is sealed only as its gate's own receipt; a run made up by hand is refused before it reaches any replica.
+  if (operation === 'recordGateRun') requireBound(board, args[0]?.receipt);
   const values = args.map((value) => value && typeof value === 'object' ? { ...value } : value);
   if (operation === 'release') {
     const problem = store.reviewReleaseNoteProblem(board, values[0], values[1], values[2]);
@@ -188,7 +205,7 @@ function validateMove(move) {
 }
 
 /** Restore only the frozen criterion callback; no receiver runs another machine's Git or shell. */
-function executableArgs(move, board) {
+export function executableArgs(move, board) {
   const args = structuredClone(move.args);
   if (move.operation === 'appendFact') {
     if (!args[1] || typeof args[1] !== 'object' || Array.isArray(args[1])) throw new Refused('RELAY_MOVE', 'a fact needs its typed arguments; use the current Pullboard engine');
@@ -252,7 +269,7 @@ export function refuseRelayMove(board, move, { sequence, at, sender, kind, code,
     board.clock = { now: () => new Date(at) };
     try {
       store.recordRelayRefusal(board, { by: normalizedBy, sequence, kind, operation: typeof move?.operation === 'string' ? move.operation : null,
-        actor: typeof relayMoveActor(move) === 'string' ? relayMoveActor(move) : null, code, itemId });
+        actor: typeof relayMoveActor(move) === 'string' ? relayMoveActor(move) : null, code, itemId, person: requestPerson(board, move) ?? relayPerson(sender) });
     } finally { board.clock = clock; }
     metadata(board, key, JSON.stringify({ record, outcome }));
     metadata(board, 'relay_applied_sequence', String(sequence));
@@ -303,7 +320,10 @@ export function applyRelayMove(board, move, { sequence, at, sender, kind, digest
     // The person is above every seat; their own moves act with the coordinator's standing.
     const standing = move?.engine >= VERIFIER_STANDING_ENGINE ? { root: sender?.root === true || sender?.kind === 'person',
       person: sender?.kind === 'person', lineage: sender?.root === true && typeof sender.lineage === 'string' ? sender.lineage : null } : null;
-    return applyEngineMove(board, move, { sequence, at, standing, enrollment: registration?.target ?? null });
+    // The relay-authenticated GitHub login names the person behind the move, whoever sent it; a move that carries out
+    // a phone request is the phone person's, though their computer sent it [E3].
+    return applyEngineMove(board, move, { sequence, at, standing, enrollment: registration?.target ?? null,
+      person: requestPerson(board, move) ?? (typeof sender?.login === 'string' ? sender.login : null) });
   }
   return refuseRelayMove(board, move, { sequence, at, sender, kind, code: problem.code, digest, refusal: problem });
 }
@@ -312,7 +332,7 @@ export function applyRelayMove(board, move, { sequence, at, sender, kind, digest
  * Apply one relay position with the same board functions as the CLI, preserving its refusal.
  * A receipt and prefix commit atomically; duplicate ids return that receipt without another move.
  */
-export function applyEngineMove(board, move, { sequence, at, standing = null, enrollment = null }) {
+export function applyEngineMove(board, move, { sequence, at, standing = null, enrollment = null, person = null }) {
   validateMove(move);
   if (!Number.isSafeInteger(sequence) || sequence < 1 || !Number.isFinite(Date.parse(at))) throw new Refused('RELAY_MOVE', 'supply a valid relay sequence and receipt timestamp');
   return store.atomic(board, () => {
@@ -328,7 +348,7 @@ export function applyEngineMove(board, move, { sequence, at, standing = null, en
     let outcome = previous?.outcome;
     if (!outcome) {
       // Existing receipts replay before consulting newer snapshot semantics.
-      const minimumEngine = minimumOperationEngine(move.operation, move.args, board);
+      const minimumEngine = minimumOperationEngine(move.operation, move.args, board, new Date(at));
       if (move.engine < minimumEngine) throw new Refused('RELAY_MOVE', `${move.operation} cannot act on a checked-composition snapshot from engine ${move.engine}; use engine ${minimumEngine} or newer`);
       const clock = board.clock;
       const engineVersion = board.executionEngineVersion;
@@ -336,10 +356,14 @@ export function applyEngineMove(board, move, { sequence, at, standing = null, en
       board.executionEngineVersion = move.engine;
       const firstEvent = board.emittedEvents?.length ?? 0;
       if (enrollment !== null) board.relayEnrollment = enrollment;
+      // From engine 73 every event of the move names its person; an older move replays without one.
+      if (person !== null && move.engine >= PEOPLE_ENGINE) board.movePerson = person;
       try {
         const execute = () => store.atomic(board, () => {
           const problem = requestMoveProblem(board, move);
           if (problem) throw problem;
+          // One main checkout coordinates a linked board at a time; another is refused by name (#347).
+          requireCoordinatorHold(board, move, standing?.lineage, at);
           return store[move.operation](board, ...executableArgs(move, board));
         });
         const result = standing ? store.withVerifierStanding(board, standing, execute) : execute();
@@ -355,6 +379,7 @@ export function applyEngineMove(board, move, { sequence, at, standing = null, en
       } finally {
         board.clock = clock;
         delete board.relayEnrollment;
+        delete board.movePerson;
         if (engineVersion === undefined) delete board.executionEngineVersion;
         else board.executionEngineVersion = engineVersion;
       }

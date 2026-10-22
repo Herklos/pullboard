@@ -38,6 +38,7 @@ import {
   refuseNextIdle,
 } from './next-steps.js';
 import { reviewerStartup } from './next-steps.js';
+import { environmentAgent } from './relay-environment.js';
 import { judgeTrunkMove } from './verdict-trunk.js';
 import * as gateReceipt from './gate-receipt.js';
 import * as itemSessions from './item-sessions.js';
@@ -59,6 +60,7 @@ import {
   COORDINATOR,
   DOCTRINE_FILE,
   LEGACY_DOCTRINE_FILE,
+  configFromSource,
   loadConfig,
 } from './config.js';
 import { displayAgentName } from './agent-names.js';
@@ -212,10 +214,16 @@ import {
   standings,
   unmetRows,
 } from './spec.js';
+import { refuseAgentApprovedRows } from './spec-approval.js';
+import {
+  ensureSpecApprovalCoordinator,
+  initialSpecApprovalBaseline,
+} from './spec-approval-bootstrap.js';
 import {
   answerQuestion,
   landBlueprint,
   planBlueprint,
+  starterCheck,
   readBlueprint,
   repoAnswers,
 } from './blueprints.js';
@@ -287,6 +295,7 @@ import {
   reportView,
 } from './background-view.js';
 import { nextReview } from './next-review.js';
+import { firstRefusalArgs } from './claims.js';
 import { serveApi } from './api.js';
 import { serveMcp } from './mcp.js';
 import { scanHealthSentinel } from './health-sentinel.js';
@@ -353,7 +362,6 @@ import {
   unlinkedRelayProjects,
 } from './relay-setup.js';
 import { executePersonRequests } from './relay-request-execution.js';
-import { engineReceipt } from './engine.js';
 import {
   accountedFailures,
   landingRemote,
@@ -363,12 +371,10 @@ import {
 } from './land.js';
 import { installStep } from './worktree.js';
 import * as infraNotes from './infra-note.js';
-
 export { gateWaitReporter };
 export const CHECKOUT_LEASES = new WeakMap();
 const CHECKOUT_BOARD_ONLY = new WeakMap();
 let startupMainTraced = false;
-
 /**
  * Read the collision baseline from the primary branch, retained trunk, or detached HEAD default.
  *
@@ -406,7 +412,6 @@ export function coordinatorFile(root, path, revision) {
     ...(detachedHeadDefault ? { baseline: 'collision baseline default: detached HEAD' } : {}),
   };
 }
-
 /** Find the nearest declared command for a useful typo hint. */
 function closestHelpCommand(input) {
   const needle = input.toLowerCase();
@@ -833,6 +838,9 @@ function configHere(info) {
  */
 export function withBoard(ctx, work) {
   const board = store.openBoard(ctx.file, ctx.clock, { isMain: ctx.allowSchemaUpgrade });
+  // Whether a proven flake stops blocking a landing is the coordinator's setting, read from accepted main on first use.
+  let quarantine;
+  board.quarantineEnabled = () => quarantine ??= mainPolicy(ctx.info.root).config.flakes?.quarantine === true;
   const firstEvent = board.emittedEvents?.length ?? 0;
   /** Forward committed events before releasing either synchronous or asynchronous work. */
   const finish = () => {
@@ -862,11 +870,22 @@ export async function reserveRow(ctx, row, written) {
   return withBoard(ctx, async (board) => ordered(ctx, board, 'draftSpecRow', [{ agentId: store.agentAt(board, ctx.info.root)?.agent_id ?? whoAmI(ctx, board).id, row, written }]));
 }
 
-/** Dispatch a board mutation locally, or seal it before any linked replica applies it. */
 /** Note the session behind a claim or submit (#921): its ledger must be writable before the move, and record after it. */
 async function withItemSession(info, operation, args, move) { const noted = operation === 'claim' || operation === 'submit'; if (noted) itemSessions.requireLedger(info); const result = await move(); if (noted) itemSessions.recordItemSession(info, args[0], operation); return result; }
 
+/**
+ * Whether the board's committed relay.outbox setting queues moves while the relay is down (#922).
+ * Why: it is read from the trunk's pullboard.json, so every machine on the board follows the same committed choice.
+ */
+function relayOutboxSetting(root) {
+  try { return configFromSource(coordinatorFile(root, CONFIG_FILE).stdout).relay?.outbox === true; } catch { return false; }
+}
+
 export async function ordered(ctx, board, operation, args) {
+  const initialBaseline = initialSpecApprovalBaseline(ctx, board, operation);
+  // Only a reject or a reopen can open a builder's first-refusal window (#954), so an accept never reads the coordinator's policy.
+  if (operation === 'reopen' || operation === 'verify' && args[1]?.decision === 'REJECT') args = firstRefusalArgs(operation, args, configFromSource(coordinatorFile(ctx.info.root, CONFIG_FILE).stdout));
+  ctx.io.relayOutbox ??= () => relayOutboxSetting(ctx.info.root);
   // Every engine-27 registration records the seat that made it: the coordinator from the main
   // checkout, the joined agent from its worktree, or `machine` for a join no seat made (#579).
   if (operation === 'register' && args[0] && args[0].createdBy === undefined) {
@@ -875,8 +894,24 @@ export async function ordered(ctx, board, operation, args) {
   }
   const command = ['add', 'edit', 'merged'].includes(ctx.io.relayCommand?.cliOperation) ? ctx.io.relayCommand : undefined;
   /** Dispatch while this session holds the checkout, including long-running next/run loops. */
-  const execute = () => withItemSession(ctx.info, operation, args, () => relayLinked(ctx.info.root) || relayRecovered(ctx.info.root)
-    ? relayOperation(ctx.info.root, operation, args, ctx.io, command, () => store[operation](board, ...args)) : store[operation](board, ...args));
+  const execute = async () => {
+    /** Keep bootstrap in the same authenticated seat, without borrowing a person's action receipt. */
+    const recordBaseline = async (agentId) => {
+      const values = [{ agentId, baseline: initialBaseline }];
+      const baselineIo = ctx.io.personRequest || ctx.io.personRequestMoveId
+        ? { ...ctx.io, personRequest: undefined, personRequestMoveId: undefined } : ctx.io;
+      return relayLinked(ctx.info.root) || relayRecovered(ctx.info.root)
+        ? relayOperation(ctx.info.root, 'recordSpecApprovalBaseline', values, baselineIo, undefined,
+          () => store.recordSpecApprovalBaseline(board, ...values))
+        : store.recordSpecApprovalBaseline(board, ...values);
+    };
+    ensureSpecApprovalCoordinator(ctx, board, initialBaseline);
+    const actor = ctx.info.isMain ? COORDINATOR : store.agentAt(board, ctx.info.root)?.agent_id;
+    if (initialBaseline && actor) await recordBaseline(actor);
+    const result = await withItemSession(ctx.info, operation, args, () => relayLinked(ctx.info.root) || relayRecovered(ctx.info.root)
+      ? relayOperation(ctx.info.root, operation, args, ctx.io, command, () => store[operation](board, ...args)) : store[operation](board, ...args));
+    return result;
+  };
   const digest = agentSessionDigest();
   const boardOnly = CHECKOUT_BOARD_ONLY.get(ctx.io);
   const boardOnlyOperation = (boardOnly === 'shout' && operation === 'shout') || (boardOnly === 'fact' && operation === 'appendFact');
@@ -895,7 +930,7 @@ export async function claimOrdered(ctx, board, args) {
   return await ordered(ctx, board, 'claim', args);
 }
 
-/** Check ownership before sync or command side effects; reads and authenticated person channels keep their identity. */
+/** Check ownership before sync or command side effects; reads and authenticated person channels keep their identity. A person's takeover in a linked main checkout binds no session (#347). */
 async function bindCheckoutSession(io, positionals, values) {
   if (values.help || values.version || io.personChannel === 'view' || io.personRequest) return;
   const [command, first] = positionals;
@@ -908,7 +943,7 @@ async function bindCheckoutSession(io, positionals, values) {
   if (command === 'answer' && values.as === 'person') return;
   const digest = agentSessionDigest();
   if (!digest) {
-    if (command === 'takeover') throw new Refused('AGENT_SESSION', 'takeover belongs to an agent session; run pullboard takeover from the agent’s shell');
+    if (command === 'takeover' && !(repoInfo(io.cwd).isMain && relayLinked(repoInfo(io.cwd).root))) throw new Refused('AGENT_SESSION', 'takeover belongs to an agent session; run pullboard takeover from the agent’s shell');
     return;
   }
   if (command === 'check') {
@@ -938,17 +973,8 @@ async function bindCheckoutSession(io, positionals, values) {
     return;
   }
   const lease = await bindLocalSession(info, { agent: agent ?? 'unjoined agent', digest, takeover: command === 'takeover', keepLease: !['run', 'next'].includes(command), waitLimitMs: command === 'hook' ? HOOK_CHECKOUT_WAIT_MS : 0,
-    /** Use an existing ordered shout so takeover has a receipt without changing the board format. */
-    recordTakeover: async () => {
-      const ctx = context(io);
-      await withBoard(ctx, async (board) => {
-        const me = whoAmI(ctx, board);
-        const message = { from: me.id, to: info.isMain ? 'person' : COORDINATOR,
-          text: `${me.displayName} took over this checkout in a new agent session.`, lanes: laneNames(ctx.config) };
-        if (relayLinked(info.root)) await relayOperation(info.root, 'shout', [message], io, undefined, () => store.shout(board, message));
-        else store.shout(board, message);
-      });
-    },
+    /** Record the takeover; a linked main checkout takes the board's coordinator before its receipt shout, which the hold would refuse (#347). */
+    recordTakeover: async () => (await import('./commands/takeover.js')).recordCheckoutTakeover(io, info),
   });
   if (agent) return { lease };
   /** Replace the temporary identity after a successful first join, retaining the winning session. */
@@ -995,6 +1021,9 @@ export function refuseRemoteCoordinatorModel(ctx, command) {
  * @returns {{ id: string, lane: string, route?: string, family: string | null, model: string | null, displayName: string }}
  */
 export function whoAmI(ctx, board) {
+  // A CI or cloud session works as the agent its environment token names, on that one board [E18].
+  const seat = environmentAgent(ctx.info.root, board);
+  if (seat) return { id: seat.agent_id, lane: seat.agent_lane, route: seat.agent_route, family: seat.agent_family ?? null, model: seat.agent_model ?? 'unknown', displayName: displayAgentName(seat, ctx.config.agents.names) };
   if (ctx.info.isMain) {
     ctx.io.caller?.('coordinator', ctx.info.root);
     const registered = store.listAgents(board).find((agent) => agent.agent_id === COORDINATOR);
@@ -1039,6 +1068,7 @@ export function freezer(ctx, { captureVerifyPolicy = false, board } = {}) {
       config = policy ? itemPolicy(ctx.info.root, { ...item, item_frozen: JSON.stringify({ policy }) }).config : ctx.config;
     }
     const doctrine = board ? agentDoctrine(ctx, board) : loadDoctrine(ctx.info.root, config);
+    if (board) refuseAgentApprovedRows(ctx.info.root, { board, config, item });
     const frozen = frozenCriterion(loadSpec(ctx.info.root, config), item, doctrine);
     if (!policy) return frozen; // Legacy criteria retain their original digest and committed claim base.
     const text = JSON.stringify({ ...JSON.parse(frozen.text), policy });
@@ -1304,12 +1334,6 @@ export function refuseUnverifiedStack(root, board, item, commit, trunk) {
       `#${item.item_id} includes unverified item #${stacked.item_id} at ${stacked.item_commit}; wait for #${stacked.item_id} to be accepted or rebuild without its commits before continuing`,
     );
   }
-}
-
-/** Return the durable outcome only when a recovered move exactly matches its original receipt. */
-export function recordedRecovery(board, move) {
-  const receipt = engineReceipt(board, move.id);
-  return receipt?.move === JSON.stringify(move) ? receipt : null;
 }
 
 /**
@@ -1761,9 +1785,8 @@ export async function addBlueprint(ctx, board, me, blueprint, { report = true, r
   const proposedLanes = proposals.filter((lane) => lanes.some((placed) => placed.proposal === lane));
   const starters = plan.items.map((entry, index) => ({ key: entry.key, afterKeys: entry.after, asked: lanes[index].asked, item: { by: me.id, lane: lanes[index].lane,
     title: entry.title, criterion: entry.criterion, specIds: entry.specIds, parentId: null, after: [], brief: entry.brief, route: entry.route,
-    ...(entry.check === undefined ? {} : { check: entry.check }) } }));
-  // The same checks pullboard add uses, before anything is written. A blueprint's item check is
-  // stored, never run: no check baseline starts during add, so nothing a blueprint supplies executes.
+    ...(entry.check === undefined ? {} : { check: starterCheck(blueprint, entry.check, lanes[index], ctx.config) }) } }));
+  // Bundled checks are scoped at placement; add stores checks without executing them or starting a baseline.
   // Every bundled starter carries a check (#724), and only the coordinator sets one, so an agent's
   // add is refused with the step that works: add it from the coordinator's checkout.
   if (me.id !== COORDINATOR && starters.some(({ item }) => item.check !== undefined)) {
@@ -1913,7 +1936,7 @@ async function nextSeatContext(ctx, board, me, item, seats) {
   if (!agent) {
     let opened;
     const { worktreeFor } = await import('./commands/worktree.js');
-    await worktreeFor({ ...ctx.io, say: () => {}, result: (value) => { opened = value; } }, item.item_lane, me.route, me.family, me.model);
+    await worktreeFor({ ...ctx.io, say: () => {}, result: (value) => { opened = value; } }, item.item_lane, me.route, me.family, me.model, false);
     agent = store.agentAt(board, opened.path);
     created = true;
   }
@@ -2316,6 +2339,7 @@ async function runMain(argv, streams) {
     /** A network refusal preserves offline reads; linked mutation dispatch requires an acknowledgement. */
     const retry = async () => {
       try {
+        io.relayOutbox ??= () => relayOutboxSetting(io.cwd);
         await syncRelay(io.cwd, io);
         await retryCheckBaselines(io.cwd, io);
       }

@@ -11,19 +11,29 @@ import { after, test } from 'node:test';
 import { gateSlotEnvironment, listResources, setResourceCapacity, takeResource } from '../src/resources.js';
 import { parseProcessCensus } from '../src/process-census.js';
 import { listResources as listPreRunnerResources, takeResource as takePreRunnerResource } from './fixtures/resources-pre-runners.js';
-import { runFixtureChild, runFixtureChildAsync, startFixtureChild } from './fixture-child.js';
+import { cleanupFixtureChildren, runFixtureChild, runFixtureChildAsync, startFixtureChild } from './fixture-child.js';
 import { readRemoteGateHolders, waitForCondition } from './runner-fixture-state.js';
+import { assertAttemptDeadlineReset, assertRedispatchDeadlineAccounting, runPairedRerun, startRunnerCpuStandIn } from './runner-paired-rerun-fixture.js';
+import { assertFixtureGroupEpermControls, stopGroup } from './runner-process-group.js';
 import { parentDeathDrainFixture } from './runner-parent-death-fixture.js';
 import { createE2eHelpers } from './e2e-helpers.js';
 import { refuseSandboxBlocked } from '../src/gate.js';
 import { SECRET, HOST, shellQuote, installSshStandIn } from './runner-ssh-fixture.js';
 import { sourceSetupFailureFixture } from './runner-source-setup-fixture.js';
+import { runnerSourceRefusalCases } from './runner-source-refusal-fixture.js';
+import { writeCacheProbe, writeProbe } from './runner-probe-fixture.js';
+
+/** Per-phase deadlines for one runner round trip; together they stay near the 60-second hang ceiling. */
+const ROUND_TRIP_DEADLINES = { dispatch: 20_000, 'remote run': 30_000, 'result return': 10_000 }; // budget: a stuck runner fails by name in about a minute, far under the 660-second per-test limit.
+const PAIRED_RERUN_FIXTURE = { createE2eHelpers, cli, observe, startToolingCli, awaitRoundTrip, phaseCounts,
+  ROUND_TRIP_DEADLINES, HOST, shellQuote, installSshStandIn, processesUnder, stopGroup };
 
 const BIN = resolve(import.meta.dirname, '../bin/pullboard.js');
 const TEMP = [];
 const TOOLING_SNAPSHOTS = new Map();
 const e2e = createE2eHelpers();
 after(e2e.cleanup);
+after(cleanupFixtureChildren);
 
 /** Run Git in the private source repository and preserve useful failure context. */
 function git(repo, env, ...args) {
@@ -79,112 +89,6 @@ function cli(repo, env, ...args) {
   return runFixtureChild(process.execPath, [BIN, ...args], { cwd: repo, env, encoding: 'utf8' });
 }
 
-/** Build one committed probe that observes the actual checkout and remote process environment. */
-function writeProbe(repo, { remoteStateRoot, remoteMachineHome, sourceHome, sourceMachineHome, callerPool, callerToken,
-  historyBaseCommit, annotatedTagObject, lightweightTagObject }) {
-  const probe = `import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
-import { isAbsolute, join, relative, sep } from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
-import { test } from 'node:test';
-test('runner executed the committed source in its private checkout', () => {
-  const commit = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
-  const tree = execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { encoding: 'utf8' }).trim();
-  const shallow = execFileSync('git', ['rev-parse', '--is-shallow-repository'], { encoding: 'utf8' }).trim();
-  const count = execFileSync('git', ['rev-list', '--count', 'HEAD'], { encoding: 'utf8' }).trim();
-  const history = execFileSync('git', ['log', '--follow', '--format=%H', '--', 'history-renamed.txt'], { encoding: 'utf8' }).trim().split(/\\r?\\n/u);
-  const runnerHome = process.env.HOME;
-  const privateHomeRelative = relative(${JSON.stringify(remoteStateRoot)}, runnerHome);
-  assert.ok(privateHomeRelative && !privateHomeRelative.startsWith('..' + sep) && privateHomeRelative !== '..', runnerHome);
-  const checkoutRelative = relative(${JSON.stringify(remoteStateRoot)}, process.cwd());
-  assert.equal(checkoutRelative.split(sep)[0], 'jobs', checkoutRelative);
-  assert.notEqual(process.cwd(), ${JSON.stringify(sourceHome)});
-  assert.ok(checkoutRelative && !checkoutRelative.startsWith('..' + sep) && checkoutRelative !== '..', process.cwd());
-  assert.ok(isAbsolute(process.env.HOME));
-  assert.equal(relative(process.cwd(), runnerHome), join('..', 'home'));
-  assert.equal(process.env.PULLBOARD_MACHINE_HOME, ${JSON.stringify(remoteMachineHome)});
-  assert.equal(shallow, 'false', 'the worker receives full selected-candidate history');
-  assert.equal(count, '3', 'the full selected candidate has the fixture base, rename, and probe commits');
-  assert.ok(history.includes(${JSON.stringify(historyBaseCommit)}), 'the rename retains its original committed file in history');
-  assert.equal(execFileSync('git', ['rev-parse', 'refs/tags/runner-release'], { encoding: 'utf8' }).trim(),
-    ${JSON.stringify(annotatedTagObject)}, 'the annotated tag ref keeps its original object identity');
-  assert.equal(execFileSync('git', ['rev-parse', 'refs/tags/runner-lightweight'], { encoding: 'utf8' }).trim(),
-    ${JSON.stringify(lightweightTagObject)}, 'the lightweight tag ref points to its original commit');
-  const annotation = execFileSync('git', ['cat-file', '-p', 'refs/tags/runner-release'], { encoding: 'utf8' });
-  assert.match(annotation, /runner release annotation witness/u);
-  const annotatedArchive = execFileSync('git', ['archive', '--format=tar', 'refs/tags/runner-release', 'history-original.txt']);
-  const lightweightArchive = execFileSync('git', ['archive', '--format=tar', 'refs/tags/runner-lightweight', 'history-original.txt']);
-  assert.ok(annotatedArchive.length > 512 && annotatedArchive.includes(Buffer.from('history-original.txt')),
-    'the annotated archive can read the tagged historical file');
-  assert.ok(lightweightArchive.length > 512 && lightweightArchive.includes(Buffer.from('history-original.txt')),
-    'the lightweight archive can read the tagged historical file');
-  assert.deepEqual(execFileSync('git', ['tag', '--list', 'runner-unrelated'], { encoding: 'utf8' }).trim(), '',
-    'a tag outside candidate ancestry is not copied');
-  assert.equal(execFileSync('git', ['status', '--porcelain'], { encoding: 'utf8' }).trim(), '');
-  assert.equal(existsSync('.env'), false, 'ignored, untracked caller files are not transferred');
-  assert.equal(process.env.PULLBOARD_RUNNER_FIXTURE_SECRET, undefined);
-  assert.equal(process.env.PULLBOARD_GATE_SLOT_HELD, '1');
-  assert.ok(process.env.PULLBOARD_GATE_SLOT_POOL.endsWith('/resources.sqlite'));
-  assert.notEqual(process.env.PULLBOARD_GATE_SLOT_POOL, ${JSON.stringify(callerPool)});
-  assert.ok(process.env.PULLBOARD_GATE_SLOT_TOKEN);
-  assert.notEqual(process.env.PULLBOARD_GATE_SLOT_TOKEN, ${JSON.stringify(callerToken)});
-  assert.equal(process.env.PULLBOARD_BROWSER_SLOT_HELD, '1');
-  const db = new DatabaseSync(process.env.PULLBOARD_GATE_SLOT_POOL, { readOnly: true });
-  try {
-    const holder = db.prepare('SELECT pid, browser, kind FROM holder WHERE token = ?').get(process.env.PULLBOARD_GATE_SLOT_TOKEN);
-    assert.ok(holder, 'the child inherited a live remote parent lease');
-    assert.notEqual(holder.pid, process.pid);
-    assert.equal(holder.browser, 1);
-    assert.equal(holder.kind, 'check');
-  } finally { db.close(); }
-  assert.equal(process.env.SSH_AUTH_SOCK, undefined);
-  assert.notEqual(process.env.PULLBOARD_HOME, ${JSON.stringify(sourceHome)});
-  assert.notEqual(process.env.PULLBOARD_MACHINE_HOME, ${JSON.stringify(sourceMachineHome)});
-  console.log('RUNNER_FACT ' + JSON.stringify({ commit, tree, cwd: process.cwd(), home: process.env.HOME,
-    runnerHome, stateRoot: ${JSON.stringify(remoteStateRoot)}, machineHome: process.env.PULLBOARD_MACHINE_HOME, gatePool: process.env.PULLBOARD_GATE_SLOT_POOL,
-    gateToken: process.env.PULLBOARD_GATE_SLOT_TOKEN, browser: process.env.PULLBOARD_BROWSER_SLOT_HELD,
-    landing: process.env.PULLBOARD_LANDING_RUN }));
-});
-`;
-  writeFileSync(join(repo, 'runner-probe.test.js'), probe);
-}
-
-/** Build a committed probe for the cache copy of one local workspace dependency. */
-function writeCacheProbe(repo, { remoteStateRoot, nodePath, historyBaseCommit }) {
-  const probe = `import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
-import { readFileSync, readlinkSync, realpathSync } from 'node:fs';
-import { isAbsolute, join, relative, sep } from 'node:path';
-import { test } from 'node:test';
-test('a cached workspace link resolves inside this fresh runner checkout', () => {
-  const root = process.cwd();
-  const stateRelative = relative(${JSON.stringify(remoteStateRoot)}, root);
-  assert.ok(stateRelative && !stateRelative.startsWith('..' + sep) && stateRelative !== '..');
-  assert.equal(process.execPath, ${JSON.stringify(nodePath)}, 'the configured runner Node executes the command');
-  const commit = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
-  const tree = execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { encoding: 'utf8' }).trim();
-  const generated = JSON.parse(readFileSync(join(root, 'generated/config.json'), 'utf8'));
-  assert.equal(generated.root, root, 'root prepare ran in this fresh checkout and generated a job-local file');
-  const shallow = execFileSync('git', ['rev-parse', '--is-shallow-repository'], { encoding: 'utf8' }).trim();
-  const count = execFileSync('git', ['rev-list', '--count', 'HEAD'], { encoding: 'utf8' }).trim();
-  const history = execFileSync('git', ['log', '--follow', '--format=%H', '--', 'history-renamed.txt'], { encoding: 'utf8' }).trim().split(/\\r?\\n/u);
-  assert.equal(shallow, 'false', 'the cache contains full candidate history');
-  assert.equal(count, '3', 'the cache preserves the complete selected history');
-  assert.ok(history.includes(${JSON.stringify(historyBaseCommit)}), 'cached history follows the original filename through the rename');
-  const committed = execFileSync('git', ['show', 'HEAD:packages/runner-fixture-dep/witness.txt'], { encoding: 'utf8' });
-  assert.equal(readFileSync('node_modules/.runner-cache-witness', 'utf8'), committed);
-  const link = readlinkSync('node_modules/runner-fixture-dep');
-  assert.equal(isAbsolute(link), false, 'the cached workspace symlink stays relative');
-  const target = realpathSync(join(root, 'node_modules/runner-fixture-dep'));
-  assert.equal(target, join(root, 'packages/runner-fixture-dep'));
-  const targetRelative = relative(root, target);
-  assert.ok(targetRelative && !targetRelative.startsWith('..' + sep) && targetRelative !== '..');
-  console.log('RUNNER_CACHE_FACT ' + JSON.stringify({ root, link, target, commit, tree, shallow, count, history, generatedRoot: generated.root }));
-});
-`;
-  writeFileSync(join(repo, 'runner-cache-probe.test.js'), probe);
-}
 
 /** Start the current CLI from the same clean committed tooling snapshot used by API fixtures. */
 function startToolingCli(repo, env, args, { toolingRoot = resolve(import.meta.dirname, '..'), ...options } = {}) {
@@ -213,22 +117,10 @@ function startToolingCli(repo, env, args, { toolingRoot = resolve(import.meta.di
   }
 }
 
-/** Per-phase deadlines for one runner round trip; together they stay near the 60-second hang ceiling. */
-const ROUND_TRIP_DEADLINES = { dispatch: 20_000, 'remote run': 30_000, 'result return': 10_000 }; // budget: a stuck runner fails by name in about a minute, far under the 660-second per-test limit.
-
 /** Count the stand-in's phase markers; a missing file means nothing was dispatched yet. */
 function phaseCounts(file) {
   const lines = existsSync(file) ? readFileSync(file, 'utf8').split('\n') : [];
   return { dispatched: lines.filter(line => line === 'dispatched').length, returned: lines.filter(line => line === 'returned').length };
-}
-
-/** Stop a detached fixture child's whole process group, escalating if TERM is ignored. */
-async function stopGroup(child, closed) {
-  const signal = name => { try { process.kill(-child.pid, name); } catch (error) { if (error.code !== 'ESRCH') throw error; } };
-  signal('SIGTERM');
-  const settled = await Promise.race([closed.then(() => true), new Promise(resolve => setTimeout(() => resolve(false), 5_000))]); // budget: TERM grace before KILL.
-  signal('SIGKILL');
-  if (!settled) await closed;
 }
 
 /**
@@ -239,7 +131,7 @@ async function stopGroup(child, closed) {
  * passes the marker counts it read before spawning the child: a fast child can dispatch before this
  * function first runs, and a baseline read here would swallow that dispatch.
  */
-async function awaitRoundTrip(child, closed, phasesFile, before, deadlines = ROUND_TRIP_DEADLINES) {
+async function awaitRoundTrip(child, closed, phasesFile, before, deadlines = ROUND_TRIP_DEADLINES, firstReceiptAccepted = null) {
   const limits = { ...ROUND_TRIP_DEADLINES, ...deadlines };
   let done = null;
   closed.then(result => { done = result; });
@@ -248,11 +140,22 @@ async function awaitRoundTrip(child, closed, phasesFile, before, deadlines = ROU
   assert.ok(!phasesFile || before, 'awaitRoundTrip needs the phase baseline read before the child was spawned');
   let phase = 'dispatch';
   let phaseStarted = Date.now();
+  let observed = { dispatched: 0, returned: 0 };
   while (!done) {
     const total = phasesFile ? phaseCounts(phasesFile) : { dispatched: 0, returned: 0 };
     const counts = phasesFile ? { dispatched: total.dispatched - before.dispatched, returned: total.returned - before.returned } : total;
-    const next = counts.dispatched > counts.returned ? 'remote run' : counts.dispatched > 0 ? 'result return' : 'dispatch';
-    if (next !== phase) { timings.push(`${phase} ${Date.now() - phaseStarted}ms`); phase = next; phaseStarted = Date.now(); }
+    // The observer saves the accepted first receipt before preparing its paired dispatch. That real
+    // controller-side witness ends result delivery; a worker's "returned" marker alone cannot do so.
+    const redispatch = counts.dispatched === 1 && counts.returned === 1 && firstReceiptAccepted?.();
+    const next = redispatch ? 'dispatch' : counts.dispatched > counts.returned ? 'remote run' : counts.dispatched > 0 ? 'result return' : 'dispatch';
+    // A returned attempt and its paired dispatch can arrive in one poll without changing the phase's name.
+    // Each real marker advance starts a fresh clock, while a phase with no new marker remains bounded.
+    if (next !== phase || counts.dispatched > observed.dispatched || counts.returned > observed.returned) {
+      timings.push(`${phase} ${Date.now() - phaseStarted}ms (attempt ${observed.dispatched})`);
+      phase = next;
+      phaseStarted = Date.now();
+      observed = counts;
+    }
     const spent = Date.now() - phaseStarted;
     if (spent > limits[phase]) {
       await stopGroup(child, closed);
@@ -404,6 +307,37 @@ test("the runner's trusted runtime list is closed under its relative imports [C7
       assert.ok(controller.includes(name), `${file} imports ./${name}, which the runner runtime list does not ship`);
     }
   }
+});
+
+test('runner remove deletes one runner and keeps the rest [C7]', (t) => {
+  const box = e2e.project();
+  const settingsFile = join(box.env.PULLBOARD_MACHINE_HOME, 'settings.json');
+  const removed = { host: 'runner-one.example.invalid', slots: 2, browser: 1, node: 'node', root: '/srv/runner-one' };
+  const remaining = { host: 'runner-two.example.invalid', slots: 1, browser: 0 };
+  const original = { gateSlots: 3, browserSlots: 2, gate: { shortSlots: 1, queue: { reviewsFirst: true } },
+    relay: { offerAtInit: true }, custom: { keep: 'unchanged' } };
+  mkdirSync(box.env.PULLBOARD_MACHINE_HOME, { recursive: true });
+  writeFileSync(settingsFile, JSON.stringify(original, null, 2));
+  const firstAdded = box.run(box.repo, 'runner', 'add', removed.host, '--slots', String(removed.slots), '--browser', String(removed.browser),
+    '--node', removed.node, '--root', removed.root);
+  assert.equal(firstAdded.code, 0, firstAdded.err);
+  const secondAdded = box.run(box.repo, 'runner', 'add', remaining.host, '--slots', String(remaining.slots), '--browser', String(remaining.browser));
+  assert.equal(secondAdded.code, 0, secondAdded.err);
+  const registered = { ...original, runners: [removed, remaining] };
+  assert.deepEqual(JSON.parse(readFileSync(settingsFile, 'utf8')), registered);
+
+  const result = box.run(box.repo, 'runner', 'remove', removed.host);
+  assert.equal(result.code, 0, result.err);
+  assert.ok(result.out.includes(`removed runner ${removed.host}`), result.out);
+  assert.deepEqual(JSON.parse(readFileSync(settingsFile, 'utf8')), { ...original, runners: [remaining] });
+
+  const missing = box.run(box.repo, 'runner', 'remove', removed.host, '--json');
+  assert.equal(missing.code, 1, missing.err);
+  const refusal = JSON.parse(missing.out).error;
+  assert.equal(refusal.code, 'RUNNER_NOT_REGISTERED');
+  assert.ok(refusal.next.includes(remaining.host), refusal.next);
+  assert.ok(!refusal.next.includes(removed.host), refusal.next);
+  assert.deepEqual(JSON.parse(readFileSync(settingsFile, 'utf8')), { ...original, runners: [remaining] });
 });
 
 test('a queued run executes on a registered runner and its result comes back (host checkout isolation) [C7]', async (t) => {
@@ -586,6 +520,8 @@ test('a private check never refuses its own remote lease [C7,V4]', async (t) => 
   }
 });
 
+test('current source refuses private, oversized and unsupported blobs before SSH [C7,S1]', runnerSourceRefusalCases);
+
 test('a queued run executes on a registered runner and its result comes back [C7]', async (t) => {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'pullboard-runner-')));
   TEMP.push(dir);
@@ -624,9 +560,11 @@ test('a queued run executes on a registered runner and its result comes back [C7
   assert.equal(initialized.status, 0, initialized.context);
   writeFileSync(join(repo, 'pullboard.json'), JSON.stringify({ gate: 'true' }));
   writeFileSync(join(repo, 'tracked.txt'), 'committed runner source\n');
+  writeFileSync(join(repo, 'empty.bin'), Buffer.alloc(0));
+  writeFileSync(join(repo, 'binary.bin'), Buffer.from([0, 10, 255, 13, 0, 128]));
   writeFileSync(join(repo, 'history-original.txt'), 'committed history witness\n');
   writeFileSync(join(repo, '.gitignore'), '.env\n');
-  git(repo, env, 'add', '.gitignore', 'pullboard.json', 'tracked.txt', 'history-original.txt');
+  git(repo, env, 'add', '.gitignore', 'pullboard.json', 'tracked.txt', 'history-original.txt', 'empty.bin', 'binary.bin');
   git(repo, env, 'commit', '-q', '-m', 'test: prepare registered runner fixture');
   const historyBaseCommit = git(repo, env, 'rev-parse', 'HEAD');
   git(repo, env, 'tag', '-a', 'runner-release', '-m', 'runner release annotation witness', historyBaseCommit);
@@ -1915,64 +1853,35 @@ test('a refused runner checkout names its failed Git step and stderr [C6,C7]', a
   }
 });
 
-test('a red on a registered runner gets its paired rerun and ledger entry, or stays unclassified without the host load [C7]', { timeout: 300_000 }, async (t) => {
-  for (const mode of ['remote-load', 'no-load', 'paired-no-load']) await t.test(mode, async () => {
-    const helper = createE2eHelpers();
-    t.after(helper.cleanup);
-    const box = helper.project('true');
-    const repo = box.repo;
-    const [fixtureBin, remoteHome, worker] = ['runner-bin', 'runner-home', 'second-machine'].map((name) => join(box.dir, name));
-    const remoteMachineHome = join(remoteHome, '.pullboard');
-    for (const folder of [fixtureBin, remoteMachineHome, worker, join(repo, 'test')]) mkdirSync(folder, { recursive: true });
-    const env = { ...box.env, PATH: fixtureBin + ':' + box.env.PATH };
-    writeFileSync(join(repo, 'package.json'), JSON.stringify({ private: true, type: 'module' }) + '\n');
-    for (const part of ['src', 'bin']) cpSync(resolve(import.meta.dirname, '..', part), join(repo, part), { recursive: true });
-    // Red on its first run, green on its paired rerun: a flake the ledger should record.
-    const runs = join(box.dir, 'flaky-runs');
-    writeFileSync(join(repo, 'test/flaky.test.js'), `import { test } from 'node:test'; import { appendFileSync, existsSync, readFileSync } from 'node:fs';
-test('remote flaky case', () => { const n = existsSync(${JSON.stringify(runs)}) ? readFileSync(${JSON.stringify(runs)}, 'utf8').length : 0; appendFileSync(${JSON.stringify(runs)}, 'x'); if (n === 0) throw new Error('first run fails'); });\n`);
-    const config = JSON.parse(readFileSync(join(repo, 'pullboard.json'), 'utf8'));
-    writeFileSync(join(repo, 'pullboard.json'), JSON.stringify({ ...config, gate: 'node bin/run-tests.js test/flaky.test.js', flakes: { rerun: true } }) + '\n');
-    box.git(repo, 'add', '-A');
-    box.git(repo, 'commit', '-q', '-m', 'test: a remote flaky fixture');
-    // The worker reports a known load, or (as an older worker would) a receipt without one: on every run, or only on
-    // the paired rerun, whose receipt the classification rests on too (#925). A marker file spans worker processes.
-    const preload = join(box.dir, 'worker-preload.mjs');
-    const firstReceipt = join(box.dir, 'first-receipt-seen');
-    const strip = mode === 'no-load' ? 'true' : `existsSync(${JSON.stringify(firstReceipt)}) || (writeFileSync(${JSON.stringify(firstReceipt)}, ''), false)`;
-    writeFileSync(preload, mode === 'remote-load'
-      ? "import { createRequire } from 'node:module'; const require = createRequire(import.meta.url); const os = require('node:os'); os.loadavg = () => [7.25, 7.25, 7.25]; require('node:module').syncBuiltinESMExports();\n"
-      : "import { existsSync, writeFileSync } from 'node:fs'; const write = process.stderr.write.bind(process.stderr); process.stderr.write = (chunk, ...rest) => { const text = String(chunk); const match = /^(PULLBOARD_RUNNER_RESULT \\S+ )(\\S+)\\n$/u.exec(text); if (!match) return write(chunk, ...rest); const body = JSON.parse(Buffer.from(match[2], 'base64').toString('utf8')); if (" + strip + ") delete body.load; return write(match[1] + Buffer.from(JSON.stringify(body)).toString('base64') + '\\n', ...rest); };\n");
-    installSshStandIn({ bin: fixtureBin, worker, home: remoteHome, machineHome: remoteMachineHome, requests: join(box.dir, 'requests.jsonl'), nodeOptions: '--import=' + pathToFileURL(preload).href });
-    assert.equal(cli(repo, env, 'settings', 'gateSlots', '1', '--json').status, 0);
-    const registered = cli(repo, env, 'runner', 'add', HOST, '--slots', '1', '--browser', '1', '--json');
-    assert.equal(registered.status, 0, fixtureResultContext(registered));
-    const prior = { home: process.env.PULLBOARD_HOME, machine: process.env.PULLBOARD_MACHINE_HOME };
-    Object.assign(process.env, { PULLBOARD_HOME: env.PULLBOARD_HOME, PULLBOARD_MACHINE_HOME: env.PULLBOARD_MACHINE_HOME });
-    const held = await takeResource({ name: 'gate', capacity: 1, scope: 'machine', root: repo, agent: 'flake-local-holder', item: 'flake-local-holder', kind: 'force-registered-runner' });
+test('a red on a registered runner gets its paired rerun and ledger entry, or stays unclassified without the host load [C7]', { timeout: 300_000 }, async t => {
+  for (const mode of ['remote-load', 'no-load', 'paired-no-load']) {
+    await t.test(mode, child => runPairedRerun(child, mode, PAIRED_RERUN_FIXTURE));
+  }
+});
+
+test('the runner round trip deadline holds under a loaded test machine and still catches a stuck phase [C7]',
+  { timeout: 660_000 }, async t => { // budget: five real paired attempts plus a bounded held phase, below the file hang ceiling.
+    await assertAttemptDeadlineReset(PAIRED_RERUN_FIXTURE);
+    await assertRedispatchDeadlineAccounting(PAIRED_RERUN_FIXTURE);
+    assertFixtureGroupEpermControls();
+    const busy = await startRunnerCpuStandIn();
+    t.after(busy.stop);
+    assert.equal(busy.count, Math.max(1, Math.floor(busy.cores / 2)), 'the fixture owns one busy child for each half-core slot');
     try {
-      const run = observe(startToolingCli(repo, env, ['gate', '--json'], { detached: true }));
-      const finished = await awaitRoundTrip(run.child, run.closed, join(box.dir, 'requests.jsonl.phases'), { dispatched: 0, returned: 0 });
-      assert.equal(finished.status, 1, 'the original red stays the gate result');
+      for (let run = 1; run <= 5; run++) {
+        await t.test(`paired rerun ${run} of 5 [C7]`, async child => {
+          const observation = await runPairedRerun(child, 'paired-no-load', PAIRED_RERUN_FIXTURE, { cpuLoad: busy });
+          assert.equal(observation.paired?.green, true, 'the paired runner rerun makes progress and passes');
+          assert.equal(observation.classification, 'unclassified', 'without the paired host load, a green run is not called a flake');
+          busy.assertAlive();
+        });
+      }
+      t.diagnostic(JSON.stringify({ cpuStandIn: busy.count, pids: busy.pids, cores: busy.cores,
+        loadBefore: Number(busy.loadBefore.toFixed(1)), loadDuring: Number(busy.loadAfter().toFixed(1)), pairedRuns: 5, cpu: busy.report.cpuSnapshots }));
+      await t.test('a permanently held result return remains a named bounded failure [C7]', async child => {
+        await runPairedRerun(child, 'paired-no-load', PAIRED_RERUN_FIXTURE, { hold: 'return' });
+      });
     } finally {
-      held.release();
-      for (const [key, value] of [['PULLBOARD_HOME', prior.home], ['PULLBOARD_MACHINE_HOME', prior.machine]]) if (value === undefined) delete process.env[key]; else process.env[key] = value;
-    }
-    const evidence = join(repo, '.git', 'pullboard', 'flake-evidence');
-    const [observation] = readdirSync(evidence).map((id) => JSON.parse(readFileSync(join(evidence, id, 'observation.json'), 'utf8')));
-    assert.equal(observation.main, box.git(repo, 'rev-parse', 'HEAD'), 'the pinned main is recorded');
-    if (mode === 'remote-load') {
-      assert.equal(observation.classification, 'flake', observation.reason);
-      assert.deepEqual(observation.load.average, [7.25, 7.25, 7.25], 'the execution host\'s load is recorded, not the controller\'s');
-      assert.equal(observation.paired?.green, true, 'the one paired rerun ran and passed');
-    } else if (mode === 'no-load') {
-      assert.equal(observation.classification, 'unclassified');
-      assert.match(observation.reason, /does not carry the execution host's load/u);
-      assert.equal(observation.paired, null, 'no rerun is guessed without the host load');
-    } else {
-      assert.equal(observation.paired?.green, true, 'the paired rerun ran and passed, but its receipt lacks the host load');
-      assert.equal(observation.classification, 'unclassified', 'a green pair without its host load never makes a flake: ' + observation.reason);
-      assert.match(observation.reason, /paired remote receipt does not carry the execution host's load/u);
+      await busy.stop();
     }
   });
-});

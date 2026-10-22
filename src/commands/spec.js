@@ -78,6 +78,7 @@ import {
   legacyDoctrineRenameBase,
   lintSpec,
   loadSpec,
+  missingGateFindings,
   parseSpec,
   permanenceProblems,
   readSignoffs,
@@ -299,6 +300,7 @@ export async function specCommand(io, { first, second, rest, values }) {
     for (const [name, parsed] of files) {
       const findings = [
         ...lintSpec(parsed).filter((finding) => !finding.message.startsWith('duplicate id;')),
+        ...missingGateFindings(parsed, ctx.info.root),
         ...(collisionFindings.get(name) ?? []),
       ];
       findings.forEach((finding) => messages.push(`${name}:${finding.line} ${finding.id ?? ''} ${finding.level}: ${finding.message}`.replace('  ', ' ')));

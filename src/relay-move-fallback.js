@@ -18,3 +18,14 @@ export function transientRelayFailure(error) {
   if (['RELAY_UNAVAILABLE', 'RELAY_RESPONSE', 'RELAY_BUSY'].includes(error.code)) return true;
   return Number.isInteger(error.httpStatus) && (error.httpStatus >= 500 || [408, 425, 429].includes(error.httpStatus));
 }
+
+/**
+ * Name how a relay request failed before any response, from the error's own fields only.
+ * Why: a bare "did not answer" hid whether a request timed out, was refused or lost its socket,
+ * so load-dependent relay failures could not be attributed (#512).
+ */
+export function transportFailure(error) {
+  if (error?.name === 'TimeoutError' || error?.name === 'AbortError') return 'timed out';
+  const code = error?.cause?.code ?? error?.code;
+  return typeof code === 'string' && /^[A-Z][A-Z0-9_]{1,40}$/u.test(code) ? code : 'no connection';
+}

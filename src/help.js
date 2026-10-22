@@ -10,7 +10,7 @@ Nothing ships until a second agent verifies it.
 
 Set up
   pullboard tour                        see it work: a reject and its rework, scripted, in thirty seconds
-  pullboard init [--model <name>] [--blueprint <name or file>]... [--no-permissions] [--yes]  setup and project rules; --yes commits only setup's own files with your Git identity
+  pullboard init [--model <name>] [--blueprint <name or file>]... [--no-permissions] [--yes] [--verbose]  short setup summary; --verbose shows recipes; --yes commits only setup's own files with your Git identity
   pullboard worktree <lane> --model <name> [--route light] [--family <name>]   make and join a worktree for a new agent
                                         pullboard.json worktrees: inside or beside; init defaults to inside
   pullboard join <lane> --model <name> [--route light] [--family <name>]       register this worktree as an agent
@@ -18,9 +18,11 @@ Set up
   pullboard join coordinator --model <name>                                 declare the main checkout's coordinator model
                                         pullboard.json agents.names: suffix (default) or prefix
   pullboard whoami | lanes | status     who you are, the lanes, the board at a glance
+  pullboard agents                      each agent with its seats and helpers, and what each holds
   pullboard lane add <name> --owns <path>[,<path>]   add a lane that owns those folders to pullboard.json
                                         refuses a lane name or a path that is already owned, naming the owner
   pullboard takeover                   rebind this checkout when the same agent starts a new session
+                                        in a linked main checkout it also takes the board's coordinator here
   pullboard resources                  local resource holders and their FIFO queues
   pullboard settings [gateSlots <n> | browserSlots <n>]  view or set machine capacity (gate default 2; browser default 1)
                                         browser-free check slots are opt-in: gate.browserFreeChecks in ~/.pullboard/settings.json (default false)
@@ -194,6 +196,7 @@ Receipts
   pullboard log [id]                    every move, in order
   pullboard flakes                      recorded failures, their first and last sightings, counts and repair status
   pullboard flakes rerun on|off          coordinator: opt into one diagnostic pair per failed test; off by default
+  pullboard flakes quarantine on|off     coordinator: let a proven flake stop blocking landings until its repair item is verified; off by default
                                         commit pullboard.json to apply; a passing diagnostic never turns the original red green
   pullboard rigor                       failure causes that repeated: on 2 items, or 1 item at 2 commits;
                                         each with its items and whether it reads as work, product or both
@@ -273,7 +276,7 @@ const HELP_EXAMPLES = {
   claim: 'pullboard claim 12', submit: 'pullboard submit 12', 'next --verify': 'pullboard next --verify',
   fact: 'pullboard fact 12 measurement "The check passes in 8 seconds"',
   why: 'pullboard why 12',
-  flakes: 'pullboard flakes', 'flakes rerun': 'pullboard flakes rerun on',
+  flakes: 'pullboard flakes', 'flakes rerun': 'pullboard flakes rerun on', 'flakes quarantine': 'pullboard flakes quarantine on',
   verify: 'pullboard verify 12 accept --note "removed the fix; the test failed"',
   watch: 'pullboard watch --to web', answer: 'pullboard answer 12 "done"', pass: 'pullboard pass 12 "please decide"',
   status: 'pullboard status', view: 'pullboard view', digest: 'pullboard digest --out briefing.md', mcp: 'pullboard mcp', stats: 'pullboard stats --since 2026-10-08', log: 'pullboard log 12', ledger: 'pullboard ledger',
@@ -305,6 +308,7 @@ const HELP_ALIASES = {
   version: { usage: 'pullboard version', source: null },
   whoami: { usage: 'pullboard whoami', source: 'whoami' },
   lanes: { usage: 'pullboard lanes', source: 'whoami' },
+  agents: { usage: 'pullboard agents', source: 'whoami' },
   lane: { usage: 'pullboard lane add <name> --owns <path>[,<path>]', source: 'lane add' },
   status: { usage: 'pullboard status', source: 'whoami' },
   done: { usage: 'pullboard done <id>', source: 'submit <id>' },

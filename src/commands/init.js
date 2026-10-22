@@ -1,6 +1,5 @@
 /** The pullboard init command, in its own module so an item adding another command never edits these lines. */
 import {
-  backgroundViewLine,
   keepViewRunning,
 } from '../background-view.js';
 import {
@@ -20,12 +19,15 @@ import {
 import {
   beginInitCommit,
   finishInitCommit,
+  initNextLine,
+  initViewLine,
   reportInitSetup,
   SETUP_COMMIT_LATER,
 } from '../init-finish.js';
 import {
   initRepo,
 } from '../init.js';
+import { captureSpecApprovalBaseline } from '../spec-approval.js';
 import {
   agentSessionDigest,
 } from '../person.js';
@@ -77,6 +79,9 @@ export async function run(io, { values }) {
       if (!linked) {
         const existing = board.db.prepare('SELECT 1 FROM agent WHERE agent_id=?').get(COORDINATOR);
         const registered = store.register(board, options);
+        if (!store.specApprovalBaselineExists(board)) store.recordSpecApprovalBaseline(board, {
+          agentId: COORDINATOR, baseline: captureSpecApprovalBaseline(info.root, loadConfig(info.root)),
+        });
         if (!existing) recordSetupState({ info }, setupIdentity(board), 'started');
         return registered;
       }
@@ -92,19 +97,22 @@ export async function run(io, { values }) {
   ]));
   // Keep blueprint initialization and the person's unwritten lane proposals in the same result.
   const landed = await landEach(blueprints, ({ reference, blueprint }, drafted) => addBlueprintHere(io, reference, { report: false, blueprint, drafted }));
-  const { result } = reportInitSetup(io, info, notes, landed, Boolean(agentSessionDigest()));
+  const { result } = reportInitSetup(io, info, notes, landed, { verbose: values.verbose });
   const setupCommit = await finishInitCommit(setupPlan, { io, yes: values.yes, landed, permissions: !values['no-permissions'] });
   result.setupCommit = setupCommit;
   if (await registerProjectAndLink(info.root, new Date(), loadConfig(info.root), io)) io.say('registered this project on this machine, so pullboard view lists it');
   // Once registered, a background view lists this board for pullboard.dev [H5,N26].
   const view = await keepViewRunning();
   io.result?.({ ...result, view });
-  const viewLine = backgroundViewLine(view);
+  const viewLine = initViewLine(view, { verbose: values.verbose });
   if (viewLine) io.say(viewLine);
   // Sharing remains a separate choice; --yes confirms only the setup commit.
-  const code = await offerRelayAtInit(info.root, io);
-  if (setupCommit.skipped.length) io.say(`Your earlier changes remain uncommitted: ${setupCommit.skipped.join(', ')}.`);
-  if (setupCommit.state === 'pending') io.say(SETUP_COMMIT_LATER);
+  const code = await offerRelayAtInit(info.root, io, { details: values.verbose === true });
+  if (setupCommit.skipped.length) io.say(values.verbose
+    ? `Your earlier changes remain uncommitted: ${setupCommit.skipped.join(', ')}.`
+    : `Kept ${setupCommit.skipped.length} earlier changes uncommitted.`);
+  if (setupCommit.state === 'pending' && values.verbose) io.say(SETUP_COMMIT_LATER);
   if (setupCommit.state === 'committed') io.say(`Committed ${setupCommit.skipped.length ? 'only unchanged Pullboard files' : 'Pullboard setup'} at ${setupCommit.commit.slice(0, 12)}.`);
+  io.say(initNextLine(Boolean(agentSessionDigest()), { verbose: values.verbose }));
   return code;
 }

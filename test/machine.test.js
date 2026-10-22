@@ -118,6 +118,9 @@ const CAUGHT = {
   'commands/submit.js#submitHere': ['native-flakes.js#observeFailure', 'cli.js#freezer', 'main-red.js#compareMainFailures', 'main-red.js#matchingReworks', 'doctrine-checks.js#checkRulesAt'],
   // observeNativeFailure catches its optional pair/recording errors; they cannot become lifecycle refusals.
   'commands/verify.js#verifyHere': ['cli.js#freezer', 'native-flakes.js#observeFailure'],
+  // Invalid approval evidence is data, not a lifecycle refusal; runtime controls keep it unconfirmed.
+  'spec-approval.js#approvalEvidence': ['spec.js#readSignoffs'],
+  'spec-approval.js#confirmedDecision': ['signature.js#verifyRowDecision'],
   // Historical decline metadata is parsed inside a non-throwing boundary, covered by the Rigor history control.
   'board.js#reopen': ['rigor-notices.js#declinedRigorSource'],
 };
@@ -167,9 +170,10 @@ function functionsIn(source) {
  * functions it calls, followed across imports and into the functions the CLI hands the board.
  *
  * @param {(file: string) => string} read - The source of a file in src/.
+ * @param {{ caught?: boolean }} [options] Honor explicit caller/callee catch boundaries for escaping codes.
  * @returns {{ functions: (file: string) => string[], refusalsOf: (key: string, skip?: Set<string>) => Set<string> }}
  */
-function codeWalk(read) {
+function codeWalk(read, { caught = false } = {}) {
   const files = new Map();
   const load = (file) => {
     if (!files.has(file)) {
@@ -201,7 +205,10 @@ function codeWalk(read) {
       ...[...body.matchAll(/(?<!\w)(?<!(?<!\.\.)\.)(\w+)\(/g)].map(([, callee]) => (bodies.has(callee) ? `${file}#${callee}` : named.get(callee) ?? CALLBACKS[file]?.[callee])),
       ...[...body.matchAll(/\b(\w+)\.(\w+)\(/g)].map(([, space, callee]) => (spaces.has(space) ? `${spaces.get(space)}#${callee}` : undefined)),
     ];
-    for (const callee of callees.filter(Boolean)) for (const code of refusalsOf(callee, skip, seen)) codes.add(code);
+    for (const callee of callees.filter(Boolean)) {
+      if (caught && (CAUGHT[key] ?? []).includes(callee)) continue;
+      for (const code of refusalsOf(callee, skip, seen)) codes.add(code);
+    }
     return codes;
   };
   return { functions: (file) => [...load(file).bodies.keys()], refusalsOf };
@@ -242,7 +249,7 @@ function declaredCodes(machine, verbs) {
  * @returns {string[]}
  */
 function codeProblems(machine, read = fromDisk) {
-  const walk = codeWalk(read);
+  const walk = codeWalk(read, { caught: true });
   const problems = new Set();
   for (const { verbs, at } of ENTRY_POINTS) {
     const declared = declaredCodes(machine, verbs);
@@ -503,6 +510,8 @@ test('a broken copy of the declaration fails the check against the code, both wa
   assert.deepEqual(codeProblems(noRows).sort(), [
     'A5_GRAMMAR_VERSION is raised by claim but not declared there',
     'A5_GRAMMAR_VERSION is raised by refreeze but not declared there',
+    'AGENT_APPROVAL_REQUIRED is raised by claim but not declared there',
+    'AGENT_APPROVAL_REQUIRED is raised by refreeze but not declared there',
     'BAD_CONFIG is raised by claim but not declared there',
     'BAD_CONFIG is raised by refreeze but not declared there',
     'NO_POLICY is raised by claim but not declared there',
@@ -530,6 +539,13 @@ test('a broken copy of the code fails the check: a refusal added wherever a move
     'MOON_PHASE is raised by claim but not declared there',
     'MOON_PHASE is raised by refreeze but not declared there',
   ], 'claim and refreeze let a freeze refusal through; submit and verify catch it');
+
+  const inProof = editedSource('spec-approval.js', /^function approvalEvidence\(root, evidenceErrors\) \{$/m, "$&\n  if (!root) throw new Refused('MOON_PHASE', 'wait for the full moon');");
+  assert.deepEqual(codeProblems(MACHINE, inProof).sort(), [
+    'MOON_PHASE is raised by accept and reject but not declared there',
+    'MOON_PHASE is raised by claim but not declared there',
+    'MOON_PHASE is raised by refreeze but not declared there',
+  ], 'only caught proof readers are excluded; a new guard inside their caller is still audited');
 
   const inArrow = editedSource('route-escalation.js', /^export const canTake = .*$/m, "import { Refused } from './refused.js';\nexport const canTake = (agentRoute, itemRoute) => { if (!agentRoute) throw new Refused('NO_ROUTE', 'no route'); return ROUTES.indexOf(itemRoute) <= ROUTES.indexOf(agentRoute); };");
   assert.deepEqual(codeProblems(MACHINE, inArrow).sort(), [
@@ -919,6 +935,8 @@ test('claim refuses in the declared order, one failure peeled at a time, on a re
     const strong = store.register(board, { lane: 'web', path: '/repo-web-strong' });
     const claimAs = (id, agentId, lane, freezer = retiredFreeze) => outcome(() => store.claim(board, id, { agentId, lane, leaseMs: 7_200_000, freeze: freezer }));
     const done = submittedItem(board);
+    const returned = submittedItem(board);
+    store.verify(board, returned, { agentId: 'web-2', decision: 'REJECT', reason: 'TEST_FAILURE', head: SHA_A, digest: 'digest:Page', policy: 'any', note: 'the check fails', reopenFirstRefusalMinutes: 30 });
     const dependency = store.addItem(board, { by: 'coordinator', lane: 'web', title: 'Page' });
     const target = store.addItem(board, { by: 'coordinator', lane: 'web', title: 'Page', after: [dependency] });
     const spare = store.addItem(board, { by: 'coordinator', lane: 'web', title: 'Page' });
@@ -933,7 +951,7 @@ test('claim refuses in the declared order, one failure peeled at a time, on a re
     store.releaseItemHold(board, target, { agentId: 'coordinator' });
     fired.push(claimAs(target, light, 'api'), claimAs(target, light, 'web'), claimAs(target, strong, 'web'));
     verdictOn(board, dependency, 'web-2', 'ACCEPT');
-    fired.push(claimAs(target, strong, 'web'));
+    fired.push(claimAs(target, strong, 'web'), claimAs(returned, strong, 'web'));
     store.editItem(board, target, { agentId: 'coordinator', criterion: 'Pending correction before the lane guard.' });
     store.release(board, target, 'web-2');
     fired.push(claimAs(target, strong, 'web'));
@@ -945,7 +963,7 @@ test('claim refuses in the declared order, one failure peeled at a time, on a re
     store.release(board, spare, strong);
     fired.push(claimAs(target, strong, 'web'), claimAs(target, strong, 'web', freeze));
     assert.deepEqual(fired, [...declaredBoardOrder('claim'), 'ok']);
-    assert.deepEqual(fired, ['NO_ITEM', 'NOT_CLAIMABLE', 'ITEM_HELD', 'WRONG_LANE', 'ROUTE', 'BLOCKED', 'HELD', 'PENDING_REFREEZE', 'LANE_HELD', 'ONE_CLAIM', 'UNKNOWN_SPEC', 'ok']);
+    assert.deepEqual(fired, ['NO_ITEM', 'NOT_CLAIMABLE', 'ITEM_HELD', 'WRONG_LANE', 'ROUTE', 'BLOCKED', 'HELD', 'REOPEN_HELD_FOR_BUILDER', 'PENDING_REFREEZE', 'LANE_HELD', 'ONE_CLAIM', 'UNKNOWN_SPEC', 'ok']);
   } finally {
     lab.done();
   }
