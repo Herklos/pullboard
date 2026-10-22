@@ -19,6 +19,9 @@ Pullboard now turns a failure that keeps coming back into a rule with its proof.
 - A recurring job declares its cadence with `pullboard loop declare`, and a missed run shows in health. (#815)
 - Optional two-tier landing: accepted work lands on your local trunk in seconds, and `pullboard publish` pushes only a head the whole suite passed (`landing.publish` set to `separate`; off by default). (#801)
 - A reopened item can wait for its own builder first, for a time you set (`claim.reopenFirstRefusalMinutes`; off by default). (#954)
+- A spec row an agent marks approved by hand shows as agent-approved, with the agent and commit, until you confirm or decline it. A setting, `spec.agentApproval`, chooses flag (the default), allow or refuse. (#960)
+- `GET /api/v1/settings` reports every setting, its scope, its value and where it comes from, read-only; secrets show only as set or not set. (#968)
+- `pullboard publish` records each full-suite run, so a flaky test it sees is filed like any other. (#975)
 
 ### Safer by default
 
@@ -33,6 +36,8 @@ Pullboard now turns a failure that keeps coming back into a rule with its proof.
 - A linked board opens in Safari and other WebKit browsers. (#976)
 - A move still succeeds while the relay is down: it waits in an ordered outbox and is sent when the relay is back. A slow or lost relay reply never fails a local move. (#922, #919)
 - The hosted page shows a screen right away on iPhone Safari, names the real reason a signed-in browser sees no board with the one step that fixes it, and never flashes another screen first. (#897, #899, #900, #901, #904, #932)
+- In Safari, app.pullboard.dev now finds the board running on your computer. (#977)
+- pullboard.dev now mentions a board that is waiting for approval on your phone. (#985)
 
 ### Fixed
 
@@ -40,6 +45,8 @@ Pullboard now turns a failure that keeps coming back into a rule with its proof.
 - `pullboard next` never tells a seat it holds another seat's claim, and the MCP `board_status` tool answers on a board with held items. (#958, #974)
 - A hung network mount no longer stalls Pullboard. (#912)
 - The tour leaves no demo project behind, links nothing to the relay, and finishes when an agent runs it. (#951, #952)
+- `pullboard land` works in a repo with no remote, and `pullboard status` no longer opens with a refusal there. (#963)
+- `pullboard init` now prints a short summary and one next step; the details are behind `--verbose`. (#964)
 
 ### Upgrade note
 
