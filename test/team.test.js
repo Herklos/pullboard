@@ -603,6 +603,28 @@ test('the board knows its people: events name them, approvers decide [E3,E4,E20]
   assert.equal((await box.cli('status')).code, 0, 'alice’s board still reads');
 });
 
+test('the board knows its people: a phone move names the phone’s person, refused or not [E3,E4]', { timeout: 180_000 }, async (t) => { // budget: hang ceiling for real CLI runs and relay calls; not a speed target.
+  const box = await teamBoard(t, ['alice']);
+  const bob = await personSession(box, 'bob');
+  // Bob's phone adds an item; alice's computer carries it out, so the move is sent with alice's credential.
+  const title = 'An item from bob’s phone';
+  const added = await phoneRequest(box, bob, { verb: 'add', args: { lane: box.lane, title } });
+  const asked = await box.cli('shout', 'person', 'Plain text or JSON?', '--decision');
+  assert.equal(asked.code, 0);
+  const decision = asked.document.id ?? asked.document.shout_id ?? asked.document.result?.id;
+  const denied = await phoneRequest(box, bob, { verb: 'answer', item: Number(decision), args: { text: 'JSON' } });
+  const requests = await receivedRequests(box);
+  assert.equal(requests[added].status, 'done', 'bob’s phone adds the item');
+  assert.equal(requests[denied].error?.code, 'NOT_APPROVER', 'bob’s phone cannot answer as the person');
+  const tables = (await box.cli('export')).document.tables;
+  const id = tables.item.find((item) => item.item_title === title)?.item_id;
+  const add = tables.event.find((event) => event.event_kind === 'add' && event.item_id === id);
+  const refused = tables.event.find((event) => event.event_kind === 'relay_refused' && JSON.parse(event.event_detail).sequence === requests[denied].sequence);
+  assert.ok(add && refused, 'both are on the record');
+  assert.equal(JSON.parse(add.event_detail).person, 'bob', 'the add names bob, whose phone asked for it, not alice, whose computer carried it out');
+  assert.equal(JSON.parse(refused.event_detail).person, 'bob', 'the refused answer still names bob, who tried it');
+});
+
 test('a board that names no approvers takes person moves as before [E4]', { timeout: 120_000 }, async (t) => { // budget: hang ceiling for real CLI runs and relay calls; not a speed target.
   const box = await teamBoard(t, null);
   const link = JSON.parse(readFileSync(box.linkFile, 'utf8'));

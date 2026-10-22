@@ -6,6 +6,7 @@ import { Refused } from './refused.js';
 import { parseImplies } from './implies.js';
 import { validatePersonRequest } from './person-request.js';
 import { relayMoveActor } from './relay-sender.js';
+import { PEOPLE_ENGINE } from './people-engine.js';
 
 const INDEX = 'relay_person_requests';
 
@@ -18,6 +19,30 @@ export function requestIntentDigest(record) {
 export function personRequestRecords(board) {
   const row = board.db.prepare('SELECT meta_value FROM board_meta WHERE meta_key=?').get(INDEX);
   return row ? JSON.parse(row.meta_value) : [];
+}
+
+/**
+ * The GitHub login the relay stamped on a record from engine 71 on, or null: the person who made or tried it [E3].
+ *
+ * @param {any} sender
+ * @returns {string | null}
+ */
+export function relayPerson(sender) {
+  return typeof sender?.login === 'string' && sender.engine >= PEOPLE_ENGINE ? sender.login : null;
+}
+
+/**
+ * The person whose phone asked for this move, when the move carries out a recorded phone request, or null. The
+ * computer that carries the request out sends the move, but the move is the phone person's [E3].
+ *
+ * @param {any} board
+ * @param {any} move
+ * @returns {string | null}
+ */
+export function requestPerson(board, move) {
+  if (!move?.personRequest || requestMoveProblem(board, move, { checkExecutorLease: false })) return null;
+  const record = personRequestRecords(board).find((entry) => entry.id === move.personRequest.id && !entry.duplicateOf);
+  try { return relayPerson(JSON.parse(record.received).sender); } catch { return null; }
 }
 
 /** Persist request receipts inside the caller's existing board transaction. */
@@ -64,7 +89,7 @@ export function receivePersonRequest(board, document, { sequence, at, sender }) 
       if (error) {
         const clock = board.clock;
         board.clock = { now: () => new Date(at) };
-        try { store.recordRelayRefusal(board, { by: sender?.kind === 'agent' ? sender.agent : 'person', sequence, kind: 'request', operation: document?.operation ?? null, actor: relayMoveActor(document), code: error.code }); }
+        try { store.recordRelayRefusal(board, { by: sender?.kind === 'agent' ? sender.agent : 'person', sequence, kind: 'request', operation: document?.operation ?? null, actor: relayMoveActor(document), code: error.code, person: relayPerson(sender) }); }
         finally { board.clock = clock; }
       }
     }

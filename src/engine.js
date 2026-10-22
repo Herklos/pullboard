@@ -45,6 +45,8 @@ import { firstRefusal } from './claims.js';
 import {
   requestMoveProblem,
   recordRequestMove,
+  relayPerson,
+  requestPerson,
 } from './relay-requests.js';
 import {
   relayMoveActor,
@@ -265,7 +267,7 @@ export function refuseRelayMove(board, move, { sequence, at, sender, kind, code,
     board.clock = { now: () => new Date(at) };
     try {
       store.recordRelayRefusal(board, { by: normalizedBy, sequence, kind, operation: typeof move?.operation === 'string' ? move.operation : null,
-        actor: typeof relayMoveActor(move) === 'string' ? relayMoveActor(move) : null, code, itemId });
+        actor: typeof relayMoveActor(move) === 'string' ? relayMoveActor(move) : null, code, itemId, person: requestPerson(board, move) ?? relayPerson(sender) });
     } finally { board.clock = clock; }
     metadata(board, key, JSON.stringify({ record, outcome }));
     metadata(board, 'relay_applied_sequence', String(sequence));
@@ -316,8 +318,10 @@ export function applyRelayMove(board, move, { sequence, at, sender, kind, digest
     // The person is above every seat; their own moves act with the coordinator's standing.
     const standing = move?.engine >= VERIFIER_STANDING_ENGINE ? { root: sender?.root === true || sender?.kind === 'person',
       person: sender?.kind === 'person', lineage: sender?.root === true && typeof sender.lineage === 'string' ? sender.lineage : null } : null;
-    // The relay-authenticated GitHub login names the person behind the move, whoever sent it [E3].
-    return applyEngineMove(board, move, { sequence, at, standing, enrollment: registration?.target ?? null, person: typeof sender?.login === 'string' ? sender.login : null });
+    // The relay-authenticated GitHub login names the person behind the move, whoever sent it; a move that carries out
+    // a phone request is the phone person's, though their computer sent it [E3].
+    return applyEngineMove(board, move, { sequence, at, standing, enrollment: registration?.target ?? null,
+      person: requestPerson(board, move) ?? (typeof sender?.login === 'string' ? sender.login : null) });
   }
   return refuseRelayMove(board, move, { sequence, at, sender, kind, code: problem.code, digest, refusal: problem });
 }
