@@ -518,6 +518,12 @@ All routes retain current authorization and credential-derived sender checks.
 An API1 request for a paged head fails explicitly with `RELAY_API_VERSION` and
 upgrade guidance; it never returns an older or partial image.
 
+## Sessions without the key file
+
+Every session on a paired machine reads the board: a terminal, SSH, an agent, a scheduled job or CI. `relay on` keeps the board key only in the owner-only file `relay-keys/<board>.key` under the pullboard home, even where a keychain exists. A session that cannot read that file still reads the local board with every read command, `resume` included: resume reports once that the key is not reachable and leaves its own bookkeeping moves to a session that holds it. A move in such a session is refused with `RELAY_KEY_MISSING` and nothing is sent.
+
+A CI or cloud session that cannot pair sets `PULLBOARD_RELAY_TOKEN` to one agent token, `PULLBOARD_RELAY_KEY` to the board key and, for a relay other than app.pullboard.dev, `PULLBOARD_RELAY_URL`. In a clone with no relay link, its first command asks the relay for the token's one board, reads that board's sealed snapshot with the key and writes the local board, plus a `relay.json` marked `environment` that names the token's agent and holds neither the token nor the key. Every later command reads and moves as that agent, on that one board; a token for any other board is refused (`TOKEN_BOARD`). A clone already linked to another board keeps its `relay.json`: the environment never overwrites it, reads, `relay status` among them, go on with a `RELAY_LINKED` notice, and moves are refused. A session with both `PULLBOARD_RELAY_TOKEN` and `PULLBOARD_RELAY_KEY` uses that key as given when no key file exists: it never reads a keychain for it or writes a key file.
+
 ## Sealed person requests
 
 The authenticated relay page calls `cockpitPage` with `readOnly: true` and the separate `requests: true` capability. This enables only the person's literal intents through the sealing transport; generic API writes remain refused. Local read-only pages and exported snapshots omit this capability and refuse every action.
