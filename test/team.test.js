@@ -526,3 +526,22 @@ test('one coordinator per board across machines [E19]', { timeout: relayWorkBudg
         'Planned on the second machine after takeover', 'Still planned on the first machine']);
   }
 });
+
+test('an agent session on a computer that does not hold the coordinator takes it over [E19]', { timeout: relayWorkBudgetMs(12) }, async t => { // budget: hang ceiling for two linked devices' real CLI and relay round trips; not a speed target.
+  const box = await relayClientFixture(t);
+  await box.link();
+  const pairing = await box.cli('relay', 'pair');
+  const other = await box.otherDeviceJoin(pairing.document.code);
+  /** Run the second computer's real CLI from a named agent session. */
+  const inSession = (...args) => relayFixtureChild(other.root, { ...other.env, CLAUDECODE: '1', CLAUDE_CODE_SESSION_ID: 'second-computer-session' },
+    [resolve(import.meta.dirname, '../bin/pullboard.js'), ...args, '--json']);
+  assert.equal((await box.cli('add', box.lane, 'Planned on the holding computer')).code, 0, 'the first computer holds the coordinator');
+  const held = await inSession('add', box.lane, 'Planned before the takeover');
+  assert.equal(held.document?.error?.code, 'COORDINATOR_HELD', 'the second computer is refused by name');
+  assert.match(held.document.error.message, /pullboard takeover/u, 'the refusal names the takeover');
+  const taken = await inSession('takeover');
+  assert.equal(taken.code, 0, `the takeover the refusal names succeeds from the agent session: ${JSON.stringify(taken.document)}`);
+  assert.equal(taken.document.coordinator, `computer ${other.machine.slice(-8)}`, 'the second computer now holds the coordinator');
+  assert.equal((await inSession('add', box.lane, 'Planned after the takeover')).code, 0, 'the new holder coordinates');
+  assert.equal((await box.cli('add', box.lane, 'Planned again on the first computer')).document?.error?.code, 'COORDINATOR_HELD', 'the earlier holder is refused');
+});
