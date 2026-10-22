@@ -3,11 +3,12 @@
  *
  * On a linked board every main checkout's coordinator moves reach the relay under its own root coordinator
  * credential, and each move names the checkout's relay machine id. The board records which checkout holds the
- * coordinator: the first coordinator move at this engine takes it, so a board coordinated from one checkout works
- * as before, including after another person signs in there. A coordinator move from any other checkout is
- * refused, naming the holder, until that checkout runs pullboard takeover. A move that names no machine id is
- * told apart by its relay-authenticated credential lineage instead. An unlinked board's main checkout is already
- * held by one session through its checkout binding, so nothing here applies to it (#347).
+ * coordinator by both: a move from the holding checkout matches its machine id, or its relay-authenticated
+ * credential lineage when the move names no machine. The first coordinator move at this engine takes the hold, so
+ * a board coordinated from one checkout works as before, including after another person signs in there and the
+ * relay gives that checkout a new lineage. A coordinator move from any other checkout is refused, naming the
+ * holder, until that checkout runs pullboard takeover. An unlinked board's main checkout is already held by one
+ * session through its checkout binding, so nothing here applies to it (#347).
  */
 import {
   atomic,
@@ -36,9 +37,9 @@ export function computerLabel(machine) {
   return typeof machine === 'string' && MACHINE.test(machine) ? `computer ${machine.slice(-8)}` : 'another main checkout';
 }
 
-/** The identity a hold compares: the checkout's machine id when the move names one, else the credential lineage. */
-function holdKey(machine, lineage) {
-  return typeof machine === 'string' && MACHINE.test(machine) ? `machine:${machine}` : `lineage:${lineage}`;
+/** A move's machine id when it names a valid one. */
+function machineOf(machine) {
+  return typeof machine === 'string' && MACHINE.test(machine) ? machine : null;
 }
 
 /**
@@ -57,23 +58,23 @@ export function stampCoordinatorHolder(move, machine) {
  * The checkout that holds this board's coordinator, or null before any linked coordinator move at this engine.
  *
  * @param {any} board
- * @returns {{ key: string, label: string, at: string } | null}
+ * @returns {{ machine: string | null, lineage: string, label: string, at: string } | null}
  */
 export function coordinatorHolder(board) {
   const row = board.db.prepare('SELECT meta_value FROM board_meta WHERE meta_key = ?').get(HOLDER_KEY);
   if (!row) return null;
   try {
     const value = JSON.parse(row.meta_value);
-    return typeof value?.key === 'string' ? { key: value.key, label: String(value.label ?? 'another main checkout'), at: String(value.at ?? '') } : null;
+    return typeof value?.lineage === 'string'
+      ? { machine: machineOf(value.machine), lineage: value.lineage, label: computerLabel(value.machine), at: String(value.at ?? '') } : null;
   } catch { return null; }
 }
 
 /** Record a holder in the caller's transaction and return its name. */
 function saveHolder(board, machine, lineage, at) {
-  const label = computerLabel(machine);
   board.db.prepare('INSERT INTO board_meta (meta_key, meta_value) VALUES (?, ?) ON CONFLICT(meta_key) DO UPDATE SET meta_value = excluded.meta_value')
-    .run(HOLDER_KEY, JSON.stringify({ key: holdKey(machine, lineage), label, at }));
-  return label;
+    .run(HOLDER_KEY, JSON.stringify({ machine: machineOf(machine), lineage, at }));
+  return computerLabel(machine);
 }
 
 /**
@@ -89,7 +90,10 @@ export function requireCoordinatorHold(board, move, lineage, at) {
   if (!lineage || !(move.engine >= COORDINATOR_HOLD_ENGINE) || UNHELD_OPERATIONS.has(move.operation)) return;
   const holder = coordinatorHolder(board);
   if (!holder) { saveHolder(board, move.holder, lineage, at); return; }
-  if (holder.key === holdKey(move.holder, lineage)) return;
+  const machine = machineOf(move.holder);
+  if (holder.lineage === lineage && (!machine || !holder.machine || machine === holder.machine)) return;
+  // The holding checkout signed in again, so its credential lineage changed: the hold follows the checkout.
+  if (machine && machine === holder.machine) { saveHolder(board, machine, lineage, holder.at); return; }
   throw new Refused('COORDINATOR_HELD',
     `this board's coordinator is held by ${holder.label}, so this main checkout cannot act as coordinator; to coordinate from here, run pullboard takeover in this main checkout`);
 }
