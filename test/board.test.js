@@ -1293,6 +1293,15 @@ test('[O3] declared families travel from join through submit and verdict, and ab
   const file = join(repo, '.git', 'pullboard', 'board.sqlite');
   const persistent = store.openBoard(file);
   t.after(() => store.closeBoard(persistent));
+  const initialEvents = store.events(persistent);
+  const coordinatorJoin = initialEvents.find(event => event.event_kind === 'join' && event.event_by === 'coordinator');
+  const baselineEvents = initialEvents.filter(event => event.event_kind === 'spec_approval_baseline');
+  const builderJoin = initialEvents.find(event => event.event_kind === 'join' && event.event_by === 'web-1');
+  assert.equal(baselineEvents.length, 1, 'first worktree setup records the compatibility baseline exactly once');
+  assert.ok(coordinatorJoin.event_id < baselineEvents[0].event_id && baselineEvents[0].event_id < builderJoin.event_id,
+    'a cold local main establishes its coordinator and existing approvals before registering the worktree');
+  assert.deepEqual(store.specApprovalBaseline(persistent).rows.map(row => row.id), ['G1'],
+    'later lane joins retain the original approved source row');
   assert.equal(store.agentAt(persistent, builderPath).agent_family, 'Family Alpha');
   assert.equal(store.agentAt(persistent, reviewerRoot).agent_family, 'Family Beta');
   assert.equal(store.agentAt(persistent, noFamilyRoot).agent_family, null);
