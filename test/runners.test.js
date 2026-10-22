@@ -13,7 +13,8 @@ import { parseProcessCensus } from '../src/process-census.js';
 import { listResources as listPreRunnerResources, takeResource as takePreRunnerResource } from './fixtures/resources-pre-runners.js';
 import { cleanupFixtureChildren, runFixtureChild, runFixtureChildAsync, startFixtureChild } from './fixture-child.js';
 import { readRemoteGateHolders, waitForCondition } from './runner-fixture-state.js';
-import { assertAttemptDeadlineReset, runPairedRerun, startRunnerCpuStandIn } from './runner-paired-rerun-fixture.js';
+import { assertAttemptDeadlineReset, assertRedispatchDeadlineAccounting, runPairedRerun, startRunnerCpuStandIn } from './runner-paired-rerun-fixture.js';
+import { assertFixtureGroupEpermControls, stopGroup } from './runner-process-group.js';
 import { parentDeathDrainFixture } from './runner-parent-death-fixture.js';
 import { createE2eHelpers } from './e2e-helpers.js';
 import { refuseSandboxBlocked } from '../src/gate.js';
@@ -226,15 +227,6 @@ function phaseCounts(file) {
   return { dispatched: lines.filter(line => line === 'dispatched').length, returned: lines.filter(line => line === 'returned').length };
 }
 
-/** Stop a detached fixture child's whole process group, escalating if TERM is ignored. */
-async function stopGroup(child, closed) {
-  const signal = name => { try { process.kill(-child.pid, name); } catch (error) { if (error.code !== 'ESRCH') throw error; } };
-  signal('SIGTERM');
-  const settled = await Promise.race([closed.then(() => true), new Promise(resolve => setTimeout(() => resolve(false), 5_000))]); // budget: TERM grace before KILL.
-  signal('SIGKILL');
-  if (!settled) await closed;
-}
-
 /**
  * Wait for a runner round trip phase by phase: dispatch (until the stand-in is reached), remote run
  * (until the worker returns) and result return (until the controller exits). A phase past its
@@ -243,7 +235,7 @@ async function stopGroup(child, closed) {
  * passes the marker counts it read before spawning the child: a fast child can dispatch before this
  * function first runs, and a baseline read here would swallow that dispatch.
  */
-async function awaitRoundTrip(child, closed, phasesFile, before, deadlines = ROUND_TRIP_DEADLINES) {
+async function awaitRoundTrip(child, closed, phasesFile, before, deadlines = ROUND_TRIP_DEADLINES, firstReceiptAccepted = null) {
   const limits = { ...ROUND_TRIP_DEADLINES, ...deadlines };
   let done = null;
   closed.then(result => { done = result; });
@@ -256,7 +248,10 @@ async function awaitRoundTrip(child, closed, phasesFile, before, deadlines = ROU
   while (!done) {
     const total = phasesFile ? phaseCounts(phasesFile) : { dispatched: 0, returned: 0 };
     const counts = phasesFile ? { dispatched: total.dispatched - before.dispatched, returned: total.returned - before.returned } : total;
-    const next = counts.dispatched > counts.returned ? 'remote run' : counts.dispatched > 0 ? 'result return' : 'dispatch';
+    // The observer saves the accepted first receipt before preparing its paired dispatch. That real
+    // controller-side witness ends result delivery; a worker's "returned" marker alone cannot do so.
+    const redispatch = counts.dispatched === 1 && counts.returned === 1 && firstReceiptAccepted?.();
+    const next = redispatch ? 'dispatch' : counts.dispatched > counts.returned ? 'remote run' : counts.dispatched > 0 ? 'result return' : 'dispatch';
     // A returned attempt and its paired dispatch can arrive in one poll without changing the phase's name.
     // Each real marker advance starts a fresh clock, while a phase with no new marker remains bounded.
     if (next !== phase || counts.dispatched > observed.dispatched || counts.returned > observed.returned) {
@@ -1936,6 +1931,8 @@ test('a red on a registered runner gets its paired rerun and ledger entry, or st
 test('the runner round trip deadline holds under a loaded test machine and still catches a stuck phase [C7]',
   { timeout: 660_000 }, async t => { // budget: five real paired attempts plus a bounded held phase, below the file hang ceiling.
     await assertAttemptDeadlineReset(PAIRED_RERUN_FIXTURE);
+    await assertRedispatchDeadlineAccounting(PAIRED_RERUN_FIXTURE);
+    assertFixtureGroupEpermControls();
     const busy = await startRunnerCpuStandIn();
     t.after(busy.stop);
     assert.equal(busy.count, Math.max(1, Math.floor(busy.cores / 2)), 'the fixture owns one busy child for each half-core slot');

@@ -46,13 +46,18 @@ test('remote flaky case', () => { const n = existsSync(${JSON.stringify(runs)}) 
     agent: 'flake-local-holder', item: 'flake-local-holder', kind: 'force-registered-runner' });
   try {
     const requests = join(box.dir, 'requests.jsonl');
+    const evidence = join(repo, '.git', 'pullboard', 'flake-evidence');
+    // Native diagnostics writes this only after the controller has validated and consumed the
+    // first result, before preparing the required pair. A held SSH result never creates it.
+    const firstReceiptAccepted = mode === 'no-load' ? null : () => existsSync(evidence)
+      && readdirSync(evidence).some(id => existsSync(join(evidence, id, 'original.log')));
     const before = { dispatched: 0, returned: 0 };
     const cpuStartedAt = Date.now();
     const run = observe(startToolingCli(repo, env, ['gate', '--json'], { detached: true }));
     if (hold) {
       const startedAt = Date.now();
       let failure;
-      try { await awaitRoundTrip(run.child, run.closed, requests + '.phases', before); }
+      try { await awaitRoundTrip(run.child, run.closed, requests + '.phases', before, ROUND_TRIP_DEADLINES, firstReceiptAccepted); }
       catch (error) { failure = error; }
       assert.ok(failure, 'a runner that withholds the result stays a named deadline failure');
       assert.match(failure.message, /runner round trip stuck in phase "result return"/u,
@@ -74,13 +79,12 @@ test('remote flaky case', () => { const n = existsSync(${JSON.stringify(runs)}) 
       assert.deepEqual(processesUnder(box.dir), [], 'nothing from the held result-return phase keeps running');
       return { held: true };
     }
-    const finished = await awaitRoundTrip(run.child, run.closed, requests + '.phases', before);
+    const finished = await awaitRoundTrip(run.child, run.closed, requests + '.phases', before, ROUND_TRIP_DEADLINES, firstReceiptAccepted);
     if (cpuLoad) await cpuLoad.assertProgress(cpuStartedAt, Date.now());
     assert.equal(finished.status, 1, 'the original red stays the gate result');
     const pairedCalls = mode === 'no-load' ? 1 : 2;
     assert.deepEqual(phaseCounts(requests + '.phases'), { dispatched: pairedCalls, returned: pairedCalls },
       'the red check and required paired rerun each complete their runner round trip');
-    const evidence = join(repo, '.git', 'pullboard', 'flake-evidence');
     const [observation] = readdirSync(evidence).map(id => JSON.parse(readFileSync(join(evidence, id, 'observation.json'), 'utf8')));
     assert.equal(observation.main, box.git(repo, 'rev-parse', 'HEAD'), 'the pinned main is recorded');
     if (mode === 'remote-load') {
@@ -124,6 +128,36 @@ setTimeout(() => {
     assert.equal(result.status, 0, result.context);
     assert.deepEqual(phaseCounts(phases), { dispatched: 2, returned: 2 });
     assert.deepEqual(processesUnder(root), [], 'the two-attempt control is fully drained');
+  } finally {
+    if (run.child.pid && run.child.exitCode === null && run.child.signalCode === null) await stopGroup(run.child, run);
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+/** A consumed first receipt starts the next dispatch clock, while an undelivered receipt never does. */
+export async function assertRedispatchDeadlineAccounting({ phaseCounts, awaitRoundTrip, stopGroup }) {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'pullboard-redispatch-')));
+  const phases = join(root, 'phases');
+  const accepted = join(root, 'accepted-receipt');
+  const before = phaseCounts(phases);
+  const script = `const { appendFileSync, writeFileSync } = require('node:fs');
+const phases = ${JSON.stringify(phases)};
+appendFileSync(phases, 'dispatched\\n');
+setTimeout(() => {
+  appendFileSync(phases, 'returned\\n');
+  writeFileSync(${JSON.stringify(accepted)}, 'controller accepted first receipt');
+  setTimeout(() => {
+    appendFileSync(phases, 'dispatched\\n');
+    setTimeout(() => appendFileSync(phases, 'returned\\n'), 100);
+  }, 900);
+}, 100);`;
+  const run = runFixtureChildAsync(process.execPath, ['-e', script], { cwd: root, detached: true });
+  try {
+    const result = await awaitRoundTrip(run.child, run, phases, before,
+      { dispatch: 1_500, 'remote run': 1_500, 'result return': 400 },
+      () => existsSync(accepted));
+    assert.equal(result.status, 0, result.context);
+    assert.deepEqual(phaseCounts(phases), { dispatched: 2, returned: 2 });
   } finally {
     if (run.child.pid && run.child.exitCode === null && run.child.signalCode === null) await stopGroup(run.child, run);
     rmSync(root, { recursive: true, force: true });
