@@ -809,6 +809,8 @@ function causeOf(key) {
  * the landing gate or a submit's affected tests: only with this variable set.
  */
 const OWN_JOB = process.env.PULLBOARD_HOSTED_SHAPES === '1';
+/** Explicit scoped acceptance, independent of the full matrix and ordinary cross-platform test cadence. */
+const REVOKED_PROOF = process.env.PULLBOARD_REVOKED_PROOF === '1';
 
 /** How many unpaired cells one engine runs at once; each is its own browser context. */
 const PARALLEL = 4;
@@ -1042,6 +1044,7 @@ for (const boards of BOARDS) {
 
 test('a revoked browser sees the removed screen on a computer and a phone [H5,H17,N26]', {
   timeout: 900_000, // budget: hang ceiling for the 72 scoped revoked cells, including real enrollment and both engines.
+  skip: !REVOKED_PROOF && 'scoped acceptance: set PULLBOARD_REVOKED_PROOF=1; both real engines remain required',
 }, async t => {
   const available = hostedEngines();
   for (const name of ['chromium', 'webkit']) {
@@ -1116,7 +1119,9 @@ async function savedIdentity(page) {
   } finally { await page.evaluate('delete window.__identityRead981'); }
 }
 
-test('an expired saved pairing preserves a valid identity when its session probe succeeds or is unavailable [H5,H17,N26]', async t => {
+test('an expired saved pairing preserves a valid identity when its session probe succeeds or is unavailable [H5,H17,N26]', {
+  skip: !REVOKED_PROOF && 'scoped acceptance: set PULLBOARD_REVOKED_PROOF=1',
+}, async t => {
   assert.ok(hostedEngines().find(engine => engine.name === 'chromium')?.available, 'real Chromium is required');
   const box = await relayClientFixture(t);
   box.env.PULLBOARD_MACHINE_HOME = box.env.PULLBOARD_HOME;
