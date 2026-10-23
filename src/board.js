@@ -21,7 +21,9 @@ import {
   existsSync,
   mkdirSync,
 } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, join } from 'node:path';
+import { codeIsFromMain } from './git.js';
+import { isRepositoryBoard, declaredBoardSchema, sharedSchemaDiagnostic, reportSharedSchema } from './board-schema.js';
 import { DatabaseSync } from 'node:sqlite';
 import { boardNotWritable } from './board-access.js';
 import {
@@ -276,10 +278,11 @@ export function openBoardReadOnly(file) {
  *
  * @param {string} file
  * @param {{ now: () => Date }} [clock]
- * @param {{ isMain?: boolean }} [options] Only the main checkout may upgrade a shared board.
+ * @param {{ isMain?: boolean, onDiagnostic?: (message: string) => void }} [options] Only the main checkout may upgrade a shared board.
  * @returns {{ db: DatabaseSync, clock: { now: () => Date } }}
  */
-export function openBoard(file, clock = systemClock, { isMain } = {}) {
+export function openBoard(file, clock = systemClock, { isMain, onDiagnostic } = {}) {
+  if (isRepositoryBoard(file)) isMain = isMain !== false && codeIsFromMain();
   if (file !== ':memory:' && isMain === false) {
     let boardVersion = 0;
     let logVersion = 0;
@@ -306,24 +309,49 @@ export function openBoard(file, clock = systemClock, { isMain } = {}) {
       }
     }
   }
+  if (file !== ':memory:' && isMain === false && !existsSync(file)) {
+    // A fresh private fixture or single-checkout project has no shared schema to preserve.
+    // A linked repository must have its trunk initialize the common board.
+    if (isRepositoryBoard(file) && existsSync(join(dirname(dirname(file)), 'worktrees'))) {
+      throw new Refused('UNMERGED_SCHEMA', 'the shared board is missing; run pullboard status from the main checkout to initialize it before using this worktree');
+    }
+    isMain = true;
+  }
   if (file !== ':memory:') mkdirSync(dirname(file), { recursive: true });
   const startedAt = Date.now();
   let db;
   try {
     db = new DatabaseSync(file);
     db.exec(`PRAGMA busy_timeout = ${BOARD_BUSY_TIMEOUT_MS}`);
-    if (file !== ':memory:') db.exec('PRAGMA journal_mode = WAL');
-    migrateEventLogVersion(db);
-    migrate(db);
-    db.prepare('INSERT OR IGNORE INTO board_meta (meta_key, meta_value) VALUES (?, ?)').run('board_id', randomBytes(16).toString('hex'));
+    if (file !== ':memory:' && isMain !== false) db.exec('PRAGMA journal_mode = WAL');
     const board = { db, clock };
-    guardStore(board);
+    if (isMain !== false || file === ':memory:') {
+      migrateEventLogVersion(db);
+      migrate(db);
+      db.prepare('INSERT OR IGNORE INTO board_meta (meta_key, meta_value) VALUES (?, ?)').run('board_id', randomBytes(16).toString('hex'));
+      guardStore(board);
+    } else {
+      // Read compatibility before any local effect; persistent schema belongs to trunk alone.
+      readEventLogVersion(db);
+      reportSharedSchema(file, sharedSchemaDiagnostic(db, expectedBoardSchema()), onDiagnostic);
+    }
     guardMoves(board);
     return board;
   } catch (error) {
     try { db?.close(); } catch {}
     throw boardNotWritable(file, boardBusyError(file, startedAt, error));
   }
+}
+
+let expectedSchema;
+
+/** Cache this source's complete declaration using a private in-memory database, without touching trunk. */
+function expectedBoardSchema() {
+  return expectedSchema ??= declaredBoardSchema(db => {
+    db.exec(SCHEMA);
+    migrate(db);
+    for (const { sql } of storeTriggers()) db.exec(sql);
+  });
 }
 
 /**
