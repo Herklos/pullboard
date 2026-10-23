@@ -1,7 +1,15 @@
 /** Compare a worktree's declaration with shared trunk schema without changing it [A5,A6,C7]. */
 import { DatabaseSync } from 'node:sqlite';
-import { existsSync, realpathSync } from 'node:fs';
-import { basename, dirname, join, resolve } from 'node:path';
+import {
+  existsSync,
+  realpathSync,
+} from 'node:fs';
+import {
+  basename,
+  dirname,
+  join,
+  resolve,
+} from 'node:path';
 import { codeIsFromMain } from './git.js';
 import { Refused } from './refused.js';
 

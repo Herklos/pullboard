@@ -22,9 +22,13 @@ import {
   mkdirSync,
 } from 'node:fs';
 import { dirname } from 'node:path';
-import { sharedSchemaOwner, expectedBoardSchema, sharedSchemaDiagnostic, reportSharedSchema } from './board-schema.js';
+import { sharedSchemaOwner } from './board-schema.js';
+import { expectedBoardSchema } from './board-schema.js';
+import { sharedSchemaDiagnostic } from './board-schema.js';
+import { reportSharedSchema } from './board-schema.js';
 import { DatabaseSync } from 'node:sqlite';
-import { boardNotWritable, boardBusyError } from './board-access.js';
+import { boardNotWritable } from './board-access.js';
+import { boardBusyError } from './board-access.js';
 export { boardBusyError } from './board-access.js';
 import {
   briefFiles,
