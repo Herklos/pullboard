@@ -552,7 +552,7 @@ test('[A5, A6] a future-schema worktree cannot migrate the shared board; main ca
   const guardedSource = join(unguarded, 'src/board.js');
   const guardedText = readFileSync(guardedSource, 'utf8');
   const unguardedText = guardedText.replace(
-    "  if (isRepositoryBoard(file)) isMain = isMain !== false && codeIsFromMain();",
+    "  isMain = sharedSchemaOwner(file, isMain);",
     '  isMain = true;',
   );
   assert.notEqual(unguardedText, guardedText, 'the mutation removes only the unmerged-schema guard');

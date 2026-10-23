@@ -2,6 +2,8 @@
 import { DatabaseSync } from 'node:sqlite';
 import { existsSync, realpathSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
+import { codeIsFromMain } from './git.js';
+import { Refused } from './refused.js';
 
 const reported = new Set();
 
@@ -60,4 +62,33 @@ export function reportSharedSchema(file, diagnostic, onDiagnostic) {
   else if (!reported.has(key)) process.stderr.write(`pullboard: ${diagnostic}\n`);
   reported.add(key);
   if (reported.size > 128) reported.delete(reported.values().next().value);
+}
+
+
+const declarations = new WeakMap();
+
+/** Resolve schema ownership independently of caller hints, while permitting fresh private fixtures. */
+export function sharedSchemaOwner(file, hint) {
+  let owner = isRepositoryBoard(file) ? hint !== false && codeIsFromMain() : hint;
+  if (file !== ':memory:' && owner === false && !existsSync(file)) {
+    // Linked repositories need trunk to initialize their common board; a fresh private project
+    // has no existing shared schema to replace.
+    if (isRepositoryBoard(file) && existsSync(join(dirname(dirname(file)), 'worktrees'))) {
+      throw new Refused('UNMERGED_SCHEMA', 'the shared board is missing; run pullboard status from the main checkout to initialize it before using this worktree');
+    }
+    owner = true;
+  }
+  return owner;
+}
+
+/** Cache the complete source declaration without running any DDL on the shared connection. */
+export function expectedBoardSchema(schema, migrate, triggers) {
+  if (!declarations.has(migrate)) {
+    declarations.set(migrate, declaredBoardSchema(db => {
+      db.exec(schema);
+      migrate(db);
+      for (const { sql } of triggers()) db.exec(sql);
+    }));
+  }
+  return declarations.get(migrate);
 }

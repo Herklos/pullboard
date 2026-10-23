@@ -21,11 +21,11 @@ import {
   existsSync,
   mkdirSync,
 } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { codeIsFromMain } from './git.js';
-import { isRepositoryBoard, declaredBoardSchema, sharedSchemaDiagnostic, reportSharedSchema } from './board-schema.js';
+import { dirname } from 'node:path';
+import { sharedSchemaOwner, expectedBoardSchema, sharedSchemaDiagnostic, reportSharedSchema } from './board-schema.js';
 import { DatabaseSync } from 'node:sqlite';
-import { boardNotWritable } from './board-access.js';
+import { boardNotWritable, boardBusyError } from './board-access.js';
+export { boardBusyError } from './board-access.js';
 import {
   briefFiles,
   briefSections,
@@ -141,20 +141,6 @@ export const EVENT_LOG_VERSION = 1;
 
 /** Maximum time a board connection waits for another process to release SQLite's lock. */
 export const BOARD_BUSY_TIMEOUT_MS = 10_000;
-
-/**
- * Replace SQLite's bare lock error with the board path and elapsed wait when the wait expires.
- *
- * @param {string} file
- * @param {number} startedAt
- * @param {Error & { errcode?: number }} error
- * @returns {Error}
- */
-export function boardBusyError(file, startedAt, error) {
-  const sqliteCode = Number.isInteger(error.errcode) ? error.errcode & 0xff : null;
-  if (sqliteCode !== 5 && error.code !== 'SQLITE_BUSY' && !/database is locked/iu.test(error.message ?? '')) return error;
-  return new Refused('BOARD_BUSY', `board file ${file} remained held by another process after ${Date.now() - startedAt}ms; wait for it to finish and retry`);
-}
 
 const BRIEF_LIMIT = 8000;
 const REVIEW_RELEASE_COOLDOWN_MS = 60 * 60 * 1000;
@@ -282,7 +268,7 @@ export function openBoardReadOnly(file) {
  * @returns {{ db: DatabaseSync, clock: { now: () => Date } }}
  */
 export function openBoard(file, clock = systemClock, { isMain, onDiagnostic } = {}) {
-  if (isRepositoryBoard(file)) isMain = isMain !== false && codeIsFromMain();
+  isMain = sharedSchemaOwner(file, isMain);
   if (file !== ':memory:' && isMain === false) {
     let boardVersion = 0;
     let logVersion = 0;
@@ -309,14 +295,6 @@ export function openBoard(file, clock = systemClock, { isMain, onDiagnostic } = 
       }
     }
   }
-  if (file !== ':memory:' && isMain === false && !existsSync(file)) {
-    // A fresh private fixture or single-checkout project has no shared schema to preserve.
-    // A linked repository must have its trunk initialize the common board.
-    if (isRepositoryBoard(file) && existsSync(join(dirname(dirname(file)), 'worktrees'))) {
-      throw new Refused('UNMERGED_SCHEMA', 'the shared board is missing; run pullboard status from the main checkout to initialize it before using this worktree');
-    }
-    isMain = true;
-  }
   if (file !== ':memory:') mkdirSync(dirname(file), { recursive: true });
   const startedAt = Date.now();
   let db;
@@ -333,7 +311,7 @@ export function openBoard(file, clock = systemClock, { isMain, onDiagnostic } = 
     } else {
       // Read compatibility before any local effect; persistent schema belongs to trunk alone.
       readEventLogVersion(db);
-      reportSharedSchema(file, sharedSchemaDiagnostic(db, expectedBoardSchema()), onDiagnostic);
+      reportSharedSchema(file, sharedSchemaDiagnostic(db, expectedBoardSchema(SCHEMA, migrate, storeTriggers)), onDiagnostic);
     }
     guardMoves(board);
     return board;
@@ -341,17 +319,6 @@ export function openBoard(file, clock = systemClock, { isMain, onDiagnostic } = 
     try { db?.close(); } catch {}
     throw boardNotWritable(file, boardBusyError(file, startedAt, error));
   }
-}
-
-let expectedSchema;
-
-/** Cache this source's complete declaration using a private in-memory database, without touching trunk. */
-function expectedBoardSchema() {
-  return expectedSchema ??= declaredBoardSchema(db => {
-    db.exec(SCHEMA);
-    migrate(db);
-    for (const { sql } of storeTriggers()) db.exec(sql);
-  });
 }
 
 /**
