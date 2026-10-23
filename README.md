@@ -11,7 +11,7 @@
 
 <p align="center">
   <a href="https://pullboard.dev"><img alt="pullboard: 893 items" src="https://img.shields.io/badge/pullboard-893%20items-2f7d5b?style=flat-square"></a>
-  <a href="https://pullboard.dev"><img alt="verified: 100%" src="https://img.shields.io/badge/verified-100%25-6e7781?style=flat-square"></a>
+  <a href="#how-it-works"><img alt="agent-verified: 100%" src="https://img.shields.io/badge/agent--verified-100%25-6e7781?style=flat-square"></a>
   <a href="https://www.npmjs.com/package/pullboard"><img alt="npm" src="https://img.shields.io/npm/v/pullboard?style=flat-square&color=121a17"></a>
   <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/npm/l/pullboard?style=flat-square&color=6b4fc8"></a>
 </p>
